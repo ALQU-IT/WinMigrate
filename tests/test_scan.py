@@ -145,3 +145,42 @@ def test_missing_profile_root_is_an_error_note_not_a_crash(tmp_path: Path):
 def test_all_items_are_user_files_in_phase_one(profile: Path, env: Environment):
     result = scan(profile, env)
     assert {entry.category for entry in result.items} == {Category.USER_FILES}
+
+
+def test_an_empty_unattributed_sync_folder_produces_no_sign_in_followup(tmp_path: Path):
+    """A leftover OneDrive folder that was never used must not create a chore.
+
+    Seen on a real profile: an empty C:\\Users\\<name>\\OneDrive with no registry
+    account still told the user to go and sign in to OneDrive.
+    """
+    root = tmp_path / "alice"
+    (root / "OneDrive").mkdir(parents=True)
+    (root / "Documents").mkdir()
+    (root / "Documents" / "a.txt").write_bytes(b"x" * 10)
+    env = Environment.fixture(root, {})
+    result = run_scan(ScanConfig(profile_root=root), env)
+
+    assert [r.provider for r in result.sync_roots] == ["onedrive"]
+    assert result.followups == []
+    note = item(result, "sync:onedrive:0").notes[0]
+    assert "nothing to sign in to" in note.message
+
+
+def test_a_sync_folder_with_content_still_produces_a_followup(profile: Path, env: Environment):
+    result = scan(profile, env)
+    assert [f.id.split(":")[1] for f in result.followups] == ["onedrive"]
+
+
+def test_known_folders_config_is_not_defeated_by_the_other_dirs_scan(profile: Path, env: Environment):
+    """Deselecting a known folder must keep it out, not relabel it as 'other'.
+
+    Both passes look at the profile root, so a folder dropped from
+    ``known_folders`` would otherwise be picked straight back up by the
+    second one.
+    """
+    result = scan(profile, env, known_folders=("desktop",))
+    ids = {entry.id for entry in result.items}
+    assert "files:desktop" in ids
+    assert not any(entry.id.startswith("files:documents") for entry in result.items)
+    assert "files:other:documents" not in ids
+    assert "files:other:projects" in ids  # genuinely user-created, still captured

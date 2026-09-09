@@ -27,9 +27,10 @@ from ..models import (
     ScanResult,
     Severity,
     SkipReason,
+    SyncRoot,
     utcnow,
 )
-from ..platform_win import Environment
+from ..platform_win import KNOWN_FOLDERS, Environment
 from ..util import paths as pathutil
 from . import syncroots as syncroots_mod
 from .userfiles import TreeMeasurement, measure_tree
@@ -152,8 +153,11 @@ def _scan_other_profile_dirs(
     People keep real work in ``C:\\Users\\me\\Projects``; a migration that only
     took the known folders would silently leave it behind.
     """
+    # Every known folder, not just the configured subset: a folder deselected
+    # from ``known_folders`` must stay out, rather than reappearing here as an
+    # "other" directory and defeating the setting.
     known_paths = {
-        pathutil.normalize_key(env.known_folder(folder_id)) for folder_id in config.known_folders
+        pathutil.normalize_key(env.known_folder(folder_id)) for folder_id in KNOWN_FOLDERS
     }
     sync_paths = {pathutil.normalize_key(root.root) for root in result.sync_roots}
     try:
@@ -231,6 +235,15 @@ def _item_from_measurement(
 
 
 # --- sync roots ------------------------------------------------------------
+def _is_dormant(root: SyncRoot) -> bool:
+    """True when a detected sync folder holds nothing and names no account.
+
+    A leftover ``C:\\Users\\me\\OneDrive`` from a client that was never used
+    looks identical to an active one until you look inside it.
+    """
+    return root.bytes_skipped == 0 and root.files_skipped == 0 and not root.account_hint
+
+
 def _record_sync_roots(result: ScanResult) -> None:
     """Record each sync root as a reported (not captured) item.
 
@@ -262,7 +275,12 @@ def _record_sync_roots(result: ScanResult) -> None:
                 notes=[
                     Note(
                         Severity.INFO,
-                        f"Not captured: this folder is synced by {root.provider}.",
+                        (
+                            f"Empty, and no {root.provider} account was found: "
+                            "nothing to migrate and nothing to sign in to."
+                            if _is_dormant(root)
+                            else f"Not captured: this folder is synced by {root.provider}."
+                        ),
                         f"Account: {root.account_hint}" if root.account_hint else None,
                     )
                 ],
@@ -272,6 +290,11 @@ def _record_sync_roots(result: ScanResult) -> None:
 
 def _add_sync_followups(result: ScanResult) -> None:
     for root in result.sync_roots:
+        if _is_dormant(root):
+            # An empty folder we cannot tie to an account has nothing to bring
+            # back, so telling the user to sign in would be noise in the one
+            # list that must stay worth reading.
+            continue
         provider = root.provider
         result.followups.append(
             Followup(
