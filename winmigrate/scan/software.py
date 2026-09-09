@@ -436,16 +436,26 @@ class JoinStats:
     listed_rows: int = 0
     rows_with_package: int = 0
     joined_exactly: int = 0
+    joined_by_identity: int = 0
     joined_by_prefix: int = 0
     unjoined_rows_with_package: int = 0
+    #: Framework packages the Appx inventory deliberately filters out. They are
+    #: not failures to join, so counting them as such overstates the problem.
+    unjoined_framework_packages: int = 0
+    #: The ids that genuinely joined to nothing, so the remainder is
+    #: diagnosable rather than merely counted.
+    unjoined_identifiers: list[str] = field(default_factory=list)
 
-    def to_json(self) -> dict[str, int]:
+    def to_json(self) -> dict[str, Any]:
         return {
             "winget_list_rows": self.listed_rows,
             "winget_list_rows_with_package": self.rows_with_package,
             "joined_by_exact_name": self.joined_exactly,
+            "joined_by_package_identity": self.joined_by_identity,
             "joined_by_truncated_name": self.joined_by_prefix,
             "winget_packages_not_joined": self.unjoined_rows_with_package,
+            "excluded_framework_packages": self.unjoined_framework_packages,
+            "unjoined_examples": self.unjoined_identifiers[:25],
         }
 
 
@@ -483,8 +493,10 @@ def apply_winget_listings(
         key = squash(entry.name)
         listing = by_name.get(key)
         by_prefix = False
+        by_identity = False
         if listing is None and entry.appx_family:
             listing = by_identifier.get(key)
+            by_identity = listing is not None
         if listing is None:
             listing = next(
                 (item for prefix, item in truncated if prefix and key.startswith(prefix)), None
@@ -498,14 +510,54 @@ def apply_winget_listings(
             entry.sources.append("winget")
             if by_prefix:
                 stats.joined_by_prefix += 1
+            elif by_identity:
+                stats.joined_by_identity += 1
             else:
                 stats.joined_exactly += 1
         else:
             entry.winget_knows_no_package = True
-    stats.unjoined_rows_with_package = sum(
-        1 for listing in listings if listing.has_package and id(listing) not in used_listings
-    )
+
+    for listing in listings:
+        if not listing.has_package or id(listing) in used_listings:
+            continue
+        if is_framework_package(listing.identifier):
+            stats.unjoined_framework_packages += 1
+            continue
+        stats.unjoined_rows_with_package += 1
+        stats.unjoined_identifiers.append(listing.identifier)
     return stats
+
+
+#: winget ids for the runtime frameworks the Appx inventory filters out. Listed
+#: separately from APPX_NOISE_PREFIXES because the two naming schemes disagree:
+#: the package is "Microsoft.NET.Native.Runtime.2.2", winget calls the same
+#: thing "Microsoft.DotNet.Native.Runtime".
+FRAMEWORK_PACKAGE_PREFIXES = (
+    "Microsoft.UI.Xaml",
+    "Microsoft.VCLibs",
+    "Microsoft.DotNet.Native",
+    "Microsoft.NET.Native",
+    "Microsoft.Services.Store",
+    "Microsoft.Windows.",
+)
+
+
+def is_framework_package(identifier: str) -> bool:
+    """True for the runtime frameworks the Appx inventory filters out.
+
+    ``Microsoft.UI.Xaml.2.8`` and friends are installed and winget does have
+    packages for them, but they are excluded from the inventory as noise, so
+    their absence from it is deliberate rather than a join that failed.
+    """
+    # Matched on component boundaries, not on squashed text: squashing turns
+    # "Microsoft.Windows." into "microsoftwindows", which also prefixes
+    # "Microsoft.WindowsTerminal" -- a real application, not a framework.
+    lowered = identifier.lower()
+    for prefix in (*FRAMEWORK_PACKAGE_PREFIXES, *APPX_NOISE_PREFIXES):
+        candidate = prefix.lower().rstrip(".")
+        if lowered == candidate or lowered.startswith(candidate + "."):
+            return True
+    return False
 
 
 # --- appx ------------------------------------------------------------------
@@ -725,7 +777,8 @@ def scan_software(env: Environment) -> SoftwareInventory:
         inventory.notes.append(
             f"{stats.unjoined_rows_with_package} of {stats.rows_with_package} packages "
             "winget listed could not be matched to an installed application by name, "
-            "so the by-hand count is higher than it should be"
+            "so the by-hand count is higher than it should be "
+            f"(examples: {', '.join(stats.unjoined_identifiers[:5])})"
         )
     return inventory
 

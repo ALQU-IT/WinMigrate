@@ -184,3 +184,49 @@ def test_known_folders_config_is_not_defeated_by_the_other_dirs_scan(profile: Pa
     assert not any(entry.id.startswith("files:documents") for entry in result.items)
     assert "files:other:documents" not in ids
     assert "files:other:projects" in ids  # genuinely user-created, still captured
+
+
+def test_office_entries_are_excluded_before_the_software_counts_are_taken(
+    profile: Path, registry: dict, monkeypatch
+):
+    """The record and the follow-up are built from the inventory, so Office's
+    Click-to-Run entries have to be flagged before that happens.
+
+    They were being flagged afterwards, so the counts never reflected it: a real
+    machine reported three Office entries as applications to reinstall by hand,
+    directly above the follow-up explaining how to reinstall Office.
+    """
+    from winmigrate.scan import office as office_mod
+    from winmigrate.scan import software as software_mod
+    from winmigrate.scan.office import CLICK_TO_RUN_CONFIG
+
+    version = "16.0.20326.20132"
+    registry[f"HKLM\\{CLICK_TO_RUN_CONFIG}"] = {
+        "ProductReleaseIds": "ProPlus2024Retail",
+        "Platform": "x64",
+        "ClientCulture": "de-de",
+        "VersionToReport": version,
+    }
+
+    def fake_software(env):
+        inventory = software_mod.SoftwareInventory()
+        inventory.entries = [
+            software_mod.SoftwareEntry(
+                name="Microsoft Office Professional Plus 2024 - de-de", version=version
+            ),
+            software_mod.SoftwareEntry(name="Microsoft Visio - de-de", version=version),
+            software_mod.SoftwareEntry(name="ACME Bespoke Suite", version="3.2"),
+        ]
+        return inventory
+
+    monkeypatch.setattr(software_mod, "scan_software", fake_software)
+    monkeypatch.setattr(office_mod, "read_licences", lambda env, runner=None: ([], None))
+
+    result = run_scan(ScanConfig(profile_root=profile), Environment.fixture(profile, registry))
+    record = item(result, "software:inventory").record
+    assert record["counts"]["covered_by_office"] == 2
+    assert record["counts"]["manual"] == 1
+
+    followup = next(f for f in result.followups if f.id == "software:manual")
+    assert "1 application(s)" in followup.title
+    assert "Office entries covered by the Office step" in followup.why

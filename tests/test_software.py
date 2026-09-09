@@ -525,3 +525,60 @@ def test_flagging_office_entries_without_a_version_does_nothing():
         entries=[software.SoftwareEntry(name="Microsoft Office", version="16.0")]
     )
     assert software.flag_office_entries(inventory, "") == 0
+
+
+@pytest.mark.parametrize(
+    ("identifier", "expected"),
+    [
+        ("Microsoft.UI.Xaml.2.8", True),
+        ("Microsoft.VCLibs.14", True),
+        ("Microsoft.VCLibs.Desktop.14", True),
+        ("Microsoft.DotNet.Native.Runtime", True),
+        ("Microsoft.Windows.Photos", True),
+        # Real applications that merely start with the same letters.
+        ("Microsoft.WindowsTerminal", False),
+        ("Microsoft.WindowsAppRuntime.1.8", False),
+        ("Microsoft.Edge", False),
+        ("7zip.7zip", False),
+    ],
+)
+def test_framework_packages_are_matched_on_component_boundaries(identifier, expected):
+    """Squashing the dots out would make "Microsoft.Windows." prefix
+    "Microsoft.WindowsTerminal", which is an application, not a framework."""
+    assert software.is_framework_package(identifier) is expected
+
+
+def test_deliberately_excluded_frameworks_are_not_counted_as_failed_joins():
+    """They are filtered from the inventory on purpose, so their absence from
+    it is a decision, not a join that failed."""
+    listing = (
+        "Name              Id                          Version Available Source\n"
+        "---------------------------------------------------------------------\n"
+        "VCLibs            Microsoft.VCLibs.14         14.0              winget\n"
+        "Xaml              Microsoft.UI.Xaml.2.8       8.2               winget\n"
+        "Some Real App     Vendor.SomeRealApp          1.0               winget\n"
+    )
+    stats = software.apply_winget_listings([], software.parse_winget_list(listing))
+    assert stats.unjoined_framework_packages == 2
+    assert stats.unjoined_rows_with_package == 1
+    # The residual is named, so what is left can be diagnosed rather than guessed.
+    assert stats.unjoined_identifiers == ["Vendor.SomeRealApp"]
+
+
+def test_an_identity_join_is_counted_separately_from_a_name_join():
+    entries = [
+        software.SoftwareEntry(name="7-Zip 24.09 (x64)", sources=["registry"]),
+        software.SoftwareEntry(
+            name="Microsoft.WindowsTerminal", sources=["appx"], appx_family="x_y"
+        ),
+    ]
+    listing = (
+        "Name                Id                          Version Available Source\n"
+        "-----------------------------------------------------------------------\n"
+        "7-Zip 24.09 (x64)   7zip.7zip                   24.09             winget\n"
+        "Windows Terminal    Microsoft.WindowsTerminal   1.24              winget\n"
+    )
+    stats = software.apply_winget_listings(entries, software.parse_winget_list(listing))
+    assert stats.joined_exactly == 1
+    assert stats.joined_by_identity == 1
+    assert stats.unjoined_rows_with_package == 0

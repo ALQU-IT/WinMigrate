@@ -74,8 +74,12 @@ def run_scan(
     _record_sync_roots(result)
     _add_sync_followups(result)
     if config.include_software:
-        inventory = _scan_software(env, result, progress)
-        _scan_office(env, result, progress, inventory)
+        # Office is detected first: its Click-to-Run build version decides which
+        # inventory entries the Office item already covers, and that has to be
+        # known before the software record and its follow-up are built from it.
+        installation = _detect_office(env, progress)
+        _scan_software(env, result, progress, installation)
+        _record_office(result, installation)
     _note_long_paths(result, long_paths)
 
     result.duration_seconds = time.monotonic() - started
@@ -332,7 +336,12 @@ def _note_long_paths(result: ScanResult, long_path_count: int) -> None:
 
 
 # --- software and Office ---------------------------------------------------
-def _scan_software(env: Environment, result: ScanResult, progress: ProgressCallback | None):
+def _scan_software(
+    env: Environment,
+    result: ScanResult,
+    progress: ProgressCallback | None,
+    installation=None,
+) -> None:
     """Inventory installed applications as a manifest record, not as files.
 
     Nothing is copied: what migrates is the *list*, so the target machine can
@@ -343,6 +352,8 @@ def _scan_software(env: Environment, result: ScanResult, progress: ProgressCallb
 
     _emit(progress, "Inventorying installed software")
     inventory = software_mod.scan_software(env)
+    if installation is not None and installation.present:
+        software_mod.flag_office_entries(inventory, installation.version)
     if not inventory.entries and not inventory.winget_export:
         for note in inventory.notes:
             result.add_note(Severity.WARNING, f"software inventory incomplete: {note}")
@@ -408,29 +419,22 @@ def _scan_software(env: Environment, result: ScanResult, progress: ProgressCallb
                 category=Category.SOFTWARE,
             )
         )
-    return inventory
 
 
-def _scan_office(
-    env: Environment,
-    result: ScanResult,
-    progress: ProgressCallback | None,
-    inventory=None,
-) -> None:
+def _detect_office(env: Environment, progress: ProgressCallback | None):
     """Detect Office so it can be reinstalled -- never so its key can be taken."""
     from . import office as office_mod  # noqa: PLC0415 -- optional stage
-    from . import software as software_mod  # noqa: PLC0415
 
     _emit(progress, "Detecting Microsoft Office")
-    installation = office_mod.detect(env)
+    return office_mod.detect(env)
+
+
+def _record_office(result: ScanResult, installation) -> None:
+    """Record the Office installation and how the user reactivates it."""
+    from . import office as office_mod  # noqa: PLC0415
+
     if not installation.present:
         return
-
-    if inventory is not None:
-        # Office registers an uninstall entry per product and language. Listing
-        # those as applications to reinstall by hand contradicts the Office
-        # follow-up printed directly beneath them.
-        software_mod.flag_office_entries(inventory, installation.version)
 
     result.items.append(
         Item(
