@@ -44,6 +44,7 @@ class Artifacts:
     reinstallable_count: int = 0
     manual_count: int = 0
     component_count: int = 0
+    launcher_count: int = 0
     office: OfficeInstallation | None = None
     notes: list[str] = field(default_factory=list)
 
@@ -76,20 +77,27 @@ def write_artifacts(manifest: dict[str, Any], destination: Path) -> Artifacts:
             if not app.get("winget_id")
             and not app.get("component")
             and not app.get("covered_by_office")
+            and not app.get("managed_by")
         ]
         components = [
-            app for app in applications if not app.get("winget_id") and app.get("component")
+            app
+            for app in applications
+            if not app.get("winget_id") and app.get("component") and not app.get("managed_by")
         ]
+        launcher_games = [app for app in applications if app.get("managed_by")]
         artifacts.manual_count = len(manual)
         artifacts.component_count = len(components)
+        artifacts.launcher_count = len(launcher_games)
         if export:
             path = directory / WINGET_IMPORT_FILE
             path.write_text(json.dumps(export, indent=2), encoding="utf-8")
             artifacts.winget_import = path
-        if manual:
+        if manual or launcher_games:
             path = directory / MANUAL_LIST_FILE
             path.write_text(
-                _manual_markdown(manual, artifacts.reinstallable_count, components),
+                _manual_markdown(
+                    manual, artifacts.reinstallable_count, components, launcher_games
+                ),
                 encoding="utf-8",
             )
             artifacts.manual_list = path
@@ -131,8 +139,10 @@ def _manual_markdown(
     applications: list[dict[str, Any]],
     reinstallable: int,
     components: list[dict[str, Any]] | None = None,
+    launcher_games: list[dict[str, Any]] | None = None,
 ) -> str:
     components = components or []
+    launcher_games = launcher_games or []
     lines = [
         "# Reinstall by hand",
         "",
@@ -160,6 +170,22 @@ def _manual_markdown(
             "| --- | --- | --- |",
         ]
         lines.extend(_table_rows(components))
+    if launcher_games:
+        by_launcher: dict[str, list[dict[str, Any]]] = {}
+        for app in launcher_games:
+            by_launcher.setdefault(str(app.get("managed_by")), []).append(app)
+        lines += [
+            "",
+            "## Games (return through their launcher)",
+            "",
+            "These re-download once you sign in to the launcher -- there is nothing",
+            "to install by hand. Listed so you know where they went.",
+        ]
+        for launcher in sorted(by_launcher):
+            games = by_launcher[launcher]
+            lines += ["", f"### {launcher} ({len(games)})", ""]
+            for app in sorted(games, key=lambda item: str(item.get("name", "")).lower()):
+                lines.append(f"- {str(app.get('name', '')).strip()}")
     return "\n".join(lines) + "\n"
 
 

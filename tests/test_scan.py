@@ -230,3 +230,30 @@ def test_office_entries_are_excluded_before_the_software_counts_are_taken(
     followup = next(f for f in result.followups if f.id == "software:manual")
     assert "1 application(s)" in followup.title
     assert "Office entries covered by the Office step" in followup.why
+
+
+def test_launcher_games_produce_a_sign_in_followup_per_launcher(
+    profile: Path, registry: dict, monkeypatch
+):
+    from winmigrate.scan import office as office_mod
+    from winmigrate.scan import software as software_mod
+
+    def fake_software(env):
+        inventory = software_mod.SoftwareInventory()
+        inventory.entries = [
+            software_mod.SoftwareEntry(name="Counter-Strike 2", managed_by="Steam"),
+            software_mod.SoftwareEntry(name="Portal 2", managed_by="Steam"),
+            software_mod.SoftwareEntry(name="Fortnite", managed_by="Epic Games"),
+            software_mod.SoftwareEntry(name="ACME Bespoke Suite"),
+        ]
+        return inventory
+
+    monkeypatch.setattr(software_mod, "scan_software", fake_software)
+    monkeypatch.setattr(office_mod, "detect", lambda env: office_mod.OfficeInstallation())
+
+    result = run_scan(ScanConfig(profile_root=profile), Environment.fixture(profile, registry))
+    launcher_followups = {f.id: f for f in result.followups if ":launcher:" in f.id}
+    assert set(launcher_followups) == {"software:launcher:steam", "software:launcher:epic_games"}
+    assert "2 game(s)" in launcher_followups["software:launcher:steam"].title
+    manual = next(f for f in result.followups if f.id == "software:manual")
+    assert "come back through a game launcher" in manual.why

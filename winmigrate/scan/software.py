@@ -53,6 +53,40 @@ UPDATE_NAME_PATTERN = re.compile(
     r"^(kb\d{6,}|update for |security update for |hotfix for |definition update)", re.IGNORECASE
 )
 
+#: Game launchers, identified by what their uninstall/install strings point at.
+#: A title installed through one of these re-downloads when the user signs in,
+#: so it belongs in its own list rather than among applications to reinstall.
+#: Ordered most- to least-specific; the first match wins.
+LAUNCHER_SIGNATURES: tuple[tuple[str, "re.Pattern[str]"], ...] = (
+    ("Steam", re.compile(r"steam://|\\steamapps\\|\bsteam\.exe\b", re.IGNORECASE)),
+    ("Epic Games", re.compile(r"com\.epicgames\.launcher|\\epic games\\", re.IGNORECASE)),
+    ("EA app", re.compile(r"\bEA(Desktop| Desktop| app)\b|origin\.exe|\\EA Games\\", re.IGNORECASE)),
+    ("Ubisoft Connect", re.compile(r"uplay://|ubisoft connect|\\ubisoft\\", re.IGNORECASE)),
+    ("Battle.net", re.compile(r"battle\.net", re.IGNORECASE)),
+    ("GOG Galaxy", re.compile(r"goggalaxy|galaxyclient|\\GOG Galaxy\\|\\GOG Games\\", re.IGNORECASE)),
+    ("Rockstar Games", re.compile(r"rockstar games launcher|\\Rockstar Games\\", re.IGNORECASE)),
+    ("Riot Client", re.compile(r"riotclientservices|\\Riot Games\\", re.IGNORECASE)),
+    ("Xbox", re.compile(r"gamingservices|xboxgames", re.IGNORECASE)),
+)
+
+
+def launcher_from_strings(*strings: str) -> str | None:
+    """Return the launcher a title was installed through, or None.
+
+    Fed the uninstall string and install location: a Steam game's uninstall
+    string is ``"...\\Steam.exe" steam://uninstall/<id>``, an Epic game's is a
+    ``com.epicgames.launcher://`` URL, and so on. The launcher app itself is a
+    normal application and is not matched -- only titles that point back at it.
+    """
+    haystack = "  ".join(part for part in strings if part)
+    if not haystack:
+        return None
+    for name, pattern in LAUNCHER_SIGNATURES:
+        if pattern.search(haystack):
+            return name
+    return None
+
+
 #: Appx packages that ship with Windows and would only be noise in a report.
 APPX_NOISE_PREFIXES = (
     "microsoft.windows.",
@@ -100,6 +134,10 @@ class SoftwareEntry:
     #: Listing them as applications to reinstall by hand contradicts the Office
     #: follow-up sitting next to them.
     covered_by_office: bool = False
+    #: The game launcher that installed this, e.g. "Steam" -- set when the
+    #: uninstall entry points back at a launcher. Such titles re-download when
+    #: the user signs into the launcher, so they are not manual work either.
+    managed_by: str | None = None
 
     @property
     def reinstallable(self) -> bool:
@@ -129,6 +167,8 @@ class SoftwareEntry:
             data["winget_has_no_package"] = True
         if self.covered_by_office:
             data["covered_by_office"] = True
+        if self.managed_by:
+            data["managed_by"] = self.managed_by
         return data
 
 
@@ -154,13 +194,28 @@ class SoftwareInventory:
             if not entry.reinstallable
             and not entry.is_component
             and not entry.covered_by_office
+            and not entry.managed_by
         ]
 
     @property
     def components(self) -> list[SoftwareEntry]:
         return [
-            entry for entry in self.entries if not entry.reinstallable and entry.is_component
+            entry
+            for entry in self.entries
+            if not entry.reinstallable and entry.is_component and not entry.managed_by
         ]
+
+    @property
+    def launcher_managed(self) -> list[SoftwareEntry]:
+        """Titles that come back by signing into a game launcher."""
+        return [entry for entry in self.entries if entry.managed_by and not entry.reinstallable]
+
+    def launchers(self) -> dict[str, int]:
+        """Launcher name -> how many managed titles it accounts for."""
+        counts: dict[str, int] = {}
+        for entry in self.launcher_managed:
+            counts[entry.managed_by] = counts.get(entry.managed_by, 0) + 1
+        return dict(sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -169,6 +224,7 @@ class SoftwareInventory:
                 "reinstallable_with_winget": len(self.reinstallable),
                 "manual": len(self.manual),
                 "components": len(self.components),
+                "launcher_managed": len(self.launcher_managed),
                 "covered_by_office": sum(1 for e in self.entries if e.covered_by_office),
                 "winget_packages_in_export": len(packages_from_export(self.winget_export)),
             },
@@ -205,7 +261,7 @@ def _entry_from_registry(values: dict, hive: str, key: str) -> SoftwareEntry | N
         return None
     if UPDATE_NAME_PATTERN.match(name):
         return None
-    return SoftwareEntry(
+    entry = SoftwareEntry(
         name=name,
         version=str(values.get("DisplayVersion") or "").strip(),
         publisher=str(values.get("Publisher") or "").strip(),
@@ -213,6 +269,12 @@ def _entry_from_registry(values: dict, hive: str, key: str) -> SoftwareEntry | N
         scope="user" if hive == HKCU else "machine",
         architecture="x86" if "WOW6432Node" in key else "",
     )
+    entry.managed_by = launcher_from_strings(
+        str(values.get("UninstallString") or ""),
+        str(values.get("QuietUninstallString") or ""),
+        str(values.get("InstallLocation") or ""),
+    )
+    return entry
 
 
 def _as_int(value: Any) -> int | None:

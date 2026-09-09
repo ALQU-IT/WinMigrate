@@ -194,3 +194,26 @@ def test_the_manual_list_says_how_many_winget_will_handle(tmp_path: Path):
     text = artifacts.manual_list.read_text()
     assert "winget can reinstall 1 application(s) on its own" in text
     assert "These 1 it has no package for." in text
+
+
+def test_launcher_games_get_their_own_section_not_the_by_hand_list(tmp_path: Path):
+    record = {
+        "counts": {},
+        "applications": [
+            {"name": "ACME Bespoke Suite", "version": "3.2"},
+            {"name": "Counter-Strike 2", "managed_by": "Steam"},
+            {"name": "Portal 2", "managed_by": "Steam"},
+            {"name": "Fortnite", "managed_by": "Epic Games"},
+        ],
+        "winget_export": {"Sources": []},
+    }
+    artifacts = reinstall.write_artifacts(manifest_with(("software", record)), tmp_path)
+    assert artifacts.manual_count == 1
+    assert artifacts.launcher_count == 3
+    text = artifacts.manual_list.read_text()
+    body, games = text.split("## Games (return through their launcher)")
+    assert "ACME Bespoke Suite" in body
+    assert "Counter-Strike 2" not in body
+    assert "### Steam (2)" in games
+    assert "### Epic Games (1)" in games
+    assert "Portal 2" in games

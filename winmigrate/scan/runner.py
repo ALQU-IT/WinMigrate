@@ -387,9 +387,11 @@ def _scan_software(
     for note in inventory.notes:
         result.add_note(Severity.WARNING, f"software inventory: {note}")
 
+    launchers = inventory.launchers()
     if inventory.manual:
         components = len(inventory.components)
         office_covered = sum(1 for entry in inventory.entries if entry.covered_by_office)
+        launcher_managed = len(inventory.launcher_managed)
         result.followups.append(
             Followup(
                 id="software:manual",
@@ -409,12 +411,38 @@ def _scan_software(
                         if office_covered
                         else ""
                     )
+                    + (
+                        f" and {launcher_managed} title(s) that come back through a "
+                        "game launcher"
+                        if launcher_managed
+                        else ""
+                    )
                     + ". The full list is written next to the restored files."
                 ),
                 steps=[
                     "Open WinMigrate-Reinstall\\reinstall-by-hand.md in the restore folder.",
                     "Work down the list, installing what you still want.",
                     "Being listed means it was on the old machine, not that you need it.",
+                ],
+                category=Category.SOFTWARE,
+            )
+        )
+
+    for launcher, count in launchers.items():
+        result.followups.append(
+            Followup(
+                id=f"software:launcher:{launcher.lower().replace(' ', '_').replace('.', '')}",
+                title=f"Sign in to {launcher} to get {count} game(s) back",
+                why=(
+                    f"{count} title(s) were installed through {launcher}. They are not "
+                    "carried in the bundle -- they re-download from your library once "
+                    "you sign in, which is faster than copying them and keeps them "
+                    "up to date."
+                ),
+                steps=[
+                    f"Install {launcher} on the new machine (it is in the reinstall list).",
+                    "Sign in to your account.",
+                    "Re-download the titles you still play from your library.",
                 ],
                 category=Category.SOFTWARE,
             )

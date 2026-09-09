@@ -329,6 +329,7 @@ def test_components_are_counted_apart_from_things_to_reinstall_by_hand():
         "reinstallable_with_winget": 1,
         "manual": 1,
         "components": 2,
+        "launcher_managed": 0,
         "covered_by_office": 0,
         "winget_packages_in_export": 0,
     }
@@ -653,3 +654,62 @@ def test_a_resembling_identity_joins_and_is_counted_as_an_identity_join():
     assert entries[0].winget_id == "Microsoft.AppInstaller"
     assert stats.joined_by_identity == 1
     assert stats.unjoined_rows_with_package == 0
+
+
+# --- games installed through a launcher -------------------------------------
+@pytest.mark.parametrize(
+    ("uninstall", "install_location", "launcher"),
+    [
+        (r'"C:\Program Files (x86)\Steam\steam.exe" steam://uninstall/1091500', "", "Steam"),
+        ("com.epicgames.launcher://apps/Fortnite?action=uninstall", "", "Epic Games"),
+        (r'"...\Ubisoft Game Launcher\Uninstaller\uninstall.exe" uplay://uninstall/720', "", "Ubisoft Connect"),
+        (r'"C:\ProgramData\Battle.net\Agent\Blizzard Uninstaller.exe"', "", "Battle.net"),
+        ("", r"C:\GOG Games\The Witcher 3", "GOG Galaxy"),
+        (r'"C:\Program Files\Rockstar Games\Launcher\uninstall.exe"', "", "Rockstar Games"),
+        # A normal desktop app is not launcher-managed.
+        (r"MsiExec.exe /X{1234}", r"C:\Program Files\7-Zip", None),
+        ("", "", None),
+    ],
+)
+def test_a_title_is_traced_to_the_launcher_that_installed_it(uninstall, install_location, launcher):
+    assert software.launcher_from_strings(uninstall, install_location) == launcher
+
+
+def test_launcher_games_are_read_from_the_registry_uninstall_string():
+    env = env_with(
+        {
+            f"HKLM\\{UNINSTALL}\\CS2": {
+                "DisplayName": "Counter-Strike 2",
+                "UninstallString": '"C:\\Program Files (x86)\\Steam\\steam.exe" steam://uninstall/730',
+            },
+            f"HKLM\\{UNINSTALL}\\7z": {
+                "DisplayName": "7-Zip",
+                "UninstallString": r"C:\Program Files\7-Zip\Uninstall.exe",
+            },
+        }
+    )
+    by_name = {entry.name: entry for entry in software.read_registry_entries(env)}
+    assert by_name["Counter-Strike 2"].managed_by == "Steam"
+    assert by_name["7-Zip"].managed_by is None
+
+
+def test_launcher_games_are_not_counted_as_things_to_reinstall_by_hand():
+    inventory = software.SoftwareInventory(
+        entries=[
+            software.SoftwareEntry(name="Counter-Strike 2", managed_by="Steam"),
+            software.SoftwareEntry(name="Portal 2", managed_by="Steam"),
+            software.SoftwareEntry(name="Fortnite", managed_by="Epic Games"),
+            software.SoftwareEntry(name="ACME Bespoke Suite"),
+            software.SoftwareEntry(name="7-Zip", winget_id="7zip.7zip"),
+        ]
+    )
+    assert [entry.name for entry in inventory.manual] == ["ACME Bespoke Suite"]
+    assert inventory.launchers() == {"Steam": 2, "Epic Games": 1}
+    assert inventory.to_json()["counts"]["launcher_managed"] == 3
+
+
+def test_the_launcher_itself_remains_a_normal_reinstallable_application():
+    """Steam.exe is Valve.Steam via winget; only the games it installed are managed."""
+    entry = software.SoftwareEntry(name="Steam", winget_id="Valve.Steam")
+    assert entry.managed_by is None
+    assert entry.reinstallable
