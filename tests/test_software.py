@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from winmigrate.platform_win import Environment
 from winmigrate.scan import software
 from winmigrate.util.process import CommandResult
@@ -327,6 +329,7 @@ def test_components_are_counted_apart_from_things_to_reinstall_by_hand():
         "reinstallable_with_winget": 1,
         "manual": 1,
         "components": 2,
+        "covered_by_office": 0,
         "winget_packages_in_export": 0,
     }
 
@@ -426,3 +429,99 @@ def test_packages_winget_listed_but_could_not_be_joined_are_flagged(monkeypatch,
     diagnostics = inventory.to_json()["diagnostics"]
     assert diagnostics["winget_list_rows"] == 5
     assert diagnostics["winget_packages_not_joined"] == 4
+
+
+# --- fixes driven by a real 302-application machine -------------------------
+def test_appx_packages_join_on_identity_not_display_name():
+    """Get-AppxPackage reports "Microsoft.WindowsTerminal"; winget prints
+    "Windows Terminal". The two only meet through the package id."""
+    entries = [
+        software.SoftwareEntry(
+            name="Microsoft.WindowsTerminal",
+            sources=["appx"],
+            appx_family="Microsoft.WindowsTerminal_8wekyb3d8bbwe",
+        )
+    ]
+    listing = (
+        "Name                Id                         Version Available Source\n"
+        "----------------------------------------------------------------------\n"
+        "Windows Terminal    Microsoft.WindowsTerminal  1.24              winget\n"
+    )
+    software.apply_winget_listings(entries, software.parse_winget_list(listing))
+    assert entries[0].winget_id == "Microsoft.WindowsTerminal"
+
+
+def test_a_registry_entry_does_not_join_on_a_package_id():
+    """Only MSIX entries join that way; a desktop app's name is a real name."""
+    entries = [software.SoftwareEntry(name="Microsoft.WindowsTerminal", sources=["registry"])]
+    listing = (
+        "Name                Id                         Version Available Source\n"
+        "----------------------------------------------------------------------\n"
+        "Windows Terminal    Microsoft.WindowsTerminal  1.24              winget\n"
+    )
+    software.apply_winget_listings(entries, software.parse_winget_list(listing))
+    assert entries[0].winget_id is None
+
+
+@pytest.mark.parametrize(
+    ("name", "identifier"),
+    [
+        ("Microsoft.PowerAutomateDesktop", "Microsoft.VCLibs.Desktop.14"),
+        ("Microsoft.WidgetsPlatformRuntime", "Microsoft.DotNet.Native.Runtime"),
+        ("Some Client Tools", "Vendor.Client"),
+    ],
+)
+def test_a_generic_word_cannot_carry_a_match_on_its_own(name, identifier):
+    """Both of the first two were mislabelled on a real machine.
+
+    "desktop" and "runtime" appear in half of all package ids and identify
+    nothing.
+    """
+    entry = software.SoftwareEntry(name=name, publisher="Microsoft")
+    assert software.match_winget_id(entry, [(identifier, "1")]) is None
+
+
+def test_a_specific_token_still_matches_even_next_to_generic_ones():
+    entry = software.SoftwareEntry(name="Microsoft.WindowsAppRuntime.1.8", publisher="Microsoft")
+    assert (
+        software.match_winget_id(entry, [("Microsoft.WindowsAppRuntime.1.8", "1")])
+        == "Microsoft.WindowsAppRuntime.1.8"
+    )
+
+
+def test_office_click_to_run_entries_are_not_listed_as_applications():
+    """Office registers one uninstall entry per product and language.
+
+    Listing those as things to reinstall by hand contradicts the Office
+    follow-up printed directly beneath them.
+    """
+    inventory = software.SoftwareInventory(
+        entries=[
+            software.SoftwareEntry(
+                name="Microsoft Office Professional Plus 2024 - de-de",
+                version="16.0.20326.20132",
+            ),
+            software.SoftwareEntry(name="Microsoft Visio - de-de", version="16.0.20326.20132"),
+            software.SoftwareEntry(name="Microsoft Edge", version="152.0", winget_id="Microsoft.Edge"),
+            software.SoftwareEntry(name="ACME Bespoke Suite", version="3.2"),
+        ]
+    )
+    flagged = software.flag_office_entries(inventory, "16.0.20326.20132")
+    assert flagged == 2
+    assert [entry.name for entry in inventory.manual] == ["ACME Bespoke Suite"]
+
+
+def test_a_microsoft_application_at_another_version_is_not_swept_up_with_office():
+    """Matched on the Click-to-Run build, not on the name alone."""
+    inventory = software.SoftwareInventory(
+        entries=[software.SoftwareEntry(name="Microsoft OneNote", version="17.1.0")]
+    )
+    assert software.flag_office_entries(inventory, "16.0.20326.20132") == 0
+    assert inventory.manual
+
+
+def test_flagging_office_entries_without_a_version_does_nothing():
+    inventory = software.SoftwareInventory(
+        entries=[software.SoftwareEntry(name="Microsoft Office", version="16.0")]
+    )
+    assert software.flag_office_entries(inventory, "") == 0

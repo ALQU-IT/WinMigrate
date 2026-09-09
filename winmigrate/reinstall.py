@@ -73,7 +73,9 @@ def write_artifacts(manifest: dict[str, Any], destination: Path) -> Artifacts:
         manual = [
             app
             for app in applications
-            if not app.get("winget_id") and not app.get("component")
+            if not app.get("winget_id")
+            and not app.get("component")
+            and not app.get("covered_by_office")
         ]
         components = [
             app for app in applications if not app.get("winget_id") and app.get("component")

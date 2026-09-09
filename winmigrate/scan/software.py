@@ -96,6 +96,10 @@ class SoftwareEntry:
     #: True when winget reported this application but has no package for it, so
     #: the "no match" is winget's own answer rather than a failure to guess.
     winget_knows_no_package: bool = False
+    #: True for the Click-to-Run entries that the Office item already covers.
+    #: Listing them as applications to reinstall by hand contradicts the Office
+    #: follow-up sitting next to them.
+    covered_by_office: bool = False
 
     @property
     def reinstallable(self) -> bool:
@@ -123,6 +127,8 @@ class SoftwareEntry:
             data["component"] = True
         if self.winget_knows_no_package:
             data["winget_has_no_package"] = True
+        if self.covered_by_office:
+            data["covered_by_office"] = True
         return data
 
 
@@ -145,7 +151,9 @@ class SoftwareInventory:
         return [
             entry
             for entry in self.entries
-            if not entry.reinstallable and not entry.is_component
+            if not entry.reinstallable
+            and not entry.is_component
+            and not entry.covered_by_office
         ]
 
     @property
@@ -161,6 +169,7 @@ class SoftwareInventory:
                 "reinstallable_with_winget": len(self.reinstallable),
                 "manual": len(self.manual),
                 "components": len(self.components),
+                "covered_by_office": sum(1 for e in self.entries if e.covered_by_office),
                 "winget_packages_in_export": len(packages_from_export(self.winget_export)),
             },
             "applications": [entry.to_json() for entry in self.entries],
@@ -450,8 +459,14 @@ def apply_winget_listings(
     their prefix instead.
     """
     by_name: dict[str, WingetListing] = {}
+    #: MSIX packages join on identity, not display name: Get-AppxPackage reports
+    #: "Microsoft.WindowsTerminal" where winget list prints "Windows Terminal",
+    #: so the two only meet through the package id.
+    by_identifier: dict[str, WingetListing] = {}
     truncated: list[tuple[str, WingetListing]] = []
     for listing in listings:
+        if listing.has_package:
+            by_identifier.setdefault(squash(listing.identifier), listing)
         name = listing.name
         marker = next((m for m in TRUNCATION_MARKERS if name.endswith(m)), None)
         if marker:
@@ -468,6 +483,8 @@ def apply_winget_listings(
         key = squash(entry.name)
         listing = by_name.get(key)
         by_prefix = False
+        if listing is None and entry.appx_family:
+            listing = by_identifier.get(key)
         if listing is None:
             listing = next(
                 (item for prefix, item in truncated if prefix and key.startswith(prefix)), None
@@ -558,6 +575,23 @@ def squash(text: str) -> str:
 #: Four, not five: "7zip" is a real product token, and this is only a fallback.
 MIN_CANDIDATE_LENGTH = 4
 
+#: Words that appear in half of all package ids and identify nothing on their
+#: own. Without this, Microsoft.VCLibs.Desktop.14 matches "PowerAutomateDesktop"
+#: on the word "desktop", and Microsoft.DotNet.Native.Runtime matches anything
+#: with "runtime" in its name -- both seen on a real machine.
+GENERIC_TOKENS = frozenset(
+    {
+        "desktop", "runtime", "runtimes", "client", "clients", "tools", "common",
+        "core", "base", "apps", "application", "applications", "library",
+        "libraries", "framework", "redistributable", "redist", "community",
+        "professional", "enterprise", "standard", "essentials", "launcher",
+        "player", "manager", "service", "services", "software", "package",
+        "packages", "installer", "update", "setup", "windows", "microsoft",
+        "native", "shared", "support", "utility", "utilities", "driver",
+        "drivers", "x64", "x86", "arm64", "win32", "win64",
+    }
+)
+
 
 def id_candidates(identifier: str) -> list[str]:
     """Squashed substrings of a package id worth looking for in a display name.
@@ -579,9 +613,12 @@ def id_candidates(identifier: str) -> list[str]:
     seen: set[str] = set()
     ordered = []
     for candidate in candidates:
-        if len(candidate) >= MIN_CANDIDATE_LENGTH and candidate not in seen:
-            seen.add(candidate)
-            ordered.append(candidate)
+        if len(candidate) < MIN_CANDIDATE_LENGTH or candidate in seen:
+            continue
+        if candidate in GENERIC_TOKENS:
+            continue
+        seen.add(candidate)
+        ordered.append(candidate)
     return sorted(ordered, key=len, reverse=True)
 
 
@@ -691,3 +728,28 @@ def scan_software(env: Environment) -> SoftwareInventory:
             "so the by-hand count is higher than it should be"
         )
     return inventory
+
+
+#: Click-to-Run products register one uninstall entry per product and language.
+OFFICE_ENTRY_PATTERN = re.compile(
+    r"^Microsoft (Office|Visio|Project|365|Access|Excel|OneNote|Outlook|"
+    r"PowerPoint|Publisher|Word)\b",
+    re.IGNORECASE,
+)
+
+
+def flag_office_entries(inventory: SoftwareInventory, office_version: str) -> int:
+    """Mark applications that the Office item already accounts for.
+
+    Matched on the Click-to-Run build version rather than on the name alone, so
+    a separately installed Microsoft application is not swept up with it.
+    Returns how many were flagged.
+    """
+    if not office_version:
+        return 0
+    flagged = 0
+    for entry in inventory.entries:
+        if entry.version == office_version and OFFICE_ENTRY_PATTERN.match(entry.name):
+            entry.covered_by_office = True
+            flagged += 1
+    return flagged

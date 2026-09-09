@@ -138,7 +138,25 @@ components after the publisher is now tried, longest first.
 Runtimes, redistributables and driver packages are classified separately. They
 are really installed, but nobody reinstalls them deliberately — whatever needs
 them brings them along — so counting them as chores buries the handful that
-genuinely need a person.
+genuinely need a person. Office's Click-to-Run entries are excluded for the same
+reason: it registers one per product and language, and listing them as
+applications to reinstall by hand contradicts the Office follow-up printed
+directly beneath them.
+
+Three further things that same machine taught, all of them invisible to a
+fixture:
+
+* **MSIX packages join on identity, not display name.** `Get-AppxPackage` reports
+  `Microsoft.WindowsTerminal`; `winget list` prints `Windows Terminal`. They only
+  meet through the package id.
+* **Generic words cannot carry a match.** `desktop`, `runtime`, `client` and the
+  like appear in half of all package ids and identify nothing, so
+  `Microsoft.VCLibs.Desktop.14` was matching `PowerAutomateDesktop` on the word
+  "desktop".
+* **The join rate is recorded** — rows listed, rows with a package, joins by
+  exact and truncated name, and packages that joined to nothing — because it is
+  the number that says whether the automatic/manual split can be trusted, and it
+  can only be checked on a machine with real software on it.
 
 ### Installing is a separate, explicit step
 

@@ -53,6 +53,20 @@ PRODUCT_TITLES = {
     "O365BusinessRetail": "Microsoft 365 Apps for business",
     "O365HomePremRetail": "Microsoft 365 (Home / Personal)",
     "ProPlus2019Volume": "Office Professional Plus 2019 (volume)",
+    "ProPlus2024Retail": "Office Professional Plus 2024",
+    "Standard2024Retail": "Office Standard 2024",
+    "Standard2024Volume": "Office Standard 2024 (volume)",
+    "HomeBusiness2024Retail": "Office Home & Business 2024",
+    "HomeStudent2024Retail": "Office Home & Student 2024",
+    "Personal2024Retail": "Office Personal 2024",
+    "VisioStd2024Retail": "Visio Standard 2024",
+    "VisioPro2024Retail": "Visio Professional 2024",
+    "VisioStd2021Retail": "Visio Standard 2021",
+    "VisioPro2021Retail": "Visio Professional 2021",
+    "ProjectStd2024Retail": "Project Standard 2024",
+    "ProjectPro2024Retail": "Project Professional 2024",
+    "ProjectStd2021Retail": "Project Standard 2021",
+    "ProjectPro2021Retail": "Project Professional 2021",
     "ProPlus2021Volume": "Office Professional Plus 2021 (volume)",
     "ProPlus2024Volume": "Office Professional Plus 2024 (volume)",
     "HomeStudent2019Retail": "Office Home & Student 2019",
@@ -82,6 +96,22 @@ class OfficeLicence:
     key_last_five: str = ""      # printed by ospp itself; never a full key
 
     @property
+    def is_activated(self) -> bool:
+        """ospp reports ---LICENSED--- only when activation is complete.
+
+        ---NOTIFICATIONS--- means installed but not activated, which is worth
+        saying out loud: it is the state a migration is most likely to leave
+        someone in, and it looks like success otherwise.
+        """
+        return "LICENSED" in self.status.upper() and "NOT" not in self.status.upper()
+
+    @property
+    def product(self) -> str:
+        """The product this licence covers, e.g. ``Office24ProPlus2024R``."""
+        match = re.search(r"Office\d*([A-Za-z0-9]+?)_", self.name)
+        return match.group(1) if match else self.name
+
+    @property
     def activation_type(self) -> str:
         """``subscription``, ``retail``, ``volume`` or ``unknown``."""
         text = f"{self.name} {self.description}".upper()
@@ -100,6 +130,7 @@ class OfficeLicence:
             "status": self.status,
             "key_last_five": self.key_last_five,
             "activation_type": self.activation_type,
+            "activated": self.is_activated,
         }
 
 
@@ -132,6 +163,23 @@ class OfficeInstallation:
                 return kind
         return "unknown"
 
+    @property
+    def fully_activated(self) -> bool:
+        return bool(self.licences) and all(licence.is_activated for licence in self.licences)
+
+    def key_hints(self) -> list[tuple[str, str]]:
+        """``(product, last five characters)`` for each licence that has a key.
+
+        More than one product can be installed together -- Office and Visio, on
+        the machine this was written against -- and they carry different keys,
+        so a single hint would send the user looking for the wrong one.
+        """
+        return [
+            (licence.product, licence.key_last_five)
+            for licence in self.licences
+            if licence.key_last_five
+        ]
+
     def to_json(self) -> dict[str, Any]:
         return {
             "product_ids": list(self.product_ids),
@@ -142,6 +190,7 @@ class OfficeInstallation:
             "version": self.version,
             "install_path": self.install_path,
             "activation_type": self.activation_type,
+            "fully_activated": self.fully_activated,
             "licences": [licence.to_json() for licence in self.licences],
             "notes": list(self.notes),
         }

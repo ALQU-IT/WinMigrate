@@ -186,3 +186,62 @@ def test_detect_reads_the_registry_without_touching_ospp_off_windows(tmp_path: P
     installation = office.detect(env)
     assert installation.present
     assert installation.licences == []
+
+
+# --- driven by a real ProPlus2024 + Visio machine ---------------------------
+TWO_PRODUCT_DSTATUS = """\
+LICENSE NAME: Office 24, Office24VisioStd2024R_Retail edition
+LICENSE DESCRIPTION: Office 24, RETAIL channel
+LICENSE STATUS:  ---NOTIFICATIONS---
+Last 5 characters of installed product key: RGHKQ
+LICENSE NAME: Office 24, Office24ProPlus2024R_Retail edition
+LICENSE DESCRIPTION: Office 24, RETAIL channel
+LICENSE STATUS:  ---LICENSED---
+Last 5 characters of installed product key: 88KC6
+"""
+
+
+def test_2024_products_have_readable_titles():
+    """They were reported as raw ids like ProPlus2024Retail on a real machine."""
+    installation = office.read_configuration(
+        {"ProductReleaseIds": "ProPlus2024Retail,VisioStd2024Retail"}
+    )
+    assert installation.titles == ["Office Professional Plus 2024", "Visio Standard 2024"]
+
+
+def test_each_installed_product_keeps_its_own_key_hint():
+    """Office and Visio install together and carry different keys.
+
+    A single hint would send the user looking for the wrong one.
+    """
+    installation = office.read_configuration({"ProductReleaseIds": "ProPlus2024Retail"})
+    installation.licences = office.parse_ospp_dstatus(TWO_PRODUCT_DSTATUS)
+    assert installation.key_hints() == [
+        ("VisioStd2024R", "RGHKQ"),
+        ("ProPlus2024R", "88KC6"),
+    ]
+    for _product, hint in installation.key_hints():
+        assert len(hint) == 5, "only the last five characters, never a whole key"
+
+
+def test_a_notification_state_is_not_reported_as_activated():
+    """---NOTIFICATIONS--- means installed but not activated.
+
+    It is the state a migration most often leaves someone in, and it otherwise
+    reads as success.
+    """
+    visio, proplus = office.parse_ospp_dstatus(TWO_PRODUCT_DSTATUS)
+    assert visio.is_activated is False
+    assert proplus.is_activated is True
+
+    installation = office.read_configuration({"ProductReleaseIds": "ProPlus2024Retail"})
+    installation.licences = [visio, proplus]
+    assert installation.fully_activated is False
+
+
+def test_activation_state_reaches_the_record():
+    installation = office.read_configuration({"ProductReleaseIds": "ProPlus2024Retail"})
+    installation.licences = office.parse_ospp_dstatus(TWO_PRODUCT_DSTATUS)
+    record = installation.to_json()
+    assert record["fully_activated"] is False
+    assert [licence["activated"] for licence in record["licences"]] == [False, True]

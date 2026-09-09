@@ -74,8 +74,8 @@ def run_scan(
     _record_sync_roots(result)
     _add_sync_followups(result)
     if config.include_software:
-        _scan_software(env, result, progress)
-        _scan_office(env, result, progress)
+        inventory = _scan_software(env, result, progress)
+        _scan_office(env, result, progress, inventory)
     _note_long_paths(result, long_paths)
 
     result.duration_seconds = time.monotonic() - started
@@ -332,7 +332,7 @@ def _note_long_paths(result: ScanResult, long_path_count: int) -> None:
 
 
 # --- software and Office ---------------------------------------------------
-def _scan_software(env: Environment, result: ScanResult, progress: ProgressCallback | None) -> None:
+def _scan_software(env: Environment, result: ScanResult, progress: ProgressCallback | None):
     """Inventory installed applications as a manifest record, not as files.
 
     Nothing is copied: what migrates is the *list*, so the target machine can
@@ -346,7 +346,7 @@ def _scan_software(env: Environment, result: ScanResult, progress: ProgressCallb
     if not inventory.entries and not inventory.winget_export:
         for note in inventory.notes:
             result.add_note(Severity.WARNING, f"software inventory incomplete: {note}")
-        return
+        return None
 
     result.items.append(
         Item(
@@ -378,6 +378,7 @@ def _scan_software(env: Environment, result: ScanResult, progress: ProgressCallb
 
     if inventory.manual:
         components = len(inventory.components)
+        office_covered = sum(1 for entry in inventory.entries if entry.covered_by_office)
         result.followups.append(
             Followup(
                 id="software:manual",
@@ -391,6 +392,12 @@ def _scan_software(env: Environment, result: ScanResult, progress: ProgressCallb
                         if components
                         else ""
                     )
+                    + (
+                        f" and {office_covered} Office entries covered by the Office "
+                        "step below"
+                        if office_covered
+                        else ""
+                    )
                     + ". The full list is written next to the restored files."
                 ),
                 steps=[
@@ -401,16 +408,29 @@ def _scan_software(env: Environment, result: ScanResult, progress: ProgressCallb
                 category=Category.SOFTWARE,
             )
         )
+    return inventory
 
 
-def _scan_office(env: Environment, result: ScanResult, progress: ProgressCallback | None) -> None:
+def _scan_office(
+    env: Environment,
+    result: ScanResult,
+    progress: ProgressCallback | None,
+    inventory=None,
+) -> None:
     """Detect Office so it can be reinstalled -- never so its key can be taken."""
     from . import office as office_mod  # noqa: PLC0415 -- optional stage
+    from . import software as software_mod  # noqa: PLC0415
 
     _emit(progress, "Detecting Microsoft Office")
     installation = office_mod.detect(env)
     if not installation.present:
         return
+
+    if inventory is not None:
+        # Office registers an uninstall entry per product and language. Listing
+        # those as applications to reinstall by hand contradicts the Office
+        # follow-up printed directly beneath them.
+        software_mod.flag_office_entries(inventory, installation.version)
 
     result.items.append(
         Item(
@@ -439,9 +459,20 @@ def _scan_office(env: Environment, result: ScanResult, progress: ProgressCallbac
     steps = list(office_mod.REACTIVATION_STEPS.get(
         installation.activation_type, office_mod.REACTIVATION_STEPS["unknown"]
     ))
-    hint = next((lic.key_last_five for lic in installation.licences if lic.key_last_five), "")
-    if hint and installation.activation_type == "retail":
-        steps.append(f"The installed key ends in {hint} -- use that to recognise the right one.")
+    hints = installation.key_hints()
+    if hints and installation.activation_type == "retail":
+        # Office and Visio install together and carry different keys; one hint
+        # would send the user looking for the wrong one.
+        listed = "; ".join(f"{product} ends in {hint}" for product, hint in hints)
+        steps.append(f"Installed key(s): {listed} -- use these to recognise the right ones.")
+    unactivated = [lic.product for lic in installation.licences if not lic.is_activated]
+    if unactivated:
+        steps.append(
+            "Note: "
+            + ", ".join(unactivated)
+            + " is not currently activated on this machine either "
+            "(ospp reports a notification state), so this was already outstanding."
+        )
     result.followups.append(
         Followup(
             id="office:reactivate",
