@@ -80,6 +80,7 @@ def run_scan(
         installation = _detect_office(env, progress)
         _scan_software(env, result, progress, installation)
         _record_office(result, installation)
+    _scan_dev_config(env, result, config, progress)
     _note_long_paths(result, long_paths)
 
     result.duration_seconds = time.monotonic() - started
@@ -445,6 +446,44 @@ def _scan_software(
                     "Re-download the titles you still play from your library.",
                 ],
                 category=Category.SOFTWARE,
+            )
+        )
+
+
+def _scan_dev_config(
+    env: Environment, result: ScanResult, config: ScanConfig, progress: ProgressCallback | None
+) -> None:
+    """Capture developer and credential config -- the encrypted-only material."""
+    from . import devconfig as devconfig_mod  # noqa: PLC0415 -- optional stage
+
+    _emit(progress, "Checking developer configuration")
+    items, notes = devconfig_mod.scan_dev_config(env, files_only=config.files_only)
+    result.items.extend(items)
+    result.notes.extend(notes)
+
+    captured_secret = [
+        item for item in items if item.is_secret and item.action is Action.CAPTURE
+    ]
+    if captured_secret:
+        result.followups.append(
+            Followup(
+                id="dev:secrets",
+                title="Check the developer credentials that were migrated",
+                why=(
+                    f"{len(captured_secret)} credential location(s) (SSH keys, cloud "
+                    "credentials and the like) were captured into the encrypted bundle "
+                    "only. They restore to their original paths; some still need a step "
+                    "from you."
+                ),
+                steps=[
+                    "SSH keys restore to ~/.ssh -- check their permissions are still "
+                    "restrictive on the new machine.",
+                    "Cloud CLIs (aws, az, gcloud) may prompt to re-authenticate even "
+                    "with the config in place.",
+                    "Rotate anything you would rather not have travelled, now that it "
+                    "is on a second machine.",
+                ],
+                category=Category.DEV_CONFIG,
             )
         )
 

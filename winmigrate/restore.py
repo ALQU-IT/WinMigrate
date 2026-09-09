@@ -299,6 +299,12 @@ def _target_for(archive_name: str, destination: Path) -> Path | None:
             parts = parts[1:]
     elif parts and parts[0] == "data":
         parts = parts[1:]
+    elif parts and parts[0] == "secrets":
+        # Encrypted-only material (dev config): the member name after "secrets/"
+        # is the profile-relative path it came from, e.g. secrets/.ssh/id_rsa.
+        # The tar member names live inside the ciphertext, so this placement
+        # information is not exposed by the plaintext sidecar.
+        parts = parts[1:]
     if not parts:
         return None
     if ":" in parts[0]:

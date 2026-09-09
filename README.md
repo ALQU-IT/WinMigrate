@@ -13,7 +13,9 @@ prepares for you and hands over, with instructions. It never impersonates you.
 > `reinstall` all work: encryption, integrity checking, a space pre-check,
 > shadow copies, a resumable restore, an installed-software inventory with
 > winget reinstall, and Office detection with a matching ODT configuration.
-> Browser profiles and the rest of the breadth work are next; see
+> Developer credentials travel encrypted-only, and games installed through a
+> launcher are recognised as such. Browser profiles and the password handoff are
+> next; see
 > [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Install

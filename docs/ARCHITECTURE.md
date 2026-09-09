@@ -88,6 +88,7 @@ winmigrate/
     syncroots.py     OneDrive and Nextcloud detection (config-read only)
     software.py      installed-software inventory (registry + winget + Appx)
     office.py        Click-to-Run detection and licence status (no key extraction)
+    devconfig.py     developer/credential config (encrypted-only, secret items)
 schema/manifest.schema.json   machine-readable mirror of the manifest
 docs/manifest-schema.md       prose description of the same
 tests/                        pytest suite; runs on any OS via fixture profiles
@@ -181,6 +182,23 @@ the user's step, and the follow-up text differs by licence type: a subscription
 reactivates on sign-in, retail needs the key the user owns, volume goes through
 their administrator.
 
+## Secret material: encrypted-only, placed by convention
+
+Developer and credential config -- `.ssh`, `.aws/credentials`, `.gitconfig`,
+`.npmrc` and the like -- is captured on by default and marked
+`Sensitivity.SECRET`. Such items live only in the encrypted payload: the
+plaintext sidecar carries a redacted stub (id, size, count -- no path, no
+contents), the log never sees them, and `--files-only` drops them entirely
+while still reporting that they were found.
+
+Their placement is by archive-path convention, the same mechanism user files
+use, under a `secrets/` prefix: `.ssh/id_rsa` is stored as `secrets/.ssh/id_rsa`
+and restores to `~/.ssh/id_rsa`. This is safe precisely because tar member names
+live *inside* the ciphertext -- a holder of the `.dat` without the passphrase
+cannot read them, so the placement information is not exposed even though it is
+not itself in the (encrypted) authoritative manifest's redacted twin. WSL
+distributions are recorded as a list only; the virtual disks are not copied.
+
 ## Skip accounting
 
 A migration tool that quietly drops data is worse than one that copies too much,
@@ -207,7 +225,7 @@ Two rules keep the numbers honest:
 | 1b | File capture with sync-skip, packaging (AES-256-GCM + Argon2id), manifest hashes, restore with verification | **shipped** |
 | 2 | VSS for locked files, resume, space pre-check, long-path handling, restore report | **shipped** (VSS untested on real Windows) |
 | 3 | App inventory + `winget import`; Office detect + ODT reinstall | **shipped** (untested against real winget/Office) |
-| 4 | Browser profiles, sign-in/sync detection, native-export password handoff; Wi-Fi, printers, env vars, fonts, dev config, Outlook | next |
+| 4 | Dev config (encrypted-only) + game-launcher classification **shipped**; browsers, password handoff, Wi-Fi, printers, env vars, fonts, Outlook next | in progress |
 | 5 | Files-only mode polish, optional exclusion presets (device backups, VM images), config file, optional GUI | |
 
 ## Why the payload is encrypted in chunks

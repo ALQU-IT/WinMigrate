@@ -38,6 +38,7 @@ from .models import Action, Item, Kind, Note, ScanResult, Severity, utcnow
 from .platform_win import Environment
 from .scan import CaptureFile, walk_tree
 from .util import hashing
+from .util import paths as pathutil
 from .util import humanize
 
 log = logging.getLogger(__name__)
@@ -201,6 +202,33 @@ def _capture_item(
     root = Path(item.source_path)
     digests: list[tuple[str, str]] = []
     captured_bytes = 0
+
+    # A single-file item (a dotfile such as .gitconfig) is added directly rather
+    # than walked; only trees go through walk_tree.
+    if item.kind is Kind.FILE:
+        source = shadow.map(root) if shadow is not None else root
+        try:
+            digest = writer.add_file(source, item.archive_path)
+        except OSError as exc:
+            reason = exc.strerror or str(exc)
+            report.failures.append((str(root), reason))
+            log.warning("could not capture %s: %s", root, reason)
+            item.size_bytes = 0
+            item.file_count = 0
+            return
+        try:
+            size = os.stat(pathutil.extended(root)).st_size
+        except OSError:
+            size = 0
+        report.captured_bytes += size
+        report.captured_files += 1
+        item.digest = digest
+        item.digest_algo = hashing.FILE_DIGEST_ALGO
+        item.size_bytes = size
+        item.file_count = 1
+        if progress is not None:
+            progress(item.title, size)
+        return
 
     for event in walk_tree(root, config, env, scan.sync_roots, relative_base=env.profile_root):
         if not isinstance(event, CaptureFile):
