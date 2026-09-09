@@ -9,10 +9,12 @@ never uploads anything, and anything Windows deliberately gates behind human
 authentication — account sign-ins, licence activation, password import — it
 prepares for you and hands over, with instructions. It never impersonates you.
 
-> **Status: phases 1–2.** `scan`, `capture`, `inspect` and `restore` all work,
-> with encryption, integrity checking, a space pre-check, shadow copies for
-> locked files and a resumable restore. Software inventory, Office and browser
-> handling are next; see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+> **Status: phases 1–3.** `scan`, `capture`, `inspect`, `restore` and
+> `reinstall` all work: encryption, integrity checking, a space pre-check,
+> shadow copies, a resumable restore, an installed-software inventory with
+> winget reinstall, and Office detection with a matching ODT configuration.
+> Browser profiles and the rest of the breadth work are next; see
+> [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Install
 
@@ -51,6 +53,7 @@ winmigrate capture -o mypc.dat       # write the plan into an encrypted bundle
 winmigrate inspect mypc.dat          # describe a bundle without its passphrase
 winmigrate restore mypc.dat -n       # show what a restore would do
 winmigrate restore mypc.dat          # put it back on the new machine
+winmigrate reinstall <restore-folder>  # show the software reinstall plan
 ```
 
 Capture prompts for a passphrase and asks before writing. There is no
@@ -96,6 +99,23 @@ profile it inspects, and cannot trigger a cloud download.
 * which cloud-sync folders were found, and which account owns each;
 * what you will still have to do yourself once the restore is done.
 
+## Reinstalling software
+
+Applications are inventoried, not copied: what travels is the list, so the new
+machine installs current builds from its own sources. Restore writes the inputs
+into `WinMigrate-Reinstall\` and installs nothing by itself.
+
+```powershell
+winmigrate reinstall C:\restored\WinMigrate-Reinstall            # plan only
+winmigrate reinstall C:\restored\WinMigrate-Reinstall --apps     # run winget import
+winmigrate reinstall C:\restored\WinMigrate-Reinstall --office C:\ODT\setup.exe
+```
+
+Anything winget has no package for is listed in `reinstall-by-hand.md` rather
+than quietly dropped. Office gets a `configuration.xml` reproducing the edition,
+bitness, language and channel that were detected — you supply `setup.exe` from
+Microsoft's Office Deployment Tool.
+
 ## What it will not do
 
 WinMigrate does **not** decrypt browsers' saved-password stores, and will not:
@@ -103,7 +123,10 @@ that routine is an infostealer payload regardless of who runs it. Instead it
 detects sign-in and sync state from configuration files only, and either tells
 you the passwords will sync down when you sign in, or walks you through the
 browser's own export and re-import. It likewise detects and reinstalls your
-Office edition without ever extracting a product key.
+Office edition without ever extracting a product key: the generated
+configuration contains no `PIDKEY`, and the only licence detail recorded is the
+last five characters that `ospp.vbs` prints itself — enough for you to recognise
+which key you need, useless to anyone else.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full boundary and the
 principles the code enforces, and [docs/manifest-schema.md](docs/manifest-schema.md)

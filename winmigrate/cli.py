@@ -86,7 +86,34 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_restore_arguments(restore_parser)
     restore_parser.set_defaults(func=cmd_restore)
+
+    reinstall_parser = subparsers.add_parser(
+        "reinstall",
+        parents=[common],
+        help="reinstall software from the files a restore wrote",
+    )
+    _add_reinstall_arguments(reinstall_parser)
+    reinstall_parser.set_defaults(func=cmd_reinstall)
     return parser
+
+
+def _add_reinstall_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "directory",
+        type=Path,
+        help="the WinMigrate-Reinstall folder a restore wrote",
+    )
+    parser.add_argument(
+        "--apps", action="store_true", help="run winget import for the captured applications"
+    )
+    parser.add_argument(
+        "--office",
+        type=Path,
+        metavar="SETUP_EXE",
+        help="run Office setup.exe with the generated configuration "
+        "(setup.exe comes from the Office Deployment Tool, which you download)",
+    )
+    parser.add_argument("--yes", action="store_true", help="do not ask for confirmation")
 
 
 def _add_capture_arguments(parser: argparse.ArgumentParser) -> None:
@@ -181,6 +208,12 @@ def _add_scan_arguments(parser: argparse.ArgumentParser) -> None:
         metavar="PATTERN",
         help="pattern that overrides an exclusion (repeatable)",
     )
+    parser.add_argument(
+        "--no-software",
+        dest="include_software",
+        action="store_false",
+        help="skip the installed-software and Office inventory (faster)",
+    )
     parser.add_argument("--json", action="store_true", help="print the plan as JSON instead of a table")
     parser.add_argument(
         "--save-plan",
@@ -200,6 +233,7 @@ def _config_from_args(args: argparse.Namespace) -> ScanConfig:
     config.include_regenerable = args.include_regenerable or config.include_regenerable
     config.files_only = args.files_only or config.files_only
     config.measure_skipped = args.measure_skipped and config.measure_skipped
+    config.include_software = args.include_software and config.include_software
     if args.exclude:
         config.extra_excludes = tuple(config.extra_excludes) + tuple(args.exclude)
     if args.include:
@@ -359,6 +393,91 @@ def cmd_restore(args: argparse.Namespace, console: Console) -> int:
         restore_report = restore_mod.restore(options)
     report.render_restore_report(restore_report, console, dry_run=args.dry_run)
     return 0 if restore_report.ok else 3
+
+
+def cmd_reinstall(args: argparse.Namespace, console: Console) -> int:
+    """Replay the reinstall files a restore wrote. Always asks before installing."""
+    from . import reinstall as reinstall_mod
+
+    directory = Path(args.directory)
+    if directory.name != reinstall_mod.ARTIFACTS_DIRECTORY and (
+        directory / reinstall_mod.ARTIFACTS_DIRECTORY
+    ).is_dir():
+        directory = directory / reinstall_mod.ARTIFACTS_DIRECTORY
+    if not directory.is_dir():
+        raise ConfigError(f"no reinstall folder at {directory}")
+
+    artifacts = reinstall_mod.Artifacts(directory=directory)
+    import_file = directory / reinstall_mod.WINGET_IMPORT_FILE
+    config_file = directory / reinstall_mod.OFFICE_CONFIG_FILE
+    manual_file = directory / reinstall_mod.MANUAL_LIST_FILE
+    artifacts.winget_import = import_file if import_file.is_file() else None
+    artifacts.office_configuration = config_file if config_file.is_file() else None
+    artifacts.manual_list = manual_file if manual_file.is_file() else None
+    if artifacts.winget_import:
+        export = json.loads(artifacts.winget_import.read_text(encoding="utf-8"))
+        artifacts.reinstallable_count = sum(
+            len(source.get("Packages", []) or []) for source in export.get("Sources", []) or []
+        )
+
+    report.render_reinstall_plan(artifacts, console)
+
+    if not args.apps and args.office is None:
+        console.print(
+            "\n[dim]Nothing was installed. Add --apps to run the winget import, or "
+            "--office <setup.exe> to run the Office configuration.[/dim]"
+        )
+        return 0
+
+    if not args.yes:
+        console.print(
+            "\n[yellow]This installs software on this machine. It can take a long "
+            "time, may prompt for elevation, and installs current versions rather "
+            "than the exact versions from the old machine.[/yellow]"
+        )
+        if console.input("Go ahead? [y/N] ").strip().lower() not in {"y", "yes"}:
+            console.print("Nothing was installed.")
+            return 1
+
+    status = 0
+    if args.apps:
+        if artifacts.winget_import is None:
+            console.print("[yellow]No winget import file in this folder.[/yellow]")
+            status = 1
+        else:
+            console.print("[cyan]Running winget import — this takes a while…[/cyan]")
+            result = reinstall_mod.run_winget_import(artifacts.winget_import)
+            console.print(result.stdout.strip() or "[dim](no output)[/dim]")
+            if not result.ok:
+                console.print(f"[yellow]winget finished with: {result.summary()}[/yellow]")
+                console.print(
+                    "[dim]winget reports a non-zero exit when any single package fails; "
+                    "the others still installed.[/dim]"
+                )
+                status = status or 0
+
+    if args.office is not None:
+        if artifacts.office_configuration is None:
+            console.print("[yellow]No Office configuration in this folder.[/yellow]")
+            status = 1
+        elif not Path(args.office).is_file():
+            raise ConfigError(f"Office setup.exe not found: {args.office}")
+        else:
+            console.print("[cyan]Running Office setup…[/cyan]")
+            result = reinstall_mod.run_office_install(
+                Path(args.office), artifacts.office_configuration
+            )
+            if not result.ok:
+                console.print(f"[red]Office setup failed: {result.summary()}[/red]")
+                status = 2
+            else:
+                console.print("[green]Office installed. Activation is still yours to complete.[/green]")
+
+    if artifacts.manual_list:
+        console.print(
+            f"\n[bold]Still by hand:[/bold] {artifacts.manual_list}"
+        )
+    return status
 
 
 def _override_allowed() -> bool:

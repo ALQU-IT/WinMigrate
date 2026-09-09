@@ -58,6 +58,15 @@ items. `Sensitivity.SECRET` items appear only as stubs:
 Size and count are kept because they are not sensitive and they make the totals
 add up; the source path, archive path, record payload and notes are dropped.
 
+`record` payloads are withheld from the sidecar too, unless the item sets
+`record_public`. An installed-software inventory is not credential material, but
+it names every application and version on the machine in a file that needs no
+passphrase — a useful map for anyone looking for an unpatched version. The item
+still appears, marked `record_withheld`, so nothing about the bundle's contents
+is a mystery; only the detail moves inside the encryption. Small, genuinely
+useful records — which sync provider owns a folder — set `record_public` and
+stay visible.
+
 ### 3. `manifest.json` — inside the encrypted payload
 
 The authoritative copy. Same schema, nothing redacted, per-item digests filled
@@ -98,7 +107,8 @@ can refer back to a preview.
 | `skipped` | Grouped accounting of what was left out beneath this item, with bytes and file counts. |
 | `restore` | `target` (may contain `%USERPROFILE%`), `strategy`, `requires_elevation`, notes. |
 | `digest`, `digest_algo` | Filled in by the package stage; `sha256` or `sha256-tree-v1`. |
-| `record` | Payload for `kind: record` items. |
+| `record` | Payload for `kind: record` items (software inventory, Office installation, sync-root detail). |
+| `record_public` | Whether that payload may appear in the plaintext sidecar. Off by default. |
 | `notes` | Severity-tagged messages shown in the preview and the restore report. |
 
 ### Restore strategies

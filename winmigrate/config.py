@@ -118,6 +118,10 @@ class ScanConfig:
     follow_reparse_points: bool = False
     extra_excludes: tuple[str, ...] = ()
     extra_includes: tuple[str, ...] = ()  # patterns that override an exclusion
+    #: Inventory installed software and Office. Costs a winget and a PowerShell
+    #: call, so it can be switched off for a quick file-only scan.
+    include_software: bool = True
+
     #: Walk excluded/synced subtrees to report how many bytes they came to.
     #: Honest numbers cost one extra stat pass; ``--fast`` turns it off.
     measure_skipped: bool = True
@@ -192,6 +196,7 @@ def config_from_dict(data: dict[str, Any], base: ScanConfig | None = None) -> Sc
         "extra_excludes",
         "extra_includes",
         "measure_skipped",
+        "include_software",
     }
     unknown = set(data) - known
     if unknown:

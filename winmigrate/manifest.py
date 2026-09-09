@@ -201,6 +201,12 @@ def public_view(manifest: dict[str, Any]) -> dict[str, Any]:
 
 def _redact_item(item: dict[str, Any]) -> dict[str, Any]:
     if item.get("sensitivity") != "secret":
+        if item.get("record") is not None and not item.get("record_public"):
+            # Keep the shape, drop the contents: enough to know the bundle holds
+            # a software inventory, not enough to read it without the passphrase.
+            trimmed = {key: value for key, value in item.items() if key != "record"}
+            trimmed["record_withheld"] = True
+            return trimmed
         return item
     keep = {"id", "category", "kind", "title", "action", "sensitivity", "size_bytes", "file_count"}
     redacted = {key: value for key, value in item.items() if key in keep}

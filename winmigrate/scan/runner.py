@@ -73,6 +73,9 @@ def run_scan(
         long_paths += _scan_other_profile_dirs(config, env, result, progress)
     _record_sync_roots(result)
     _add_sync_followups(result)
+    if config.include_software:
+        _scan_software(env, result, progress)
+        _scan_office(env, result, progress)
     _note_long_paths(result, long_paths)
 
     result.duration_seconds = time.monotonic() - started
@@ -270,6 +273,7 @@ def _record_sync_roots(result: ScanResult) -> None:
                     "root": root.root,
                     "account_hint": root.account_hint,
                 },
+                record_public=True,
                 restore=RestoreSpec(
                     target=root.root,
                     strategy=RestoreStrategy.GUIDED,
@@ -325,3 +329,120 @@ def _note_long_paths(result: ScanResult, long_path_count: int) -> None:
             f"{long_path_count} path(s) are at or beyond the classic 260-character limit",
             "Capture uses extended-length paths; third-party tools may not.",
         )
+
+
+# --- software and Office ---------------------------------------------------
+def _scan_software(env: Environment, result: ScanResult, progress: ProgressCallback | None) -> None:
+    """Inventory installed applications as a manifest record, not as files.
+
+    Nothing is copied: what migrates is the *list*, so the target machine can
+    reinstall from its own sources rather than carrying binaries that would be
+    the wrong build, unlicensed, or simply out of date by the time they land.
+    """
+    from . import software as software_mod  # noqa: PLC0415 -- optional stage
+
+    _emit(progress, "Inventorying installed software")
+    inventory = software_mod.scan_software(env)
+    if not inventory.entries and not inventory.winget_export:
+        for note in inventory.notes:
+            result.add_note(Severity.WARNING, f"software inventory incomplete: {note}")
+        return
+
+    result.items.append(
+        Item(
+            id="software:inventory",
+            category=Category.SOFTWARE,
+            kind=Kind.RECORD,
+            title=f"Installed software ({len(inventory.entries)})",
+            action=Action.CAPTURE,
+            record=inventory.to_json(),
+            restore=RestoreSpec(
+                target="winget import",
+                strategy=RestoreStrategy.GUIDED,
+                notes=[
+                    "Restore writes a winget import file; 'winmigrate reinstall' replays it.",
+                ],
+            ),
+            notes=[
+                Note(
+                    Severity.INFO,
+                    f"{len(inventory.reinstallable)} of {len(inventory.entries)} "
+                    "can be reinstalled by winget",
+                )
+            ],
+        )
+    )
+    for note in inventory.notes:
+        result.add_note(Severity.WARNING, f"software inventory: {note}")
+
+    if inventory.manual:
+        result.followups.append(
+            Followup(
+                id="software:manual",
+                title=f"Reinstall {len(inventory.manual)} application(s) by hand",
+                why=(
+                    "winget has no package for these, so they cannot be reinstalled "
+                    "automatically. The full list is written next to the restored files."
+                ),
+                steps=[
+                    "Open WinMigrate-Reinstall\\reinstall-by-hand.md in the restore folder.",
+                    "Work down the list, installing what you still want.",
+                    "Being listed means it was on the old machine, not that you need it.",
+                ],
+                category=Category.SOFTWARE,
+            )
+        )
+
+
+def _scan_office(env: Environment, result: ScanResult, progress: ProgressCallback | None) -> None:
+    """Detect Office so it can be reinstalled -- never so its key can be taken."""
+    from . import office as office_mod  # noqa: PLC0415 -- optional stage
+
+    _emit(progress, "Detecting Microsoft Office")
+    installation = office_mod.detect(env)
+    if not installation.present:
+        return
+
+    result.items.append(
+        Item(
+            id="office:installation",
+            category=Category.OFFICE,
+            kind=Kind.RECORD,
+            title=", ".join(installation.titles) or "Microsoft Office",
+            action=Action.CAPTURE,
+            record=installation.to_json(),
+            restore=RestoreSpec(
+                target="Office Deployment Tool",
+                strategy=RestoreStrategy.GUIDED,
+                notes=["Restore writes a matching configuration.xml; you run setup.exe."],
+            ),
+            notes=[
+                Note(
+                    Severity.INFO,
+                    f"{installation.platform or 'unknown bitness'}, "
+                    f"{installation.client_culture or 'unknown language'}, "
+                    f"channel {installation.channel or 'unknown'}",
+                )
+            ],
+        )
+    )
+
+    steps = list(office_mod.REACTIVATION_STEPS.get(
+        installation.activation_type, office_mod.REACTIVATION_STEPS["unknown"]
+    ))
+    hint = next((lic.key_last_five for lic in installation.licences if lic.key_last_five), "")
+    if hint and installation.activation_type == "retail":
+        steps.append(f"The installed key ends in {hint} -- use that to recognise the right one.")
+    result.followups.append(
+        Followup(
+            id="office:reactivate",
+            title="Reinstall and reactivate Office",
+            why=(
+                f"Office ({installation.activation_type} licence) is not carried in the "
+                "bundle. WinMigrate records what to install; activation needs you. "
+                "No product key is copied or recoverable from this bundle."
+            ),
+            steps=steps,
+            category=Category.OFFICE,
+        )
+    )

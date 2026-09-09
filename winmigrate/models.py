@@ -199,6 +199,12 @@ class Item:
     digest: str | None = None            # filled by the package stage
     digest_algo: str | None = None
     record: dict[str, Any] | None = None  # payload for Kind.RECORD items
+    #: Whether ``record`` may appear in the plaintext sidecar manifest. Off by
+    #: default: an installed-software inventory is not credential material, but
+    #: it fingerprints the machine (and its unpatched versions) in a file that
+    #: sits next to the bundle, and the sidecar exists to identify a bundle, not
+    #: to describe its contents.
+    record_public: bool = False
     notes: list[Note] = field(default_factory=list)
 
     @property
@@ -248,6 +254,8 @@ class Item:
             data["digest_algo"] = self.digest_algo
         if self.record is not None:
             data["record"] = self.record
+            if self.record_public:
+                data["record_public"] = True
         if self.notes:
             data["notes"] = [note.to_json() for note in self.notes]
         return data

@@ -68,6 +68,7 @@ class RestoreReport:
     digest_mismatches: list[str] = field(default_factory=list)
     failures: list[tuple[str, str]] = field(default_factory=list)
     followups: list[Followup] = field(default_factory=list)
+    artifacts: object | None = None    # reinstall.Artifacts, when there was software
     notes: list[Note] = field(default_factory=list)
     duration_seconds: float = 0.0
     manifest: dict | None = None
@@ -173,6 +174,8 @@ def restore(options: RestoreOptions, progress: ProgressCallback | None = None) -
     manifest_mod.validate(report.manifest)
     _check_digests(report, written)
     _collect_followups(report)
+    if not options.dry_run:
+        _write_reinstall_artifacts(report, destination)
     report.duration_seconds = time.monotonic() - started
     return report
 
@@ -323,6 +326,21 @@ def _check_digests(report: RestoreReport, written: dict[str, str]) -> None:
         if tree_digest(pairs) != item["digest"]:
             report.digest_mismatches.append(item["id"])
             log.error("digest mismatch for item %s", item["id"])
+
+
+def _write_reinstall_artifacts(report: RestoreReport, destination: Path) -> None:
+    """Write the reinstall inputs. Installs nothing -- that is a separate step."""
+    from . import reinstall as reinstall_mod  # noqa: PLC0415 -- avoid import cycle
+
+    try:
+        artifacts = reinstall_mod.write_artifacts(report.manifest or {}, destination)
+    except OSError as exc:
+        report.notes.append(
+            Note(Severity.WARNING, "could not write the reinstall files", str(exc))
+        )
+        return
+    if artifacts.anything_to_do:
+        report.artifacts = artifacts
 
 
 def _collect_followups(report: RestoreReport) -> None:

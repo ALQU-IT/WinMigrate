@@ -133,3 +133,45 @@ def test_item_lookup_by_id():
 
 def test_totals_count_secret_items():
     assert secret_scan().totals().secret_item_count == 1
+
+
+def test_a_software_inventory_is_withheld_from_the_plaintext_sidecar():
+    """The sidecar identifies a bundle; it should not fingerprint the machine.
+
+    An installed-software list is not credential material, but it names every
+    application and version on the machine in a file that sits next to the
+    bundle and needs no passphrase.
+    """
+    result = ScanResult(source=SourceMachine(hostname="pc", username="alice"))
+    result.items.append(
+        Item(
+            id="software:inventory",
+            category=Category.SOFTWARE,
+            kind=Kind.RECORD,
+            title="Installed software (412)",
+            record={"applications": [{"name": "Some Vulnerable App", "version": "1.0.0"}]},
+        )
+    )
+    public = manifest_mod.public_view(manifest_mod.build(result))
+    entry = public["items"][0]
+    assert entry["record_withheld"] is True
+    assert "record" not in entry
+    assert "Some Vulnerable App" not in json.dumps(public)
+    # The item itself is still listed, so the bundle's contents are no mystery.
+    assert entry["title"] == "Installed software (412)"
+
+
+def test_a_record_marked_public_is_kept_in_the_sidecar():
+    result = ScanResult(source=SourceMachine(hostname="pc", username="alice"))
+    result.items.append(
+        Item(
+            id="sync:onedrive:0",
+            category=Category.USER_FILES,
+            kind=Kind.REPORT,
+            title="OneDrive",
+            record={"provider": "onedrive", "root": "C:\\Users\\alice\\OneDrive"},
+            record_public=True,
+        )
+    )
+    public = manifest_mod.public_view(manifest_mod.build(result))
+    assert public["items"][0]["record"]["provider"] == "onedrive"

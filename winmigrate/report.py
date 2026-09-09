@@ -226,6 +226,26 @@ def _render_totals(result: ScanResult, console: Console) -> None:
     )
 
 
+def render_reinstall_plan(artifacts, console: Console) -> None:
+    """Show what a reinstall run would do, before it does any of it."""
+    table = Table(title="Reinstall plan", title_justify="left", expand=False)
+    table.add_column("Step")
+    table.add_column("Detail", overflow="fold")
+    if artifacts.winget_import:
+        table.add_row(
+            f"winget import ({artifacts.reinstallable_count} apps)", str(artifacts.winget_import)
+        )
+    if artifacts.office_configuration:
+        office = artifacts.office
+        detail = str(artifacts.office_configuration)
+        if office is not None:
+            detail += f"\n{', '.join(office.titles)} — {office.platform}, channel {office.channel}"
+        table.add_row("Office (needs setup.exe from the ODT)", detail)
+    if artifacts.manual_list:
+        table.add_row(f"by hand ({artifacts.manual_count} apps)", str(artifacts.manual_list))
+    console.print(table)
+
+
 def preview_to_dict(result: ScanResult) -> dict[str, Any]:
     """Machine-readable form of the preview, for ``--json``."""
     from . import manifest as manifest_mod
@@ -339,6 +359,27 @@ def render_restore_report(report, console: Console, *, dry_run: bool | None = No
     for note in report.notes:
         if note.severity is not Severity.INFO:
             console.print(f"[yellow]![/yellow] {note.message}" + (f" [dim]({note.detail})[/dim]" if note.detail else ""))
+
+    artifacts = getattr(report, "artifacts", None)
+    if artifacts is not None:
+        console.print()
+        lines = []
+        if artifacts.winget_import:
+            lines.append(
+                f"{artifacts.reinstallable_count} application(s) can be reinstalled by winget"
+            )
+        if artifacts.manual_count:
+            lines.append(f"{artifacts.manual_count} need installing by hand — see the list")
+        if artifacts.office_configuration:
+            lines.append("an Office configuration matching the old install was written")
+        lines.append(f"files: [bold]{artifacts.directory}[/bold]")
+        lines.append(
+            "run [bold]winmigrate reinstall "
+            f'"{artifacts.directory}"[/bold] when you are ready'
+        )
+        console.print(
+            Panel("\n".join(lines), title="Software — nothing installed yet", border_style="cyan")
+        )
 
     if report.followups:
         console.print()

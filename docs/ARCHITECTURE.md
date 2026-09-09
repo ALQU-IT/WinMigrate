@@ -74,6 +74,8 @@ winmigrate/
   capture.py         plan → bundle, with space pre-check, hashing and VSS
   restore.py         verify → decrypt → write → report
   vss.py             Volume Shadow Copy lifecycle and path translation
+  odt.py             Office Deployment Tool configuration generation
+  reinstall.py       the reinstall artifacts, and running winget/Office setup
   report.py          rich rendering of the preview, capture and restore reports
   errors.py          exception hierarchy
   util/
@@ -84,6 +86,8 @@ winmigrate/
     runner.py        orchestration: profile → ScanResult
     userfiles.py     the profile walk and its skip accounting
     syncroots.py     OneDrive and Nextcloud detection (config-read only)
+    software.py      installed-software inventory (registry + winget + Appx)
+    office.py        Click-to-Run detection and licence status (no key extraction)
 schema/manifest.schema.json   machine-readable mirror of the manifest
 docs/manifest-schema.md       prose description of the same
 tests/                        pytest suite; runs on any OS via fixture profiles
@@ -101,6 +105,46 @@ specifics stay in one reviewable file.
 `require_windows()` still refuses to run against a live profile off Windows;
 `--profile-root` (or `WINMIGRATE_ALLOW_NON_WINDOWS=1`) enables only the
 read-only stages against a fixture.
+
+## Software is a list, not a payload
+
+Applications are inventoried, never copied. What migrates is the *list*, so the
+target machine reinstalls from its own sources — carrying binaries would mean
+the wrong build, an unlicensed copy, or something already out of date by the
+time it lands.
+
+Three sources are merged because none is complete on its own: registry uninstall
+keys (classic desktop installers, per-machine, WOW6432Node and per-user),
+`winget export` (what winget can reinstall, and under which package id), and
+`Get-AppxPackage` (Store and UWP apps, which appear in neither). Anything winget
+cannot reinstall goes into a "by hand" list rather than being quietly dropped.
+
+The import file restore writes is **winget's own export, verbatim**. The
+name-to-package-id matching here only decides what the report calls automatic
+versus manual, so a wrong guess costs a misleading line, not a failed install.
+
+### Installing is a separate, explicit step
+
+Restore writes the reinstall inputs — the winget import file, an ODT
+configuration, the by-hand list — into `WinMigrate-Reinstall\` and installs
+nothing. `winmigrate reinstall` is a separate command that shows its plan and
+asks before running. Putting files back is what the user asked for; installing
+software is slow to undo, may need elevation, and pulls current versions rather
+than the ones that were on the source machine.
+
+### Office: reinstall, never key extraction
+
+Click-to-Run's registry configuration gives the product ids, bitness, language
+and channel needed to generate a matching ODT `configuration.xml`. `ospp.vbs
+/dstatus` gives the licence family and status.
+
+**No product key is extracted.** `ospp.vbs` itself prints the last five
+characters of an installed key, and that is all that is recorded — enough for
+the user to recognise which key they need, useless to anyone else. The generated
+configuration sets `AUTOACTIVATE=0` and contains no `PIDKEY`. Reactivation is
+the user's step, and the follow-up text differs by licence type: a subscription
+reactivates on sign-in, retail needs the key the user owns, volume goes through
+their administrator.
 
 ## Skip accounting
 
@@ -127,8 +171,8 @@ Two rules keep the numbers honest:
 | 1 | Project structure, manifest schema, `scan` + preview, config, logging | **shipped** |
 | 1b | File capture with sync-skip, packaging (AES-256-GCM + Argon2id), manifest hashes, restore with verification | **shipped** |
 | 2 | VSS for locked files, resume, space pre-check, long-path handling, restore report | **shipped** (VSS untested on real Windows) |
-| 3 | App inventory + `winget import`; Office detect + ODT reinstall | next |
-| 4 | Browser profiles, sign-in/sync detection, native-export password handoff; Wi-Fi, printers, env vars, fonts, dev config, Outlook | |
+| 3 | App inventory + `winget import`; Office detect + ODT reinstall | **shipped** (untested against real winget/Office) |
+| 4 | Browser profiles, sign-in/sync detection, native-export password handoff; Wi-Fi, printers, env vars, fonts, dev config, Outlook | next |
 | 5 | Files-only mode polish, optional exclusion presets (device backups, VM images), config file, optional GUI | |
 
 ## Why the payload is encrypted in chunks

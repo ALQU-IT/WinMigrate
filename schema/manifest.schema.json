@@ -315,6 +315,14 @@
         },
         "redacted": {
           "const": true
+        },
+        "record_public": {
+          "type": "boolean",
+          "description": "Whether this item's record may appear in the plaintext sidecar. Off by default: a software inventory fingerprints the machine and its versions."
+        },
+        "record_withheld": {
+          "const": true,
+          "description": "Public view only: the item has a record, withheld from the sidecar."
         }
       }
     },
