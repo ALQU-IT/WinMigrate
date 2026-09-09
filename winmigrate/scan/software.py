@@ -14,9 +14,15 @@ marked with whether winget can reinstall it. Anything it cannot goes into a
 silently loses software is worse than one that admits it.
 
 The import file written for restore is **winget's own export**, verbatim, rather
-than something reconstructed here. Our name-to-package-id matching only decides
-what the *report* calls automatic versus manual; it never has to be right for
-the reinstall itself to work.
+than something reconstructed here.
+
+Which applications winget can reinstall is answered by ``winget list``, not by
+guessing: it reports every installed application with either a real package id
+or a synthetic ``ARP\\...`` id meaning "no package for this". That is an exact
+answer, and the display names it prints are the same ones the registry holds, so
+they join up without fuzzy matching. A name-similarity fallback covers only what
+``winget list`` did not report at all -- and even then it decides a report label,
+never the reinstall, which replays winget's export regardless.
 """
 
 from __future__ import annotations
@@ -58,6 +64,23 @@ APPX_NOISE_PREFIXES = (
 )
 
 
+#: Runtimes, redistributables and driver packages. They are real installed
+#: entries, but nobody reinstalls them deliberately -- whatever needs them
+#: brings them along -- so listing them as chores to do by hand is noise.
+COMPONENT_PATTERNS = (
+    re.compile(r"visual c\+\+ .*redistributable", re.IGNORECASE),
+    re.compile(r"\bvcredist\b", re.IGNORECASE),
+    re.compile(r"\.net\s*(core\s*)?(framework|runtime|sdk|desktop runtime)", re.IGNORECASE),
+    re.compile(r"microsoft asp\.net core", re.IGNORECASE),
+    re.compile(r"windows (software development kit|sdk|driver kit)", re.IGNORECASE),
+    re.compile(r"\bdriver( package)?\b", re.IGNORECASE),
+    re.compile(r"webview2 runtime", re.IGNORECASE),
+    re.compile(r"\bruntime\b.*\b(x64|x86|arm64)\b", re.IGNORECASE),
+    re.compile(r"microsoft (visual studio )?tools for", re.IGNORECASE),
+    re.compile(r"^(intel|nvidia|amd|realtek)\b.*\b(driver|chipset|audio|graphics)\b", re.IGNORECASE),
+)
+
+
 @dataclass(slots=True)
 class SoftwareEntry:
     """One installed application, from whichever source knew about it."""
@@ -70,10 +93,18 @@ class SoftwareEntry:
     appx_family: str | None = None
     scope: str = ""                                    # machine | user
     architecture: str = ""
+    #: True when winget reported this application but has no package for it, so
+    #: the "no match" is winget's own answer rather than a failure to guess.
+    winget_knows_no_package: bool = False
 
     @property
     def reinstallable(self) -> bool:
         return self.winget_id is not None
+
+    @property
+    def is_component(self) -> bool:
+        """A runtime or driver that arrives with whatever needs it."""
+        return any(pattern.search(self.name) for pattern in COMPONENT_PATTERNS)
 
     def to_json(self) -> dict[str, Any]:
         data: dict[str, Any] = {"name": self.name, "version": self.version}
@@ -88,6 +119,10 @@ class SoftwareEntry:
             data["scope"] = self.scope
         if self.architecture:
             data["architecture"] = self.architecture
+        if self.is_component:
+            data["component"] = True
+        if self.winget_knows_no_package:
+            data["winget_has_no_package"] = True
         return data
 
 
@@ -105,7 +140,18 @@ class SoftwareInventory:
 
     @property
     def manual(self) -> list[SoftwareEntry]:
-        return [entry for entry in self.entries if not entry.reinstallable]
+        """Applications a person would actually have to reinstall themselves."""
+        return [
+            entry
+            for entry in self.entries
+            if not entry.reinstallable and not entry.is_component
+        ]
+
+    @property
+    def components(self) -> list[SoftwareEntry]:
+        return [
+            entry for entry in self.entries if not entry.reinstallable and entry.is_component
+        ]
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -113,6 +159,8 @@ class SoftwareInventory:
                 "total": len(self.entries),
                 "reinstallable_with_winget": len(self.reinstallable),
                 "manual": len(self.manual),
+                "components": len(self.components),
+                "winget_packages_in_export": len(packages_from_export(self.winget_export)),
             },
             "applications": [entry.to_json() for entry in self.entries],
             "winget_export": self.winget_export,
@@ -208,6 +256,142 @@ def packages_from_export(export: dict[str, Any] | None) -> list[tuple[str, str]]
     return packages
 
 
+# --- winget list -----------------------------------------------------------
+@dataclass(slots=True)
+class WingetListing:
+    """One row of ``winget list``."""
+
+    name: str
+    identifier: str
+    version: str = ""
+    source: str = ""
+
+    @property
+    def has_package(self) -> bool:
+        """False for the synthetic ``ARP\\...`` ids winget invents for unknowns.
+
+        winget lists everything installed. Entries it has no package for get a
+        generated id containing backslashes and no source, which is winget
+        telling us plainly that it cannot reinstall that one.
+        """
+        return bool(self.identifier) and "\\" not in self.identifier
+
+
+def run_winget_list(runner=process.run) -> tuple[list[WingetListing], str | None]:
+    """Ask winget what it sees installed, and under which package ids."""
+    result = runner(
+        ["winget", "list", "--accept-source-agreements", "--disable-interactivity"],
+        timeout=180,
+    )
+    if not result.ok and not result.stdout.strip():
+        return [], result.summary()
+    listings = parse_winget_list(result.stdout)
+    if not listings:
+        return [], "winget list produced no readable rows"
+    return listings, None
+
+
+def parse_winget_list(text: str) -> list[WingetListing]:
+    """Parse ``winget list``'s fixed-width table.
+
+    Column positions are taken from the header row rather than guessed, and a
+    header that cannot be found means an empty result rather than a wrong one --
+    the caller then falls back to name matching. Progress spinner lines, the
+    rule under the header and blank lines are all skipped.
+    """
+    lines = (text or "").splitlines()
+    header_index, offsets = _find_header(lines)
+    if offsets is None:
+        return []
+
+    listings: list[WingetListing] = []
+    for line in lines[header_index + 1 :]:
+        if not line.strip() or set(line.strip()) <= set("-\u2500 "):
+            continue
+        fields = _slice_columns(line, offsets)
+        name = fields.get("Name", "").strip()
+        identifier = fields.get("Id", "").strip()
+        if not name or not identifier:
+            continue
+        listings.append(
+            WingetListing(
+                name=name,
+                identifier=identifier,
+                version=fields.get("Version", "").strip(),
+                source=fields.get("Source", "").strip(),
+            )
+        )
+    return listings
+
+
+WINGET_COLUMNS = ("Name", "Id", "Version", "Available", "Source")
+
+
+def _find_header(lines: list[str]) -> tuple[int, dict[str, int] | None]:
+    for index, line in enumerate(lines):
+        if "Name" not in line or "Id" not in line:
+            continue
+        offsets: dict[str, int] = {}
+        position = 0
+        for column in WINGET_COLUMNS:
+            found = line.find(column, position)
+            if found == -1:
+                continue
+            offsets[column] = found
+            position = found + len(column)
+        if "Name" in offsets and "Id" in offsets and offsets["Id"] > offsets["Name"]:
+            return index, offsets
+    return -1, None
+
+
+def _slice_columns(line: str, offsets: dict[str, int]) -> dict[str, str]:
+    ordered = sorted(offsets.items(), key=lambda item: item[1])
+    fields: dict[str, str] = {}
+    for position, (column, start) in enumerate(ordered):
+        end = ordered[position + 1][1] if position + 1 < len(ordered) else len(line)
+        fields[column] = line[start:end]
+    return fields
+
+
+#: winget truncates long names to fit its columns, marking them with an ellipsis.
+TRUNCATION_MARKERS = ("\u2026", "...")
+
+
+def apply_winget_listings(
+    entries: list[SoftwareEntry], listings: list[WingetListing]
+) -> None:
+    """Attach package ids from ``winget list`` by exact display-name match.
+
+    The names winget prints for desktop applications come from the same registry
+    values we read, so they join up directly. Truncated names are matched on
+    their prefix instead.
+    """
+    by_name: dict[str, WingetListing] = {}
+    truncated: list[tuple[str, WingetListing]] = []
+    for listing in listings:
+        name = listing.name
+        marker = next((m for m in TRUNCATION_MARKERS if name.endswith(m)), None)
+        if marker:
+            truncated.append((squash(name[: -len(marker)]), listing))
+        else:
+            by_name.setdefault(squash(name), listing)
+
+    for entry in entries:
+        key = squash(entry.name)
+        listing = by_name.get(key)
+        if listing is None:
+            listing = next(
+                (item for prefix, item in truncated if prefix and key.startswith(prefix)), None
+            )
+        if listing is None:
+            continue
+        if listing.has_package:
+            entry.winget_id = listing.identifier
+            entry.sources.append("winget")
+        else:
+            entry.winget_knows_no_package = True
+
+
 # --- appx ------------------------------------------------------------------
 APPX_SCRIPT = (
     "Get-AppxPackage | Select-Object Name,PackageFamilyName,Publisher,Version,Architecture "
@@ -271,34 +455,64 @@ def squash(text: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (text or "").lower())
 
 
+#: A candidate this short matches by accident more often than on purpose.
+#: Four, not five: "7zip" is a real product token, and this is only a fallback.
+MIN_CANDIDATE_LENGTH = 4
+
+
+def id_candidates(identifier: str) -> list[str]:
+    """Squashed substrings of a package id worth looking for in a display name.
+
+    Ids are ``Publisher.Product``, but often deeper --
+    ``Microsoft.VCRedist.2015+.x64``, ``Microsoft.VisualStudio.2022.Community``.
+    Taking only the last component matches those on ``x64`` and ``community``,
+    which is how a matcher ends up either wrong or silent. Every contiguous run
+    of components after the publisher is tried instead, longest first.
+    """
+    parts = [part for part in identifier.split(".") if part]
+    if not parts:
+        return []
+    candidates: list[str] = [squash("".join(parts))]
+    tail = parts[1:] if len(parts) > 1 else parts
+    for start in range(len(tail)):
+        for end in range(len(tail), start, -1):
+            candidates.append(squash("".join(tail[start:end])))
+    seen: set[str] = set()
+    ordered = []
+    for candidate in candidates:
+        if len(candidate) >= MIN_CANDIDATE_LENGTH and candidate not in seen:
+            seen.add(candidate)
+            ordered.append(candidate)
+    return sorted(ordered, key=len, reverse=True)
+
+
 def match_winget_id(entry: SoftwareEntry, packages: list[tuple[str, str]]) -> str | None:
     """Guess which winget package id corresponds to an installed application.
 
-    Package ids are ``Publisher.Product`` (sometimes deeper). The product part
-    is matched against the squashed display name, longest first so that
-    ``Microsoft.VisualStudioCode`` wins over a shorter accidental substring.
-
-    This only labels the report. The reinstall itself replays winget's own
-    export, so a wrong guess here costs a misleading line, not a failed install.
+    Only a fallback: ``winget list`` answers this exactly for anything it
+    reported. Used for entries winget did not mention at all, and it decides a
+    report label rather than the reinstall, which replays winget's own export.
     """
     name = squash(entry.name)
     if not name:
         return None
+    publisher = squash(entry.publisher)
     best: tuple[int, str] | None = None
     for identifier, _version in packages:
         parts = identifier.split(".")
-        product = squash(parts[-1])
-        if len(product) < 3 or product not in name:
-            continue
         publisher_part = squash(parts[0]) if len(parts) > 1 else ""
         confident = (
             not publisher_part
-            or publisher_part in squash(entry.publisher)
+            or publisher_part in publisher
             or publisher_part in name
         )
-        score = len(product) + (10 if confident else 0)
-        if best is None or score > best[0]:
-            best = (score, identifier)
+        for candidate in id_candidates(identifier):
+            if candidate not in name:
+                continue
+            score = len(candidate) + (10 if confident else 0)
+            if best is None or score > best[0]:
+                best = (score, identifier)
+            break
     return best[1] if best else None
 
 
@@ -306,8 +520,13 @@ def merge(
     registry_entries: list[SoftwareEntry],
     appx_entries: list[SoftwareEntry],
     packages: list[tuple[str, str]],
+    listings: list[WingetListing] | None = None,
 ) -> list[SoftwareEntry]:
-    """Combine the sources, de-duplicate, and attach winget ids."""
+    """Combine the sources, de-duplicate, and attach winget ids.
+
+    ``winget list`` output, when available, is applied first and treated as
+    authoritative; name matching only fills gaps it left.
+    """
     merged: dict[str, SoftwareEntry] = {}
     for entry in [*registry_entries, *appx_entries]:
         key = f"{squash(entry.name)}|{squash(entry.version)}"
@@ -320,14 +539,21 @@ def merge(
         existing.appx_family = existing.appx_family or entry.appx_family
         existing.architecture = existing.architecture or entry.architecture
 
-    used: set[str] = set()
-    for entry in merged.values():
+    entries = list(merged.values())
+    if listings:
+        apply_winget_listings(entries, listings)
+
+    used = {entry.winget_id for entry in entries if entry.winget_id}
+    for entry in entries:
+        if entry.winget_id or entry.winget_knows_no_package:
+            # Already answered, and winget's own answer beats a guess.
+            continue
         identifier = match_winget_id(entry, packages)
         if identifier and identifier not in used:
             entry.winget_id = identifier
             entry.sources.append("winget")
             used.add(identifier)
-    return sorted(merged.values(), key=lambda item: item.name.lower())
+    return sorted(entries, key=lambda item: item.name.lower())
 
 
 def scan_software(env: Environment) -> SoftwareInventory:
@@ -336,16 +562,25 @@ def scan_software(env: Environment) -> SoftwareInventory:
     registry_entries = read_registry_entries(env)
 
     export, export_error = (None, "winget is only queried on Windows")
+    listings, listing_error = [], None
     appx_entries, appx_error = [], "Appx packages are only queried on Windows"
     if env.is_windows:
         export, export_error = run_winget_export()
+        listings, listing_error = run_winget_list()
         appx_entries, appx_error = read_appx_entries()
 
     if export_error:
-        inventory.notes.append(f"winget: {export_error}")
+        inventory.notes.append(f"winget export: {export_error}")
+    if listing_error:
+        inventory.notes.append(
+            f"winget list: {listing_error} — falling back to name matching, "
+            "so the automatic/manual split is approximate"
+        )
     if appx_error:
         inventory.notes.append(f"appx: {appx_error}")
 
     inventory.winget_export = export
-    inventory.entries = merge(registry_entries, appx_entries, packages_from_export(export))
+    inventory.entries = merge(
+        registry_entries, appx_entries, packages_from_export(export), listings
+    )
     return inventory

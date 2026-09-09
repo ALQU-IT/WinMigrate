@@ -367,7 +367,8 @@ def _scan_software(env: Environment, result: ScanResult, progress: ProgressCallb
                 Note(
                     Severity.INFO,
                     f"{len(inventory.reinstallable)} of {len(inventory.entries)} "
-                    "can be reinstalled by winget",
+                    f"can be reinstalled by winget; {len(inventory.components)} are "
+                    f"runtimes or drivers that come with whatever needs them",
                 )
             ],
         )
@@ -376,13 +377,21 @@ def _scan_software(env: Environment, result: ScanResult, progress: ProgressCallb
         result.add_note(Severity.WARNING, f"software inventory: {note}")
 
     if inventory.manual:
+        components = len(inventory.components)
         result.followups.append(
             Followup(
                 id="software:manual",
                 title=f"Reinstall {len(inventory.manual)} application(s) by hand",
                 why=(
-                    "winget has no package for these, so they cannot be reinstalled "
-                    "automatically. The full list is written next to the restored files."
+                    f"winget can reinstall {len(inventory.reinstallable)} of the "
+                    f"{len(inventory.entries)} applications found. These are the rest"
+                    + (
+                        f", excluding {components} runtimes and drivers that arrive "
+                        "with whatever needs them"
+                        if components
+                        else ""
+                    )
+                    + ". The full list is written next to the restored files."
                 ),
                 steps=[
                     "Open WinMigrate-Reinstall\\reinstall-by-hand.md in the restore folder.",

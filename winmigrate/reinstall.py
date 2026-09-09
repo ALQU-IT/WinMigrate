@@ -43,6 +43,7 @@ class Artifacts:
     manual_list: Path | None = None
     reinstallable_count: int = 0
     manual_count: int = 0
+    component_count: int = 0
     office: OfficeInstallation | None = None
     notes: list[str] = field(default_factory=list)
 
@@ -67,15 +68,28 @@ def write_artifacts(manifest: dict[str, Any], destination: Path) -> Artifacts:
         export = software.get("winget_export")
         applications = software.get("applications", [])
         artifacts.reinstallable_count = sum(1 for app in applications if app.get("winget_id"))
-        manual = [app for app in applications if not app.get("winget_id")]
+        # Runtimes and drivers arrive with whatever needs them; listing them as
+        # chores would bury the handful that genuinely need a person.
+        manual = [
+            app
+            for app in applications
+            if not app.get("winget_id") and not app.get("component")
+        ]
+        components = [
+            app for app in applications if not app.get("winget_id") and app.get("component")
+        ]
         artifacts.manual_count = len(manual)
+        artifacts.component_count = len(components)
         if export:
             path = directory / WINGET_IMPORT_FILE
             path.write_text(json.dumps(export, indent=2), encoding="utf-8")
             artifacts.winget_import = path
         if manual:
             path = directory / MANUAL_LIST_FILE
-            path.write_text(_manual_markdown(manual), encoding="utf-8")
+            path.write_text(
+                _manual_markdown(manual, artifacts.reinstallable_count, components),
+                encoding="utf-8",
+            )
             artifacts.manual_list = path
 
     if office_record and office_record.get("product_ids"):
@@ -111,23 +125,50 @@ def _installation_from_record(record: dict[str, Any]) -> OfficeInstallation:
     return installation
 
 
-def _manual_markdown(applications: list[dict[str, Any]]) -> str:
+def _manual_markdown(
+    applications: list[dict[str, Any]],
+    reinstallable: int,
+    components: list[dict[str, Any]] | None = None,
+) -> str:
+    components = components or []
     lines = [
         "# Reinstall by hand",
         "",
-        "winget has no package for these, so they need installing yourself.",
+        f"winget can reinstall {reinstallable} application(s) on its own "
+        "(`winmigrate reinstall --apps`).",
+        f"These {len(applications)} it has no package for.",
+        "",
         "Their presence here means they were found on the old machine -- not that",
         "you still need them. This is a good moment to decide.",
         "",
         "| Application | Version | Publisher |",
         "| --- | --- | --- |",
     ]
+    lines.extend(_table_rows(applications))
+    if components:
+        lines += [
+            "",
+            "## Runtimes and drivers",
+            "",
+            f"{len(components)} further entries are redistributables, runtimes or driver",
+            "packages. They are listed for completeness only: whatever needs them",
+            "installs them, so there is normally nothing to do here.",
+            "",
+            "| Component | Version | Publisher |",
+            "| --- | --- | --- |",
+        ]
+        lines.extend(_table_rows(components))
+    return "\n".join(lines) + "\n"
+
+
+def _table_rows(applications: list[dict[str, Any]]) -> list[str]:
+    rows = []
     for app in sorted(applications, key=lambda item: str(item.get("name", "")).lower()):
         name = str(app.get("name", "")).replace("|", "\\|")
         version = str(app.get("version", "")).replace("|", "\\|")
         publisher = str(app.get("publisher", "")).replace("|", "\\|")
-        lines.append(f"| {name} | {version} | {publisher} |")
-    return "\n".join(lines) + "\n"
+        rows.append(f"| {name} | {version} | {publisher} |")
+    return rows
 
 
 def office_reactivation_steps(installation: OfficeInstallation | None) -> list[str]:

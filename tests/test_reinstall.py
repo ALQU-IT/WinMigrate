@@ -157,3 +157,40 @@ def test_a_pipe_in_an_application_name_cannot_break_the_markdown_table(tmp_path:
         if "Weird" in row
     ][0]
     assert line.count("|") == 4 + 3  # four cell separators plus three escaped pipes
+
+
+COMPONENT_RECORD = {
+    "counts": {"total": 4, "reinstallable_with_winget": 1, "manual": 1, "components": 2},
+    "applications": [
+        {"name": "Mozilla Firefox", "version": "128", "winget_id": "Mozilla.Firefox"},
+        {"name": "ACME Bespoke Suite", "version": "3.2", "publisher": "ACME"},
+        {
+            "name": "Microsoft Visual C++ 2015-2022 Redistributable (x64)",
+            "version": "14.38",
+            "component": True,
+        },
+        {"name": "Microsoft .NET Runtime - 8.0.11 (x64)", "version": "8.0", "component": True},
+    ],
+    "winget_export": {"Sources": [{"Packages": [{"PackageIdentifier": "Mozilla.Firefox"}]}]},
+}
+
+
+def test_runtimes_are_separated_from_things_that_need_a_person(tmp_path: Path):
+    artifacts = reinstall.write_artifacts(manifest_with(("software", COMPONENT_RECORD)), tmp_path)
+    assert artifacts.manual_count == 1
+    assert artifacts.component_count == 2
+
+    text = artifacts.manual_list.read_text()
+    body, components = text.split("## Runtimes and drivers")
+    assert "ACME Bespoke Suite" in body
+    assert "Visual C++" not in body
+    assert "Visual C++" in components
+    assert "nothing to do here" in components
+
+
+def test_the_manual_list_says_how_many_winget_will_handle(tmp_path: Path):
+    """Without the other half of the number, "N by hand" reads as the whole job."""
+    artifacts = reinstall.write_artifacts(manifest_with(("software", COMPONENT_RECORD)), tmp_path)
+    text = artifacts.manual_list.read_text()
+    assert "winget can reinstall 1 application(s) on its own" in text
+    assert "These 1 it has no package for." in text

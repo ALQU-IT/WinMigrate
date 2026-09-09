@@ -16,7 +16,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from .models import Action, Item, ScanResult, Severity, SkipReason
+from .models import Action, Item, Kind, ScanResult, Severity, SkipReason
 from .util import humanize
 from .util import paths as pathutil
 
@@ -110,14 +110,16 @@ def _render_items(result: ScanResult, console: Console, *, verbose: bool) -> Non
         table.add_column("Disposition", overflow="fold")
         for item in visible:
             marker = "✓" if item.action is Action.CAPTURE else ("!" if item.action is Action.MANUAL else "·")
-            disposition = _disposition(item)
+            # A record carries no bytes; showing "0 B / 0 files" reads as a
+            # failure to capture something rather than as a different shape.
+            has_bytes = item.kind in {Kind.TREE, Kind.FILE} and item.action is Action.CAPTURE
             table.add_row(
                 Text(marker, style=ACTION_STYLE[item.action]),
                 item.title + (" [red](secret)[/red]" if item.is_secret else ""),
                 pathutil.display(item.source_path or "", result.source.profile_path),
-                humanize.bytes_(item.size_bytes) if item.action is Action.CAPTURE else "—",
-                f"{item.file_count:,}" if item.action is Action.CAPTURE else "—",
-                disposition,
+                humanize.bytes_(item.size_bytes) if has_bytes else "—",
+                f"{item.file_count:,}" if has_bytes else "—",
+                _disposition(item),
                 style=None if item.action is Action.CAPTURE else "dim",
             )
         console.print(table)
@@ -370,6 +372,11 @@ def render_restore_report(report, console: Console, *, dry_run: bool | None = No
             )
         if artifacts.manual_count:
             lines.append(f"{artifacts.manual_count} need installing by hand — see the list")
+        if getattr(artifacts, "component_count", 0):
+            lines.append(
+                f"[dim]{artifacts.component_count} runtimes/drivers listed for "
+                "completeness; nothing to do[/dim]"
+            )
         if artifacts.office_configuration:
             lines.append("an Office configuration matching the old install was written")
         lines.append(f"files: [bold]{artifacts.directory}[/bold]")

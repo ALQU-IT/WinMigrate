@@ -199,3 +199,133 @@ def test_winget_exiting_non_zero_still_uses_the_file_it_wrote(tmp_path: Path):
 
     export, error = software.run_winget_export(runner=fake_runner)
     assert export is not None and error is None
+
+
+# --- winget list parsing ---------------------------------------------------
+WINGET_LIST_OUTPUT = """   -
+   \\
+Name                                     Id                              Version       Available Source
+--------------------------------------------------------------------------------------------------------
+7-Zip 24.09 (x64)                        7zip.7zip                       24.09                   winget
+Microsoft Edge                           Microsoft.Edge                  131.0.2903.86           winget
+ACME Bespoke Suite                       ARP\\Machine\\X64\\{GUID-1234}      3.2
+Microsoft Visual C++ 2015-2022 Redist…   Microsoft.VCRedist.2015+.x64    14.38.33130             winget
+Spotify                                  Spotify.Spotify                 1.2.3                   msstore
+"""
+
+
+def test_winget_list_columns_are_sliced_from_the_header():
+    rows = software.parse_winget_list(WINGET_LIST_OUTPUT)
+    assert [row.name for row in rows][:2] == ["7-Zip 24.09 (x64)", "Microsoft Edge"]
+    assert rows[0].identifier == "7zip.7zip"
+    assert rows[0].version == "24.09"
+    assert rows[0].source == "winget"
+
+
+def test_a_synthetic_arp_id_means_winget_has_no_package():
+    """winget lists everything; entries it cannot reinstall get a generated id."""
+    rows = {row.name: row for row in software.parse_winget_list(WINGET_LIST_OUTPUT)}
+    assert rows["ACME Bespoke Suite"].has_package is False
+    assert rows["7-Zip 24.09 (x64)"].has_package is True
+    assert rows["Spotify"].has_package is True
+
+
+def test_output_without_a_header_yields_nothing_rather_than_garbage():
+    assert software.parse_winget_list("some error text\nno table here") == []
+    assert software.parse_winget_list("") == []
+
+
+def test_winget_list_answers_are_preferred_over_name_matching():
+    entries = [
+        software.SoftwareEntry(name="7-Zip 24.09 (x64)", sources=["registry"]),
+        software.SoftwareEntry(name="ACME Bespoke Suite", sources=["registry"]),
+    ]
+    software.apply_winget_listings(entries, software.parse_winget_list(WINGET_LIST_OUTPUT))
+    assert entries[0].winget_id == "7zip.7zip"
+    assert entries[1].winget_id is None
+    # And the "no" is winget's own answer, not a failure to guess.
+    assert entries[1].winget_knows_no_package is True
+
+
+def test_a_truncated_name_is_matched_on_its_prefix():
+    entries = [
+        software.SoftwareEntry(
+            name="Microsoft Visual C++ 2015-2022 Redistributable (x64) - 14.38.33130",
+            sources=["registry"],
+        )
+    ]
+    software.apply_winget_listings(entries, software.parse_winget_list(WINGET_LIST_OUTPUT))
+    assert entries[0].winget_id == "Microsoft.VCRedist.2015+.x64"
+
+
+def test_merge_does_not_second_guess_winget_with_name_matching():
+    entries = [software.SoftwareEntry(name="ACME Bespoke Suite", sources=["registry"])]
+    merged = software.merge(
+        entries, [], [("Acme.BespokeSuite", "3.2")], software.parse_winget_list(WINGET_LIST_OUTPUT)
+    )
+    assert merged[0].winget_id is None
+
+
+# --- id candidates ---------------------------------------------------------
+def test_multi_part_ids_do_not_match_on_their_last_component_alone():
+    """The bug behind a 17% match rate on a real machine.
+
+    Taking only the last component matches Microsoft.VCRedist.2015+.x64 on
+    "x64" and Microsoft.VisualStudio.2022.Community on "community".
+    """
+    candidates = software.id_candidates("Microsoft.VisualStudio.2022.Community")
+    assert "visualstudio2022community" in candidates
+    assert candidates[0] == "microsoftvisualstudio2022community"
+    assert all(len(candidate) >= software.MIN_CANDIDATE_LENGTH for candidate in candidates)
+
+    entry = software.SoftwareEntry(name="Visual Studio Community 2022", publisher="Microsoft")
+    assert (
+        software.match_winget_id(entry, [("Microsoft.VisualStudio.2022.Community", "1")])
+        == "Microsoft.VisualStudio.2022.Community"
+    )
+
+
+def test_a_short_id_tail_does_not_produce_accidental_matches():
+    entry = software.SoftwareEntry(name="Some Diagnostics Utility x64", publisher="ACME")
+    assert software.match_winget_id(entry, [("Some.Ag", "1")]) is None
+    # ...and an id whose tail is just an architecture cannot match on that.
+    assert software.match_winget_id(entry, [("Other.Thing.x64", "1")]) is None
+
+
+# --- components ------------------------------------------------------------
+def test_runtimes_and_drivers_are_classified_as_components():
+    for name in [
+        "Microsoft Visual C++ 2015-2022 Redistributable (x64) - 14.38.33130",
+        "Microsoft .NET Runtime - 8.0.11 (x64)",
+        "Microsoft Edge WebView2 Runtime",
+        "Windows Software Development Kit",
+        "Intel(R) Chipset Device Software driver",
+    ]:
+        assert software.SoftwareEntry(name=name).is_component, name
+
+
+def test_real_applications_are_not_classified_as_components():
+    for name in ["Mozilla Firefox", "7-Zip 23.01 (x64)", "ACME Bespoke Suite", "Slack"]:
+        assert not software.SoftwareEntry(name=name).is_component, name
+
+
+def test_components_are_counted_apart_from_things_to_reinstall_by_hand():
+    """249 chores becomes an honest number once runtimes are separated out."""
+    inventory = software.SoftwareInventory(
+        entries=[
+            software.SoftwareEntry(name="Mozilla Firefox", winget_id="Mozilla.Firefox"),
+            software.SoftwareEntry(name="ACME Bespoke Suite"),
+            software.SoftwareEntry(name="Microsoft Visual C++ 2015-2022 Redistributable (x64)"),
+            software.SoftwareEntry(name="Microsoft .NET Runtime - 8.0.11 (x64)"),
+        ]
+    )
+    assert [entry.name for entry in inventory.manual] == ["ACME Bespoke Suite"]
+    assert len(inventory.components) == 2
+    counts = inventory.to_json()["counts"]
+    assert counts == {
+        "total": 4,
+        "reinstallable_with_winget": 1,
+        "manual": 1,
+        "components": 2,
+        "winget_packages_in_export": 0,
+    }

@@ -119,9 +119,26 @@ keys (classic desktop installers, per-machine, WOW6432Node and per-user),
 `Get-AppxPackage` (Store and UWP apps, which appear in neither). Anything winget
 cannot reinstall goes into a "by hand" list rather than being quietly dropped.
 
-The import file restore writes is **winget's own export, verbatim**. The
-name-to-package-id matching here only decides what the report calls automatic
-versus manual, so a wrong guess costs a misleading line, not a failed install.
+The import file restore writes is **winget's own export, verbatim**.
+
+Which applications winget can reinstall is answered by `winget list`, not
+guessed: it reports every installed application with either a real package id or
+a synthetic `ARP\...` id meaning "no package for this", and the display names it
+prints come from the same registry values we read, so they join up exactly. A
+name-similarity fallback covers only entries `winget list` did not mention, and
+even then it decides a report label rather than the reinstall.
+
+The first real machine this ran against showed why that matters: 302
+applications, of which the original fuzzy matcher claimed 249 needed installing
+by hand. It was taking only the *last* dotted component of a package id, so
+`Microsoft.VCRedist.2015+.x64` was matched on `x64` and
+`Microsoft.VisualStudio.2022.Community` on `community`. Every contiguous run of
+components after the publisher is now tried, longest first.
+
+Runtimes, redistributables and driver packages are classified separately. They
+are really installed, but nobody reinstalls them deliberately — whatever needs
+them brings them along — so counting them as chores buries the handful that
+genuinely need a person.
 
 ### Installing is a separate, explicit step
 
