@@ -133,6 +133,7 @@ class SoftwareInventory:
     entries: list[SoftwareEntry] = field(default_factory=list)
     winget_export: dict[str, Any] | None = None
     notes: list[str] = field(default_factory=list)
+    join_stats: "JoinStats | None" = None
 
     @property
     def reinstallable(self) -> list[SoftwareEntry]:
@@ -164,6 +165,7 @@ class SoftwareInventory:
             },
             "applications": [entry.to_json() for entry in self.entries],
             "winget_export": self.winget_export,
+            "diagnostics": self.join_stats.to_json() if self.join_stats else {},
             "notes": list(self.notes),
         }
 
@@ -413,9 +415,34 @@ def _slice_columns(line: str, offsets: dict[str, int]) -> dict[str, str]:
 TRUNCATION_MARKERS = ("\u2026", "...")
 
 
+@dataclass(slots=True)
+class JoinStats:
+    """How well ``winget list`` joined onto the registry inventory.
+
+    Recorded because the join rate is the one number that says whether the
+    automatic/manual split can be trusted, and it cannot be checked from here --
+    only on a real machine with real software on it.
+    """
+
+    listed_rows: int = 0
+    rows_with_package: int = 0
+    joined_exactly: int = 0
+    joined_by_prefix: int = 0
+    unjoined_rows_with_package: int = 0
+
+    def to_json(self) -> dict[str, int]:
+        return {
+            "winget_list_rows": self.listed_rows,
+            "winget_list_rows_with_package": self.rows_with_package,
+            "joined_by_exact_name": self.joined_exactly,
+            "joined_by_truncated_name": self.joined_by_prefix,
+            "winget_packages_not_joined": self.unjoined_rows_with_package,
+        }
+
+
 def apply_winget_listings(
     entries: list[SoftwareEntry], listings: list[WingetListing]
-) -> None:
+) -> JoinStats:
     """Attach package ids from ``winget list`` by exact display-name match.
 
     The names winget prints for desktop applications come from the same registry
@@ -432,20 +459,36 @@ def apply_winget_listings(
         else:
             by_name.setdefault(squash(name), listing)
 
+    stats = JoinStats(
+        listed_rows=len(listings),
+        rows_with_package=sum(1 for listing in listings if listing.has_package),
+    )
+    used_listings: set[int] = set()
     for entry in entries:
         key = squash(entry.name)
         listing = by_name.get(key)
+        by_prefix = False
         if listing is None:
             listing = next(
                 (item for prefix, item in truncated if prefix and key.startswith(prefix)), None
             )
+            by_prefix = listing is not None
         if listing is None:
             continue
+        used_listings.add(id(listing))
         if listing.has_package:
             entry.winget_id = listing.identifier
             entry.sources.append("winget")
+            if by_prefix:
+                stats.joined_by_prefix += 1
+            else:
+                stats.joined_exactly += 1
         else:
             entry.winget_knows_no_package = True
+    stats.unjoined_rows_with_package = sum(
+        1 for listing in listings if listing.has_package and id(listing) not in used_listings
+    )
+    return stats
 
 
 # --- appx ------------------------------------------------------------------
@@ -577,7 +620,7 @@ def merge(
     appx_entries: list[SoftwareEntry],
     packages: list[tuple[str, str]],
     listings: list[WingetListing] | None = None,
-) -> list[SoftwareEntry]:
+) -> tuple[list[SoftwareEntry], JoinStats | None]:
     """Combine the sources, de-duplicate, and attach winget ids.
 
     ``winget list`` output, when available, is applied first and treated as
@@ -596,8 +639,7 @@ def merge(
         existing.architecture = existing.architecture or entry.architecture
 
     entries = list(merged.values())
-    if listings:
-        apply_winget_listings(entries, listings)
+    stats = apply_winget_listings(entries, listings) if listings else None
 
     used = {entry.winget_id for entry in entries if entry.winget_id}
     for entry in entries:
@@ -609,7 +651,7 @@ def merge(
             entry.winget_id = identifier
             entry.sources.append("winget")
             used.add(identifier)
-    return sorted(entries, key=lambda item: item.name.lower())
+    return sorted(entries, key=lambda item: item.name.lower()), stats
 
 
 def scan_software(env: Environment) -> SoftwareInventory:
@@ -636,7 +678,16 @@ def scan_software(env: Environment) -> SoftwareInventory:
         inventory.notes.append(f"appx: {appx_error}")
 
     inventory.winget_export = export
-    inventory.entries = merge(
+    inventory.entries, inventory.join_stats = merge(
         registry_entries, appx_entries, packages_from_export(export), listings
     )
+    stats = inventory.join_stats
+    if stats and stats.unjoined_rows_with_package:
+        # winget knows a package for these, but its display name did not join to
+        # any registry entry, so they are being reported as manual work wrongly.
+        inventory.notes.append(
+            f"{stats.unjoined_rows_with_package} of {stats.rows_with_package} packages "
+            "winget listed could not be matched to an installed application by name, "
+            "so the by-hand count is higher than it should be"
+        )
     return inventory

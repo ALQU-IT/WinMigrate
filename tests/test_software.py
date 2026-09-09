@@ -146,7 +146,7 @@ def test_merging_deduplicates_and_labels_what_winget_can_reinstall():
         software.SoftwareEntry(name="Mozilla Firefox", version="128", sources=["appx"]),
         software.SoftwareEntry(name="SpotifyAB.SpotifyMusic", version="1", sources=["appx"]),
     ]
-    merged = software.merge(registry, appx, [("Mozilla.Firefox", "128")])
+    merged, _stats = software.merge(registry, appx, [("Mozilla.Firefox", "128")])
     names = [entry.name for entry in merged]
     assert names.count("Mozilla Firefox") == 1
 
@@ -163,7 +163,7 @@ def test_one_package_id_is_not_claimed_by_two_applications():
         software.SoftwareEntry(name="Mozilla Firefox", sources=["registry"]),
         software.SoftwareEntry(name="Mozilla Firefox ESR", sources=["registry"]),
     ]
-    merged = software.merge(entries, [], [("Mozilla.Firefox", "128")])
+    merged, _stats = software.merge(entries, [], [("Mozilla.Firefox", "128")])
     assert sum(1 for entry in merged if entry.winget_id == "Mozilla.Firefox") == 1
 
 
@@ -260,7 +260,7 @@ def test_a_truncated_name_is_matched_on_its_prefix():
 
 def test_merge_does_not_second_guess_winget_with_name_matching():
     entries = [software.SoftwareEntry(name="ACME Bespoke Suite", sources=["registry"])]
-    merged = software.merge(
+    merged, _stats = software.merge(
         entries, [], [("Acme.BespokeSuite", "3.2")], software.parse_winget_list(WINGET_LIST_OUTPUT)
     )
     assert merged[0].winget_id is None
@@ -387,3 +387,42 @@ def test_a_box_drawing_rule_is_recognised_as_the_header_underline():
 
 def test_error_text_without_a_table_still_yields_nothing():
     assert software.parse_winget_list("Failed when searching source; results may be missing") == []
+
+
+# --- join diagnostics ------------------------------------------------------
+def test_the_join_rate_is_recorded_so_it_can_be_checked_on_a_real_machine():
+    """Whether the automatic/manual split is trustworthy is a number, not a hope.
+
+    It cannot be verified from a fixture -- only on a machine with real software
+    on it -- so the counts travel in the record.
+    """
+    entries = [
+        software.SoftwareEntry(name="7-Zip 24.09 (x64)", sources=["registry"]),
+        software.SoftwareEntry(
+            name="Microsoft Visual C++ 2015-2022 Redistributable (x64) - 14.38.33130",
+            sources=["registry"],
+        ),
+    ]
+    stats = software.apply_winget_listings(
+        entries, software.parse_winget_list(WINGET_LIST_OUTPUT)
+    )
+    assert stats.listed_rows == 5
+    assert stats.joined_exactly == 1          # 7-Zip, by exact name
+    assert stats.joined_by_prefix == 1        # the truncated VC++ row
+    # Edge, Spotify and the ARP row are installed but not in our entry list.
+    assert stats.unjoined_rows_with_package == 2
+
+
+def test_packages_winget_listed_but_could_not_be_joined_are_flagged(monkeypatch, tmp_path):
+    """Silently over-reporting manual work is the failure mode worth catching."""
+    inventory = software.SoftwareInventory()
+    inventory.entries, inventory.join_stats = software.merge(
+        [software.SoftwareEntry(name="Totally Different Name", sources=["registry"])],
+        [],
+        [],
+        software.parse_winget_list(WINGET_LIST_OUTPUT),
+    )
+    assert inventory.join_stats.unjoined_rows_with_package == 4
+    diagnostics = inventory.to_json()["diagnostics"]
+    assert diagnostics["winget_list_rows"] == 5
+    assert diagnostics["winget_packages_not_joined"] == 4

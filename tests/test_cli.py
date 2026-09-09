@@ -123,3 +123,41 @@ def test_no_software_skips_the_inventory(profile: Path, capsys, monkeypatch):
     assert main(["scan", "--profile-root", str(profile), "--json", "--no-software"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert not any(i["category"] == "software" for i in payload["items"])
+
+
+def test_json_output_survives_a_console_that_cannot_encode_it(profile: Path, monkeypatch, capsys):
+    """rich's Windows console writer raises on characters outside its code page.
+
+    Reported by `scan --json | findstr ...` dying with UnicodeEncodeError.
+    Machine-readable output must not be styled or routed through that path.
+    """
+    import io
+
+    from winmigrate import cli as cli_mod
+
+    class Cp1252Stream(io.TextIOBase):
+        encoding = "cp1252"
+
+        def __init__(self):
+            self.chunks: list[str] = []
+
+        def write(self, text):
+            text.encode("cp1252")  # raises exactly as the Windows console does
+            self.chunks.append(text)
+            return len(text)
+
+    stream = Cp1252Stream()
+    monkeypatch.setattr(cli_mod.sys, "stdout", stream)
+    cli_mod.emit_json({"applications": ["Café ☕", "北京 app"]})
+
+    written = "".join(stream.chunks)
+    assert written.isascii(), "must fall back to escaped JSON rather than raising"
+    assert json.loads(written)["applications"] == ["Café ☕", "北京 app"]
+
+
+def test_json_output_is_not_styled(profile: Path, capsys):
+    """It goes to another program; syntax highlighting would corrupt it."""
+    main(["scan", "--profile-root", str(profile), "--json", "--no-software"])
+    out = capsys.readouterr().out
+    assert "\x1b[" not in out, "ANSI styling must not reach machine-readable output"
+    assert json.loads(out)["schema_version"]

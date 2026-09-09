@@ -224,6 +224,29 @@ def _add_scan_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def emit_json(payload: dict) -> None:
+    """Write machine-readable JSON to stdout, bypassing rich entirely.
+
+    ``console.print_json`` syntax-highlights its output and, on Windows, routes
+    it through the legacy console writer, which raises UnicodeEncodeError as
+    soon as a value contains a character the console code page lacks -- exactly
+    what happens piping ``scan --json`` into another command. Machine output
+    should not be styled anyway.
+
+    UTF-8 is preferred; where the stream cannot represent a character, the
+    escaped form is written instead, which is still valid JSON.
+    """
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except (AttributeError, OSError, ValueError):
+        pass
+    try:
+        sys.stdout.write(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
+    except UnicodeEncodeError:
+        sys.stdout.write(json.dumps(payload, indent=2, ensure_ascii=True) + "\n")
+    sys.stdout.flush()
+
+
 def _config_from_args(args: argparse.Namespace) -> ScanConfig:
     config = ScanConfig()
     if args.config:
@@ -271,7 +294,7 @@ def cmd_scan(args: argparse.Namespace, console: Console) -> int:
         log.info("plan written: %s", args.save_plan)
 
     if args.json:
-        console.print_json(data=plan)
+        emit_json(plan)
     else:
         report.render_preview(result, console, verbose=args.verbose)
         if args.save_plan:
@@ -366,7 +389,7 @@ def cmd_capture(args: argparse.Namespace, console: Console) -> int:
 def cmd_inspect(args: argparse.Namespace, console: Console) -> int:
     header = restore_mod.inspect(args.bundle)
     sidecar = restore_mod.load_sidecar(Path(args.bundle))
-    console.print_json(data={"header": header, "sidecar": sidecar})
+    emit_json({"header": header, "sidecar": sidecar})
     checked, error = restore_mod.verify_sidecar(Path(args.bundle))
     if error:
         console.print(f"[bold red]integrity:[/bold red] {error}")
@@ -501,6 +524,17 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         console.print("\n[yellow]interrupted; nothing was written[/yellow]")
         return 130
+    except UnicodeEncodeError as exc:
+        # The console's code page cannot represent something being printed --
+        # a path or an application name from another script, typically.
+        log.error("console encoding failure", exc_info=True)
+        sys.stderr.write(
+            "error: this console cannot display some of the characters in the "
+            f"output ({exc.encoding}).\n"
+            "Try 'chcp 65001' first, or set PYTHONIOENCODING=utf-8, or use "
+            "--json / --save-plan to write the result to a file instead.\n"
+        )
+        return 2
 
 
 if __name__ == "__main__":
