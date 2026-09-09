@@ -219,7 +219,8 @@ def _add_scan_arguments(parser: argparse.ArgumentParser) -> None:
         "--save-plan",
         type=Path,
         metavar="PATH",
-        help="write the plan as JSON to PATH (the only file this command writes)",
+        help="write the plan as JSON to PATH (the only file this command writes; "
+        "it holds the full inventory in plain text, so put it somewhere you control)",
     )
 
 

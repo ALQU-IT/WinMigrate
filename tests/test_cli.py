@@ -83,3 +83,43 @@ def test_require_windows_refuses_without_the_development_override(monkeypatch):
     monkeypatch.delenv("WINMIGRATE_ALLOW_NON_WINDOWS", raising=False)
     with pytest.raises(PlatformError, match="runs on Windows"):
         require_windows()
+
+
+def test_the_preview_json_is_not_redacted(profile: Path, registry: dict, capsys, monkeypatch):
+    """--json shows the user their own machine, so it is not a sidecar.
+
+    Reported when `scan --json | findstr counts` printed nothing: the software
+    record was being run through the bundle's public view.
+    """
+    from winmigrate.scan import software as software_mod
+
+    def fake_scan(env):
+        inventory = software_mod.SoftwareInventory()
+        inventory.entries = [
+            software_mod.SoftwareEntry(name="ACME Bespoke Suite", version="3.2"),
+            software_mod.SoftwareEntry(
+                name="Mozilla Firefox", version="128", winget_id="Mozilla.Firefox"
+            ),
+        ]
+        return inventory
+
+    monkeypatch.setattr(software_mod, "scan_software", fake_scan)
+    main(["scan", "--profile-root", str(profile), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    item = next(i for i in payload["items"] if i["category"] == "software")
+    assert "record" in item, "the preview must not withhold the user's own inventory"
+    assert item["record"]["counts"]["total"] == 2
+    assert "record_withheld" not in item
+
+
+def test_no_software_skips_the_inventory(profile: Path, capsys, monkeypatch):
+    from winmigrate.scan import software as software_mod
+
+    def explode(env):
+        raise AssertionError("--no-software must not run the inventory")
+
+    monkeypatch.setattr(software_mod, "scan_software", explode)
+    assert main(["scan", "--profile-root", str(profile), "--json", "--no-software"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert not any(i["category"] == "software" for i in payload["items"])

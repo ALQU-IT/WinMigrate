@@ -249,10 +249,16 @@ def render_reinstall_plan(artifacts, console: Console) -> None:
 
 
 def preview_to_dict(result: ScanResult) -> dict[str, Any]:
-    """Machine-readable form of the preview, for ``--json``."""
+    """Machine-readable form of the preview, for ``--json`` and ``--save-plan``.
+
+    The **full** manifest, not the redacted public view. Redaction exists for
+    the sidecar that sits beside a bundle without a passphrase; a preview is the
+    user looking at their own machine, and withholding the software inventory
+    there only hides it from the person it belongs to.
+    """
     from . import manifest as manifest_mod
 
-    return manifest_mod.public_view(manifest_mod.build(result))
+    return manifest_mod.build(result)
 
 
 # --- capture and restore reporting ----------------------------------------

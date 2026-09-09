@@ -329,3 +329,61 @@ def test_components_are_counted_apart_from_things_to_reinstall_by_hand():
         "components": 2,
         "winget_packages_in_export": 0,
     }
+
+
+# --- robustness of winget list parsing -------------------------------------
+GERMAN_LIST_OUTPUT = """Name                                     Kennung                         Version   Verfügbar Quelle
+-------------------------------------------------------------------------------------------------
+7-Zip 24.09 (x64)                        7zip.7zip                       24.09               winget
+ACME Eigenbau                            ARP\\Machine\\X64\\{GUID}          3.2
+"""
+
+
+def test_a_localised_header_is_parsed_by_position_not_by_word():
+    """A German winget prints Kennung, not Id.
+
+    Matching the literal "Id" is how this silently fell back to guessing on a
+    real machine; the rule of dashes and the fixed column order are what hold
+    across languages.
+    """
+    rows = software.parse_winget_list(GERMAN_LIST_OUTPUT)
+    assert [row.name for row in rows] == ["7-Zip 24.09 (x64)", "ACME Eigenbau"]
+    assert rows[0].identifier == "7zip.7zip"
+    assert rows[0].has_package is True
+    assert rows[1].has_package is False
+
+
+def test_terminal_escape_sequences_do_not_shift_the_columns():
+    text = (
+        "\x1b[?25l\x1b[32mName\x1b[0m                Id                  Version\n"
+        "------------------------------------------------------\n"
+        "Mozilla Firefox     Mozilla.Firefox     128.0\n"
+    )
+    rows = software.parse_winget_list(text)
+    assert rows[0].name == "Mozilla Firefox"
+    assert rows[0].identifier == "Mozilla.Firefox"
+
+
+def test_columns_separated_by_a_single_space_are_still_separate():
+    """winget uses one space when a column is exactly as wide as its heading."""
+    text = (
+        "Name        Id          Version Available Source\n"
+        "-----------------------------------------------\n"
+        "7-Zip       7zip.7zip   24.09             winget\n"
+    )
+    rows = software.parse_winget_list(text)
+    assert rows[0].source == "winget"
+    assert rows[0].version == "24.09"
+
+
+def test_a_box_drawing_rule_is_recognised_as_the_header_underline():
+    text = (
+        "Name             Id               Version\n"
+        "──────────────────────────────\n"
+        "Mozilla Firefox  Mozilla.Firefox  128.0\n"
+    )
+    assert software.parse_winget_list(text)[0].identifier == "Mozilla.Firefox"
+
+
+def test_error_text_without_a_table_still_yields_nothing():
+    assert software.parse_winget_list("Failed when searching source; results may be missing") == []

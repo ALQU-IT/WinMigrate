@@ -287,6 +287,14 @@ def run_winget_list(runner=process.run) -> tuple[list[WingetListing], str | None
         return [], result.summary()
     listings = parse_winget_list(result.stdout)
     if not listings:
+        # Log what it actually printed: the shape of this table is the one thing
+        # here that varies by winget version and locale, so a report of "no
+        # readable rows" is useless without a sample to fix the parser against.
+        sample = strip_ansi(result.stdout or "").splitlines()[:6]
+        log.warning(
+            "winget list output was not parseable; first lines: %s",
+            " | ".join(line[:120] for line in sample) or "(no output)",
+        )
         return [], "winget list produced no readable rows"
     return listings, None
 
@@ -294,19 +302,24 @@ def run_winget_list(runner=process.run) -> tuple[list[WingetListing], str | None
 def parse_winget_list(text: str) -> list[WingetListing]:
     """Parse ``winget list``'s fixed-width table.
 
-    Column positions are taken from the header row rather than guessed, and a
-    header that cannot be found means an empty result rather than a wrong one --
-    the caller then falls back to name matching. Progress spinner lines, the
-    rule under the header and blank lines are all skipped.
+    Deliberately independent of the header's *words*. winget is localised, so on
+    a German machine the columns read ``Name / Kennung / Version / Verfügbar /
+    Quelle`` and matching the literal "Id" finds nothing -- which is exactly how
+    this silently fell back to guessing on the first real machine it met.
+
+    What is stable across languages is the shape: a header row, a rule of dashes
+    under it, then rows, with columns in a fixed order (name, id, version,
+    available, source). Column positions are taken from the header's word starts
+    and mapped by position. Terminal escape sequences are stripped first.
     """
-    lines = (text or "").splitlines()
+    lines = strip_ansi(text or "").splitlines()
     header_index, offsets = _find_header(lines)
-    if offsets is None:
+    if not offsets:
         return []
 
     listings: list[WingetListing] = []
     for line in lines[header_index + 1 :]:
-        if not line.strip() or set(line.strip()) <= set("-\u2500 "):
+        if not line.strip() or _is_rule(line):
             continue
         fields = _slice_columns(line, offsets)
         name = fields.get("Name", "").strip()
@@ -326,22 +339,65 @@ def parse_winget_list(text: str) -> list[WingetListing]:
 
 WINGET_COLUMNS = ("Name", "Id", "Version", "Available", "Source")
 
+ANSI_PATTERN = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+
+#: The rule under winget's header, in ASCII or box-drawing form.
+RULE_CHARACTERS = set("-\u2500\u2501\u2504\u2505 ")
+
+
+def strip_ansi(text: str) -> str:
+    """Remove terminal escape sequences, which shift every column offset."""
+    return ANSI_PATTERN.sub("", text).replace("\x08", "")
+
+
+def _is_rule(line: str) -> bool:
+    stripped = line.strip()
+    return bool(stripped) and set(stripped) <= RULE_CHARACTERS
+
 
 def _find_header(lines: list[str]) -> tuple[int, dict[str, int] | None]:
+    """Locate the header row and the start offset of each column.
+
+    The rule of dashes is the reliable anchor: whatever the language, the line
+    above it is the header. An English header is still accepted directly, for
+    output that arrives without a rule.
+    """
     for index, line in enumerate(lines):
-        if "Name" not in line or "Id" not in line:
+        if not _is_rule(line) or len(line.strip()) < 20 or index == 0:
             continue
-        offsets: dict[str, int] = {}
-        position = 0
-        for column in WINGET_COLUMNS:
-            found = line.find(column, position)
-            if found == -1:
-                continue
-            offsets[column] = found
-            position = found + len(column)
-        if "Name" in offsets and "Id" in offsets and offsets["Id"] > offsets["Name"]:
-            return index, offsets
+        header = lines[index - 1]
+        offsets = _columns_by_position(header)
+        if offsets:
+            return index - 1, offsets
+
+    for index, line in enumerate(lines):
+        if "Name" in line and "Id" in line:
+            offsets = _columns_by_position(line)
+            if offsets:
+                return index, offsets
     return -1, None
+
+
+WORD_START_PATTERN = re.compile(r"\S+")
+#: Fallback for a locale whose column names contain spaces.
+WIDE_GAP_PATTERN = re.compile(r"(?:^|\s{2,})(\S)")
+
+
+def _columns_by_position(header: str) -> dict[str, int] | None:
+    """Map winget's fixed column order onto the header's word-start offsets.
+
+    Header names are single words, so word starts give the column boundaries --
+    and they must, because winget separates two columns by a single space when a
+    column happens to be exactly as wide as its heading. Only if that yields
+    more starts than there are columns does a locale evidently use a multi-word
+    heading, and the wider two-space rule is used instead.
+    """
+    starts = [match.start() for match in WORD_START_PATTERN.finditer(header)]
+    if len(starts) > len(WINGET_COLUMNS):
+        starts = [match.start(1) for match in WIDE_GAP_PATTERN.finditer(header)]
+    if len(starts) < 2:
+        return None
+    return {name: start for name, start in zip(WINGET_COLUMNS, starts)}
 
 
 def _slice_columns(line: str, offsets: dict[str, int]) -> dict[str, str]:
