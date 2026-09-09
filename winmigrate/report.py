@@ -231,3 +231,100 @@ def preview_to_dict(result: ScanResult) -> dict[str, Any]:
     from . import manifest as manifest_mod
 
     return manifest_mod.public_view(manifest_mod.build(result))
+
+
+# --- capture and restore reporting ----------------------------------------
+def render_capture_report(report, console: Console) -> None:
+    """Print what capture actually did."""
+    from .util import humanize as _h
+
+    lines = [
+        f"bundle: [bold]{report.bundle_path}[/bold]",
+        f"captured: [bold green]{_h.bytes_(report.captured_bytes)}[/bold green] "
+        f"in {_h.count(report.captured_files, 'file')}",
+        f"bundle size: {_h.bytes_(report.bundle_bytes)} "
+        f"({report.compression_ratio:.0%} of the source bytes)",
+        f"took {_h.duration(report.duration_seconds)}",
+        f"shadow copy: {'used' if report.used_shadow_copy else 'not used'}",
+    ]
+    console.print(Panel("\n".join(lines), title="Capture complete", border_style="green"))
+
+    for note in report.notes:
+        if note.severity is not Severity.INFO:
+            console.print(f"[yellow]![/yellow] {note.message}" + (f" [dim]({note.detail})[/dim]" if note.detail else ""))
+
+    if report.failures:
+        table = Table(title=f"Could not capture ({len(report.failures)})", title_justify="left")
+        table.add_column("Path", overflow="ellipsis", max_width=60)
+        table.add_column("Reason")
+        for path, reason in report.failures[:20]:
+            table.add_row(path, reason)
+        console.print(table)
+        if len(report.failures) > 20:
+            console.print(f"[dim]…and {len(report.failures) - 20} more; see the log.[/dim]")
+        console.print(
+            "[dim]Locked files are usually captured cleanly by running the capture "
+            "from an elevated prompt, which allows a shadow copy.[/dim]"
+        )
+    console.print(
+        f"[dim]Keep {report.manifest_path.name} beside the bundle: it lets the bundle be "
+        "identified and integrity-checked without the passphrase.[/dim]"
+    )
+
+
+def render_restore_report(report, console: Console, *, dry_run: bool = False) -> None:
+    """Print what restore did, then what the user must still do themselves."""
+    from .util import humanize as _h
+
+    verb = "would restore" if dry_run else "restored"
+    lines = [
+        f"{verb}: [bold green]{_h.bytes_(report.restored_bytes)}[/bold green] "
+        f"in {_h.count(report.restored_files, 'file')}",
+    ]
+    if report.skipped_existing:
+        lines.append(
+            f"already present and matching: {report.skipped_existing:,} "
+            "[dim](a re-run picks up where it left off)[/dim]"
+        )
+    if report.kept_existing:
+        lines.append(f"[yellow]kept existing, differing files: {report.kept_existing:,}[/yellow]")
+    lines.append(
+        "integrity: "
+        + ("[green]verified against the sidecar manifest[/green]" if report.verified
+           else "authenticated by the bundle's own tags")
+    )
+    lines.append(f"took {_h.duration(report.duration_seconds)}")
+    border = "green" if report.ok else "red"
+    console.print(Panel("\n".join(lines), title="Restore complete", border_style=border))
+
+    if report.digest_mismatches:
+        console.print(
+            f"[bold red]Digest mismatch on {len(report.digest_mismatches)} item(s):[/bold red] "
+            + ", ".join(report.digest_mismatches)
+        )
+        console.print(
+            "[red]The restored files do not match what the manifest recorded. "
+            "Do not delete the source machine.[/red]"
+        )
+
+    if report.failures:
+        table = Table(title=f"Could not restore ({len(report.failures)})", title_justify="left")
+        table.add_column("Path", overflow="ellipsis", max_width=60)
+        table.add_column("Reason")
+        for path, reason in report.failures[:20]:
+            table.add_row(path, reason)
+        console.print(table)
+
+    for note in report.notes:
+        if note.severity is not Severity.INFO:
+            console.print(f"[yellow]![/yellow] {note.message}" + (f" [dim]({note.detail})[/dim]" if note.detail else ""))
+
+    if report.followups:
+        console.print()
+        console.print("[bold]Now finish these yourself — they need your identity, not the tool's:[/bold]")
+        for index, followup in enumerate(report.followups, start=1):
+            console.print(f"  [bold]{index}. {followup.title}[/bold]")
+            if followup.why:
+                console.print(f"     [dim]{followup.why}[/dim]")
+            for step in followup.steps:
+                console.print(f"       • {step}")

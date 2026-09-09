@@ -107,7 +107,10 @@ def _scan_known_folders(
             title=title,
             path=path,
             measurement=measurement,
-            archive_path=f"data/user_files/{folder_id}",
+            # The archive path carries the folder's real name, not the internal
+            # id, so a bundle restores to correctly-named folders on its own.
+            # Ids stay stable and lowercase; the two are deliberately separate.
+            archive_path=f"data/user_files/{path.name or folder_id}",
             restore_target=_restore_target(folder_id, path, env),
         )
         _note_redirection(item, path, env)

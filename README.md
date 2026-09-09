@@ -9,10 +9,10 @@ never uploads anything, and anything Windows deliberately gates behind human
 authentication — account sign-ins, licence activation, password import — it
 prepares for you and hands over, with instructions. It never impersonates you.
 
-> **Status: phase 1.** The read-only half is working: `scan` inventories a
-> profile and previews exactly what a capture would take and what it would skip.
-> Capture, packaging and restore land next; see
-> [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the phase plan.
+> **Status: phases 1–2.** `scan`, `capture`, `inspect` and `restore` all work,
+> with encryption, integrity checking, a space pre-check, shadow copies for
+> locked files and a resumable restore. Software inventory, Office and browser
+> handling are next; see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Install
 
@@ -46,8 +46,21 @@ $userPath = [Environment]::GetEnvironmentVariable('Path','User')
 winmigrate scan                      # inventory this profile and preview the plan
 winmigrate scan --verbose            # include folders that are empty or absent
 winmigrate scan --json               # the same plan as JSON
-winmigrate scan --save-plan plan.json
+
+winmigrate capture -o mypc.dat       # write the plan into an encrypted bundle
+winmigrate inspect mypc.dat          # describe a bundle without its passphrase
+winmigrate restore mypc.dat -n       # show what a restore would do
+winmigrate restore mypc.dat          # put it back on the new machine
 ```
+
+Capture prompts for a passphrase and asks before writing. There is no
+`--passphrase` flag: a passphrase on a command line lands in shell history and
+in the process list, so it is either typed at the prompt or read from a file you
+control with `--passphrase-file`.
+
+Run capture from an **elevated** prompt to allow a Volume Shadow Copy, which
+lets files held open by running programs be captured cleanly. Without it those
+files are reported as failures rather than silently missed.
 
 Useful flags:
 
@@ -59,6 +72,18 @@ Useful flags:
 | `--fast` | Do not measure the size of what is being skipped |
 | `--exclude PATTERN` / `--include PATTERN` | Adjust the exclusion rules (repeatable) |
 | `--log-file PATH` | Write a detailed log |
+
+Restore flags:
+
+| Flag | Effect |
+| --- | --- |
+| `-n`, `--dry-run` | Report what would be restored, write nothing |
+| `--overwrite` | Replace existing files that differ (default: keep yours) |
+| `--item ID` | Restore only one item, e.g. `--item files:documents` |
+| `-d`, `--destination` | Restore somewhere other than the current profile |
+
+An interrupted restore can simply be re-run: files already present and matching
+are skipped.
 
 `scan` is read-only: it never opens a file's contents, never writes to the
 profile it inspects, and cannot trigger a cloud download.

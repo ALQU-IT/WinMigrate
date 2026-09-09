@@ -1,0 +1,69 @@
+"""Shadow-copy path translation.
+
+The snapshot lifecycle needs real Windows and administrator rights, so only the
+pure translation is unit-tested here. The subprocess parts are isolated in
+``winmigrate.vss`` for exactly that reason.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from winmigrate import vss
+
+
+def test_a_path_is_mapped_into_the_snapshot_device():
+    mapped = vss.map_into_snapshot(
+        r"C:\Users\alice\Documents\a.txt", "C:\\", r"\Device\HarddiskVolumeShadowCopy3"
+    )
+    assert mapped == r"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy3\Users\alice\Documents\a.txt"
+
+
+def test_an_extended_length_path_maps_without_doubling_its_prefix():
+    mapped = vss.map_into_snapshot(
+        r"\\?\C:\Users\a\b.txt", "C:\\", r"\Device\HarddiskVolumeShadowCopy1"
+    )
+    assert mapped == r"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\Users\a\b.txt"
+    assert mapped.count("GLOBALROOT") == 1
+
+
+def test_the_volume_root_itself_maps_to_the_device_root():
+    mapped = vss.map_into_snapshot("C:\\", "C:\\", r"\Device\HarddiskVolumeShadowCopy2")
+    assert mapped == "\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy2\\"
+
+
+def test_a_path_on_another_volume_is_refused():
+    with pytest.raises(vss.ShadowCopyError, match="not on volume"):
+        vss.map_into_snapshot(r"D:\data\a.txt", "C:\\", r"\Device\HarddiskVolumeShadowCopy1")
+
+
+def test_volume_of_extracts_the_drive():
+    assert vss.volume_of(r"C:\Users\alice") == "C:\\"
+    assert vss.volume_of(r"\\?\D:\data\x") == "D:\\"
+
+
+def test_volume_of_refuses_a_path_with_no_drive():
+    with pytest.raises(vss.ShadowCopyError, match="cannot determine the volume"):
+        vss.volume_of("/home/alice")
+
+
+def test_the_shadow_id_is_parsed_out_of_the_create_output():
+    output = "0\r\n{B1C2D3E4-1111-2222-3333-444455556666}\r\n"
+    assert vss._parse_shadow_id(output) == "{B1C2D3E4-1111-2222-3333-444455556666}"
+
+
+def test_output_without_an_id_yields_none_rather_than_a_wrong_guess():
+    assert vss._parse_shadow_id("1\r\n\r\n") is None
+
+
+def test_creating_a_snapshot_off_windows_is_refused_not_attempted():
+    if vss.is_windows():
+        pytest.skip("this asserts the non-Windows guard")
+    with pytest.raises(vss.ShadowCopyError, match="Windows feature"):
+        vss.create("C:\\")
+
+
+def test_elevation_is_reported_as_false_off_windows():
+    if vss.is_windows():
+        pytest.skip("this asserts the non-Windows guard")
+    assert vss.is_elevated() is False

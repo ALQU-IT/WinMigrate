@@ -14,6 +14,7 @@ run while the machine is in use and cannot itself trigger a sync download.
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -22,6 +23,29 @@ from ..models import Note, Severity, SkippedGroup, SkipReason, SyncRoot
 from ..platform_win import CLOUD_PLACEHOLDER_MASK, FILE_ATTRIBUTE_REPARSE_POINT, Environment
 from ..util import paths as pathutil
 from . import syncroots as syncroots_mod
+
+
+@dataclass(slots=True)
+class CaptureFile:
+    """A file the plan says to capture."""
+
+    path: Path
+    relative: str          # relative to the tree root, POSIX separators
+    size: int
+
+
+@dataclass(slots=True)
+class SkipEvent:
+    """Something the plan says to leave out, and why."""
+
+    reason: SkipReason
+    path: Path
+    attributed_to: Path    # the tree the skip is reported against
+    size: int = 0
+    files: int = 0
+    detail: str | None = None
+    key: str | None = None
+    sync_root: str | None = None
 
 
 @dataclass(slots=True)
@@ -103,20 +127,25 @@ def measure_tree(
         measurement.exists = False
         return measurement
 
-    # A tree that *is* inside a sync root is skipped whole, without descending.
-    containing = syncroots_mod.find_root_for(str(root_path), sync_roots) if config.skip_synced else None
-    if containing is not None:
-        accumulator.add(
-            SkipReason.SYNCED,
-            str(root_path),
-            detail=f"already synced by {containing.provider} ({containing.root})",
-            key=f"synced:{containing.provider}:{containing.root}",
-        )
-        measurement.synced_into.add(containing.root)
-        measurement.skipped = accumulator.as_list()
-        return measurement
-
-    _walk(root_path, base, config, env, sync_roots, measurement, accumulator)
+    for event in walk_tree(
+        root_path, config, env, sync_roots, relative_base=base, measurement=measurement
+    ):
+        if isinstance(event, CaptureFile):
+            measurement.size_bytes += event.size
+            measurement.file_count += 1
+        else:
+            accumulator.add(
+                event.reason,
+                str(event.attributed_to),
+                size=event.size,
+                files=event.files,
+                detail=event.detail,
+                key=event.key,
+            )
+            if event.sync_root:
+                measurement.synced_into.add(event.sync_root)
+            if event.reason is SkipReason.UNREADABLE:
+                accumulator.unreadable_examples.append(str(event.path))
     measurement.skipped = accumulator.as_list()
     if accumulator.unreadable_examples:
         measurement.notes.append(
@@ -129,31 +158,59 @@ def measure_tree(
     return measurement
 
 
-def _walk(
-    root_path: Path,
-    base: Path,
+def walk_tree(
+    root: os.PathLike[str] | str,
     config: ScanConfig,
     env: Environment,
-    sync_roots: list[SyncRoot],
-    measurement: TreeMeasurement,
-    accumulator: _Accumulator,
-) -> None:
+    sync_roots: list[SyncRoot] | None = None,
+    *,
+    relative_base: os.PathLike[str] | str | None = None,
+    measurement: TreeMeasurement | None = None,
+) -> Iterator[CaptureFile | SkipEvent]:
+    """Yield what a tree contains, decision by decision.
+
+    This is the single implementation of the capture rules. The preview counts
+    these events and the capture stage acts on them, so the plan a user approves
+    and the work that follows cannot diverge -- there is no second walk to fall
+    out of step.
+    """
+    root_path = Path(os.fspath(root))
+    base = Path(os.fspath(relative_base)) if relative_base is not None else env.profile_root
+    sync_roots = sync_roots or []
+
+    # A tree that *is* inside a sync root is skipped whole, without descending.
+    containing = (
+        syncroots_mod.find_root_for(str(root_path), sync_roots) if config.skip_synced else None
+    )
+    if containing is not None:
+        yield SkipEvent(
+            reason=SkipReason.SYNCED,
+            path=root_path,
+            attributed_to=root_path,
+            detail=f"already synced by {containing.provider} ({containing.root})",
+            key=f"synced:{containing.provider}:{containing.root}",
+            sync_root=containing.root,
+        )
+        return
+
     stack: list[Path] = [root_path]
     while stack:
         current = stack.pop()
         try:
             entries = list(os.scandir(pathutil.extended(current)))
         except OSError as exc:
-            accumulator.add(
-                SkipReason.UNREADABLE,
-                str(current),
-                detail="permission denied or path unavailable",
+            yield SkipEvent(
+                reason=SkipReason.UNREADABLE,
+                path=current,
+                attributed_to=current,
+                detail=f"permission denied or path unavailable: {exc.strerror or exc}",
                 key="unreadable",
             )
-            accumulator.unreadable_examples.append(f"{current}: {exc.strerror or exc}")
             continue
 
-        measurement.dir_count += 1
+        if measurement is not None:
+            measurement.dir_count += 1
+
         for entry in entries:
             # Built from the canonical parent, never from ``entry.path``: the
             # directory was opened through pathutil.extended(), so entry.path
@@ -161,17 +218,20 @@ def _walk(
             # relative path, exclusion match and recorded source path.
             path = current / entry.name
             relative = pathutil.relative_posix(path, base)
-            if pathutil.needs_long_path_support(path):
+            if measurement is not None and pathutil.needs_long_path_support(path):
                 measurement.long_path_count += 1
 
             try:
                 is_dir = entry.is_dir(follow_symlinks=False)
                 stat_result = entry.stat(follow_symlinks=False)
             except OSError:
-                accumulator.add(
-                    SkipReason.UNREADABLE, str(path), detail="stat failed", key="unreadable"
+                yield SkipEvent(
+                    reason=SkipReason.UNREADABLE,
+                    path=path,
+                    attributed_to=root_path,
+                    detail="stat failed",
+                    key="unreadable",
                 )
-                accumulator.unreadable_examples.append(str(path))
                 continue
 
             attributes = getattr(stat_result, "st_file_attributes", 0)
@@ -181,22 +241,24 @@ def _walk(
                 if containing is not None:
                     # Bytes are attributed to the sync root itself (measured
                     # once by syncroots.measure) so they are not counted twice.
-                    accumulator.add(
-                        SkipReason.SYNCED,
-                        containing.root,
+                    yield SkipEvent(
+                        reason=SkipReason.SYNCED,
+                        path=path,
+                        attributed_to=Path(containing.root),
                         detail=f"already synced by {containing.provider}",
                         key=f"synced:{containing.provider}:{containing.root}",
+                        sync_root=containing.root,
                     )
-                    measurement.synced_into.add(containing.root)
                     continue
 
             if config.is_excluded(relative, entry.name):
                 regenerable = is_dir and config.is_regenerable(entry.name)
                 reason = SkipReason.REGENERABLE if regenerable else SkipReason.EXCLUDED
                 size, files = _measure_raw(path, config) if is_dir else (stat_result.st_size, 1)
-                accumulator.add(
-                    reason,
-                    str(root_path),
+                yield SkipEvent(
+                    reason=reason,
+                    path=path,
+                    attributed_to=root_path,
                     size=size,
                     files=files,
                     detail=(
@@ -209,9 +271,10 @@ def _walk(
                 continue
 
             if attributes & FILE_ATTRIBUTE_REPARSE_POINT and not config.follow_reparse_points:
-                accumulator.add(
-                    SkipReason.REPARSE_POINT,
-                    str(root_path),
+                yield SkipEvent(
+                    reason=SkipReason.REPARSE_POINT,
+                    path=path,
+                    attributed_to=root_path,
                     files=0 if is_dir else 1,
                     detail="junction or symlink; not followed",
                     key=f"reparse:{root_path}",
@@ -223,10 +286,12 @@ def _walk(
                 continue
 
             if attributes & CLOUD_PLACEHOLDER_MASK:
-                measurement.placeholder_count += 1
-                accumulator.add(
-                    SkipReason.CLOUD_PLACEHOLDER,
-                    str(root_path),
+                if measurement is not None:
+                    measurement.placeholder_count += 1
+                yield SkipEvent(
+                    reason=SkipReason.CLOUD_PLACEHOLDER,
+                    path=path,
+                    attributed_to=root_path,
                     size=stat_result.st_size,
                     files=1,
                     detail="online-only file; its bytes are not on this disk",
@@ -234,8 +299,11 @@ def _walk(
                 )
                 continue
 
-            measurement.size_bytes += stat_result.st_size
-            measurement.file_count += 1
+            yield CaptureFile(
+                path=path,
+                relative=pathutil.relative_posix(path, root_path),
+                size=stat_result.st_size,
+            )
 
 
 def _measure_raw(path: Path, config: ScanConfig) -> tuple[int, int]:

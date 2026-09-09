@@ -1,12 +1,12 @@
 """Command-line interface.
 
-Phase 1 ships the read-only half of the tool: ``scan`` (and its alias
-``preview``), which inventories the current user's profile and prints exactly
-what a capture would and would not take. Nothing here writes to the profile.
+``scan`` inventories a profile and previews the plan; ``capture`` writes that
+plan into an encrypted bundle; ``inspect`` reads a bundle's header and sidecar
+without a passphrase; ``restore`` puts a bundle back and reports what the user
+must finish by hand.
 
-Planned subcommands, in the order they land: ``capture``, ``package``,
-``restore``. They are deliberately absent rather than stubbed, so ``--help``
-never advertises something that does not work.
+Passphrases are read interactively by default and never appear in a command
+line, where they would land in shell history and in the process list.
 """
 
 from __future__ import annotations
@@ -18,11 +18,22 @@ import sys
 from pathlib import Path
 
 from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeRemainingColumn,
+    TransferSpeedColumn,
+)
 
-from . import __version__, logging_setup, report
+from . import __version__, capture as capture_mod, logging_setup, report, restore as restore_mod
 from .config import ScanConfig, config_from_dict, load_config_file
-from .errors import WinMigrateError
+from .util import humanize
+from .errors import ConfigError, WinMigrateError
+from .capture import CaptureOptions
 from .platform_win import Environment, require_windows
+from .restore import RestoreOptions
 from .scan import run_scan
 
 log = logging.getLogger(__name__)
@@ -56,7 +67,76 @@ def build_parser() -> argparse.ArgumentParser:
         scan_parser = subparsers.add_parser(name, parents=[common], help=help_text)
         _add_scan_arguments(scan_parser)
         scan_parser.set_defaults(func=cmd_scan)
+
+    capture_parser = subparsers.add_parser(
+        "capture", parents=[common], help="write the plan into an encrypted bundle"
+    )
+    _add_scan_arguments(capture_parser)
+    _add_capture_arguments(capture_parser)
+    capture_parser.set_defaults(func=cmd_capture)
+
+    inspect_parser = subparsers.add_parser(
+        "inspect", parents=[common], help="describe a bundle without decrypting it"
+    )
+    inspect_parser.add_argument("bundle", type=Path)
+    inspect_parser.set_defaults(func=cmd_inspect)
+
+    restore_parser = subparsers.add_parser(
+        "restore", parents=[common], help="restore a bundle onto this machine"
+    )
+    _add_restore_arguments(restore_parser)
+    restore_parser.set_defaults(func=cmd_restore)
     return parser
+
+
+def _add_capture_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "-o", "--output", type=Path, help="bundle path (default: <host>-<user>-<timestamp>.dat)"
+    )
+    parser.add_argument(
+        "--passphrase-file",
+        type=Path,
+        help="read the passphrase from this file instead of prompting "
+        "(for unattended runs; the file's own permissions are all that protect it)",
+    )
+    parser.add_argument(
+        "--no-vss",
+        dest="use_vss",
+        action="store_false",
+        help="do not create a shadow copy; files held open by programs may be unreadable",
+    )
+    parser.add_argument(
+        "--no-space-check",
+        dest="space_check",
+        action="store_false",
+        help="write even if the destination looks too small",
+    )
+    parser.add_argument(
+        "--yes", action="store_true", help="do not ask for confirmation before writing"
+    )
+
+
+def _add_restore_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("bundle", type=Path)
+    parser.add_argument(
+        "-d", "--destination", type=Path, help="restore here instead of the current profile"
+    )
+    parser.add_argument("--passphrase-file", type=Path, help="read the passphrase from this file")
+    parser.add_argument(
+        "-n", "--dry-run", action="store_true", help="report what would be restored, write nothing"
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="replace existing files that differ from the bundle (default: keep them)",
+    )
+    parser.add_argument(
+        "--item",
+        action="append",
+        default=[],
+        metavar="ID",
+        help="restore only this item id (repeatable)",
+    )
 
 
 def _add_scan_arguments(parser: argparse.ArgumentParser) -> None:
@@ -162,6 +242,123 @@ def cmd_scan(args: argparse.Namespace, console: Console) -> int:
         if args.save_plan:
             console.print(f"[dim]plan written to {args.save_plan}[/dim]")
     return 0
+
+
+def _read_passphrase(args: argparse.Namespace, *, confirm: bool) -> str:
+    """Get the passphrase without ever putting it on a command line.
+
+    A passphrase passed as an argument would be visible in shell history and in
+    the process list to every other user on the machine, so there is no flag for
+    one -- only an interactive prompt or a file the user controls.
+    """
+    import getpass  # noqa: PLC0415
+
+    path = getattr(args, "passphrase_file", None)
+    if path:
+        text = Path(path).read_text(encoding="utf-8").strip("\r\n")
+        if not text:
+            raise ConfigError(f"passphrase file is empty: {path}")
+        return text
+    passphrase = getpass.getpass("Passphrase: ")
+    if not passphrase:
+        raise ConfigError("a passphrase is required; the bundle is always encrypted")
+    if confirm and getpass.getpass("Confirm passphrase: ") != passphrase:
+        raise ConfigError("the passphrases did not match")
+    return passphrase
+
+
+def cmd_capture(args: argparse.Namespace, console: Console) -> int:
+    require_windows(allow_override=args.profile_root is not None or _override_allowed())
+    config = _config_from_args(args)
+    env = Environment.fixture(config.profile_root) if config.profile_root else Environment.live()
+
+    result = run_scan(config, env)
+    report.render_preview(result, console, verbose=args.verbose)
+
+    totals = result.totals()
+    if totals.capture_files == 0:
+        console.print("[yellow]Nothing to capture.[/yellow]")
+        return 1
+
+    output = Path(args.output) if args.output else Path(capture_mod.default_bundle_name(result))
+    ok, free = capture_mod.check_free_space(output, totals.capture_bytes)
+    console.print(
+        f"\nDestination [bold]{output}[/bold] — "
+        f"{humanize.bytes_(free)} free, plan needs about "
+        f"{humanize.bytes_(totals.capture_bytes)}"
+        + ("" if ok else " [red](not enough)[/red]")
+    )
+
+    if not args.yes:
+        console.print(
+            "[dim]The bundle is encrypted with a passphrase only you hold. "
+            "There is no recovery if you lose it.[/dim]"
+        )
+        answer = console.input("Write this bundle? [y/N] ").strip().lower()
+        if answer not in {"y", "yes"}:
+            console.print("Nothing was written.")
+            return 1
+
+    passphrase = _read_passphrase(args, confirm=True)
+    options = CaptureOptions(
+        output=output,
+        passphrase=passphrase,
+        use_vss=args.use_vss,
+        skip_space_check=not args.space_check,
+    )
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[cyan]{task.description}"),
+        BarColumn(),
+        TransferSpeedColumn(),
+        TextColumn("{task.completed:,} / {task.total:,} bytes"),
+        TimeRemainingColumn(),
+        console=console,
+        transient=True,
+    ) as bar:
+        task = bar.add_task("capturing", total=max(totals.capture_bytes, 1))
+
+        def on_progress(title: str, size: int) -> None:
+            bar.update(task, advance=size, description=title)
+
+        capture_report = capture_mod.capture(result, options, config, env, on_progress)
+
+    report.render_capture_report(capture_report, console)
+    return 0 if not capture_report.failures else 0
+
+
+def cmd_inspect(args: argparse.Namespace, console: Console) -> int:
+    header = restore_mod.inspect(args.bundle)
+    sidecar = restore_mod.load_sidecar(Path(args.bundle))
+    console.print_json(data={"header": header, "sidecar": sidecar})
+    checked, error = restore_mod.verify_sidecar(Path(args.bundle))
+    if error:
+        console.print(f"[bold red]integrity:[/bold red] {error}")
+        return 2
+    console.print(
+        "[green]integrity: matches the sidecar digest[/green]"
+        if checked
+        else "[dim]integrity: no sidecar manifest to check against[/dim]"
+    )
+    return 0
+
+
+def cmd_restore(args: argparse.Namespace, console: Console) -> int:
+    require_windows(allow_override=args.destination is not None or _override_allowed())
+    passphrase = _read_passphrase(args, confirm=False)
+    options = RestoreOptions(
+        bundle=args.bundle,
+        passphrase=passphrase,
+        destination=args.destination,
+        dry_run=args.dry_run,
+        overwrite=args.overwrite,
+        items=tuple(args.item),
+    )
+    with console.status("[cyan]restoring…"):
+        restore_report = restore_mod.restore(options)
+    report.render_restore_report(restore_report, console, dry_run=args.dry_run)
+    return 0 if restore_report.ok else 3
 
 
 def _override_allowed() -> bool:

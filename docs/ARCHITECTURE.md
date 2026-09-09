@@ -46,13 +46,18 @@ output:
 
 ```
 scan     → discover what exists; produce a ScanResult and a preview plan
-collect  → copy data (VSS for locked files), skipping already-synced content
-package  → compress, encrypt to <name>.dat, write the manifest with hashes
-restore  → verify, decrypt, replace files, reinstall apps, emit a to-do report
+capture  → stream the plan into an encrypted bundle (VSS for locked files),
+           compressing, hashing and encrypting in a single pass
+restore  → verify, decrypt, put files back, emit a to-do report
 ```
 
-`scan` writes nothing. `collect` and `package` write only inside the output
-directory. `restore` is the only stage that writes into a user profile.
+Collect and package are one stage rather than two: staging a copy of a profile
+before packaging it would need a second copy of the data on disk, which a
+217 GiB profile cannot afford. Files stream from source to bundle in one pass,
+hashed on the way through.
+
+`scan` writes nothing. `capture` writes only its bundle and sidecar. `restore`
+is the only stage that writes into a user profile.
 
 ## Layout
 
@@ -64,7 +69,12 @@ winmigrate/
   manifest.py        manifest build/validate, public view, bundle header spec
   platform_win.py    every Windows-specific read, behind a testable Environment
   logging_setup.py   log file + console handler + secret-redacting filter
-  report.py          rich rendering of the preview (and later, restore reports)
+  crypto.py          Argon2id/PBKDF2 key derivation and the chunked AEAD stream
+  bundle.py          the .dat container: framing, gzip, streamed tar membership
+  capture.py         plan → bundle, with space pre-check, hashing and VSS
+  restore.py         verify → decrypt → write → report
+  vss.py             Volume Shadow Copy lifecycle and path translation
+  report.py          rich rendering of the preview, capture and restore reports
   errors.py          exception hierarchy
   util/
     paths.py         long-path handling, containment tests, %VAR% expansion
@@ -114,16 +124,43 @@ Two rules keep the numbers honest:
 
 | Phase | Contents | Status |
 | --- | --- | --- |
-| 1 | Project structure, manifest schema, `scan` + preview, config, logging | **shipped** (preview half) |
-| 1b | File capture with sync-skip, packaging (AES-256-GCM + Argon2id), manifest hashes, restore with verification | next |
-| 2 | VSS for locked files, resume, space pre-check, long-path handling, restore report | |
-| 3 | App inventory + `winget import`; Office detect + ODT reinstall | |
+| 1 | Project structure, manifest schema, `scan` + preview, config, logging | **shipped** |
+| 1b | File capture with sync-skip, packaging (AES-256-GCM + Argon2id), manifest hashes, restore with verification | **shipped** |
+| 2 | VSS for locked files, resume, space pre-check, long-path handling, restore report | **shipped** (VSS untested on real Windows) |
+| 3 | App inventory + `winget import`; Office detect + ODT reinstall | next |
 | 4 | Browser profiles, sign-in/sync detection, native-export password handoff; Wi-Fi, printers, env vars, fonts, dev config, Outlook | |
-| 5 | Files-only mode polish, config file, optional GUI | |
+| 5 | Files-only mode polish, optional exclusion presets (device backups, VM images), config file, optional GUI | |
 
-Phase 1 deliberately ships no `capture`, `package` or `restore` subcommand
-rather than stubbing them, so `--help` never advertises something that does not
-work.
+## Why the payload is encrypted in chunks
+
+AES-GCM is safe for roughly 64 GiB under one (key, nonce) pair, and a single
+`encrypt()` cannot exceed 2^39-256 bits at all. The first real profile this was
+run against had 217 GiB to capture, so a one-shot encrypt is not merely slow —
+it is invalid. The payload is therefore a sequence of independently
+authenticated chunks, each binding its associated data to the bundle header, its
+index in the stream, and whether it is the last one. That makes reordering,
+duplication, splicing between bundles and truncation all detectable, and keeps
+memory flat regardless of profile size.
+
+The manifest is the **last** member of the tar, because per-item digests are not
+known until the files have been read and reading a 217 GiB profile twice is not
+acceptable. Restore hashes each file as it extracts and checks the manifest when
+it arrives. Bundle authenticity does not depend on that ordering — the AEAD tags
+already guarantee it — so the per-item digests serve their real purpose:
+catching corruption that happened on the *source* side, before encryption.
+
+## What cannot be resumed, and why
+
+Restore resumes: files already present and matching are skipped, so an
+interrupted run picks up where it left off, and each file is written to a
+temporary name and renamed, so a half-written file is never mistaken for a
+finished one.
+
+**Capture cannot be resumed.** The bundle is one authenticated stream, so an
+interrupted capture leaves no usable prefix. The partial file is deleted rather
+than left looking restorable, and the run starts again. Splitting bundles into
+resumable volumes would change that, at the cost of a more complex format; it is
+not currently implemented.
 
 ## Scope assumption
 
