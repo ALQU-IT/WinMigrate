@@ -279,3 +279,68 @@ def test_an_unreadable_file_is_recorded_without_losing_the_capture(profile: Path
     assert "Permission denied" in report.failures[0][1]
     assert report.captured_files > 0
     assert report.bundle_path.is_file()
+
+
+def test_a_dry_run_does_not_create_the_destination_directory(captured, tmp_path: Path):
+    """Reported as a bug when C:\\temp did not appear after a --dry-run restore.
+
+    The behaviour was right; the report claimed "Restore complete", which is
+    what made it look wrong.
+    """
+    report, _scan = captured
+    destination = tmp_path / "does-not-exist-yet"
+    result = restore_mod.restore(
+        RestoreOptions(
+            bundle=report.bundle_path,
+            passphrase=PASSPHRASE,
+            destination=destination,
+            dry_run=True,
+        )
+    )
+    assert not destination.exists()
+    assert result.dry_run is True
+    assert result.destination == destination
+
+
+def test_the_dry_run_report_says_nothing_was_written(captured, tmp_path: Path):
+    from rich.console import Console
+
+    from winmigrate import report as report_mod
+
+    capture_report, _scan = captured
+    destination = tmp_path / "nowhere"
+    result = restore_mod.restore(
+        RestoreOptions(
+            bundle=capture_report.bundle_path,
+            passphrase=PASSPHRASE,
+            destination=destination,
+            dry_run=True,
+        )
+    )
+    console = Console(record=True, width=120)
+    report_mod.render_restore_report(result, console)
+    text = console.export_text()
+    assert "Dry run" in text and "nothing was written" in text.lower()
+    assert "Restore complete" not in text
+    assert "not created" in text
+    assert str(destination) in text
+
+
+def test_a_real_restore_still_reports_as_complete(captured, tmp_path: Path):
+    from rich.console import Console
+
+    from winmigrate import report as report_mod
+
+    capture_report, _scan = captured
+    result = restore_mod.restore(
+        RestoreOptions(
+            bundle=capture_report.bundle_path,
+            passphrase=PASSPHRASE,
+            destination=tmp_path / "real",
+        )
+    )
+    console = Console(record=True, width=120)
+    report_mod.render_restore_report(result, console)
+    text = console.export_text()
+    assert "Restore complete" in text
+    assert "nothing was written" not in text.lower()

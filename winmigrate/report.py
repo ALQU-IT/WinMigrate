@@ -272,15 +272,25 @@ def render_capture_report(report, console: Console) -> None:
     )
 
 
-def render_restore_report(report, console: Console, *, dry_run: bool = False) -> None:
-    """Print what restore did, then what the user must still do themselves."""
+def render_restore_report(report, console: Console, *, dry_run: bool | None = None) -> None:
+    """Print what restore did, then what the user must still do themselves.
+
+    A dry run must never look like a completed restore. It is titled as a
+    preview, and it says outright that nothing was written -- otherwise the
+    absence of the destination folder afterwards reads as a failure.
+    """
     from .util import humanize as _h
 
+    dry_run = report.dry_run if dry_run is None else dry_run
     verb = "would restore" if dry_run else "restored"
     lines = [
         f"{verb}: [bold green]{_h.bytes_(report.restored_bytes)}[/bold green] "
         f"in {_h.count(report.restored_files, 'file')}",
     ]
+    if report.destination:
+        lines.append(
+            f"{'would go to' if dry_run else 'destination'}: [bold]{report.destination}[/bold]"
+        )
     if report.skipped_existing:
         lines.append(
             f"already present and matching: {report.skipped_existing:,} "
@@ -294,8 +304,19 @@ def render_restore_report(report, console: Console, *, dry_run: bool = False) ->
            else "authenticated by the bundle's own tags")
     )
     lines.append(f"took {_h.duration(report.duration_seconds)}")
-    border = "green" if report.ok else "red"
-    console.print(Panel("\n".join(lines), title="Restore complete", border_style=border))
+    if dry_run:
+        title, border = "Dry run — nothing was written", "cyan"
+    elif report.ok:
+        title, border = "Restore complete", "green"
+    else:
+        title, border = "Restore finished with problems", "red"
+    console.print(Panel("\n".join(lines), title=title, border_style=border))
+    if dry_run:
+        console.print(
+            "[dim]This was a preview. No files were written and "
+            + (f"{report.destination} was not created. " if report.destination else "")
+            + "Re-run without --dry-run to restore for real.[/dim]"
+        )
 
     if report.digest_mismatches:
         console.print(

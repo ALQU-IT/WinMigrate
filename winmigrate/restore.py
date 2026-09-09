@@ -59,6 +59,8 @@ class RestoreReport:
     """What restore did, and what the user still has to do."""
 
     bundle: Path
+    destination: Path | None = None
+    dry_run: bool = False
     restored_files: int = 0
     restored_bytes: int = 0
     skipped_existing: int = 0
@@ -129,7 +131,7 @@ def restore(options: RestoreOptions, progress: ProgressCallback | None = None) -
     if not bundle_path.is_file():
         raise RestoreError(f"bundle not found: {bundle_path}")
 
-    report = RestoreReport(bundle=bundle_path)
+    report = RestoreReport(bundle=bundle_path, dry_run=options.dry_run)
     checked, error = verify_sidecar(bundle_path)
     report.verified = checked
     if error:
@@ -144,6 +146,7 @@ def restore(options: RestoreOptions, progress: ProgressCallback | None = None) -
         )
 
     destination = Path(os.fspath(options.destination)) if options.destination else _default_profile()
+    report.destination = destination
     written: dict[str, str] = {}
 
     # The authoritative manifest is the last member of the stream, so selecting
