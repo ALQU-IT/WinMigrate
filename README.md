@@ -22,6 +22,24 @@ Requires Python 3.11+ and Windows.
 py -3.11 -m pip install -e .
 ```
 
+If `winmigrate` is then "not recognized as a name of a cmdlet", pip installed
+the package but its `Scripts` directory is not on your `PATH`. Either use the
+module form, which always works:
+
+```powershell
+py -3.11 -m winmigrate scan
+```
+
+or add the directory to your user `PATH` once, then open a new terminal:
+
+```powershell
+$scripts = & py -3.11 -c "import sysconfig; print(sysconfig.get_path('scripts'))"
+$userPath = [Environment]::GetEnvironmentVariable('Path','User')
+[Environment]::SetEnvironmentVariable('Path', "$userPath;$scripts", 'User')
+```
+
+`py -3.11 -m pip show winmigrate` confirms the package is installed.
+
 ## Use
 
 ```powershell
