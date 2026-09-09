@@ -1,0 +1,212 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ALQU-IT/WinMigrate/schema/manifest.schema.json",
+  "title": "WinMigrate manifest",
+  "description": "Describes the contents of a WinMigrate bundle. Two copies exist: the authoritative one inside the encrypted payload, and a redacted public view written beside the .dat file.",
+  "type": "object",
+  "required": ["schema_version", "tool", "created_utc", "source", "items", "totals"],
+  "properties": {
+    "schema_version": { "type": "string", "pattern": "^\\d+\\.\\d+$" },
+    "tool": {
+      "type": "object",
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "const": "winmigrate" },
+        "version": { "type": "string" }
+      }
+    },
+    "created_utc": { "type": "string", "format": "date-time" },
+    "mode": { "enum": ["full", "files-only"] },
+    "source": {
+      "type": "object",
+      "description": "The machine and account the bundle was captured from.",
+      "properties": {
+        "hostname": { "type": "string" },
+        "username": { "type": "string" },
+        "profile_path": { "type": "string" },
+        "os_name": { "type": "string" },
+        "os_version": { "type": "string" },
+        "os_build": { "type": "string" },
+        "architecture": { "type": "string" },
+        "locale": { "type": "string" },
+        "is_windows": { "type": "boolean" }
+      }
+    },
+    "scan": {
+      "type": "object",
+      "properties": {
+        "started_utc": { "type": "string" },
+        "finished_utc": { "type": ["string", "null"] },
+        "duration_seconds": { "type": "number" },
+        "notes": { "type": "array", "items": { "$ref": "#/$defs/note" } }
+      }
+    },
+    "sync_roots": { "type": "array", "items": { "$ref": "#/$defs/syncRoot" } },
+    "items": { "type": "array", "items": { "$ref": "#/$defs/item" } },
+    "followups": { "type": "array", "items": { "$ref": "#/$defs/followup" } },
+    "totals": { "$ref": "#/$defs/totals" },
+    "bundle": { "$ref": "#/$defs/bundle" },
+    "categories": {
+      "type": "array",
+      "description": "Public view only: the categories present, for quick inspection.",
+      "items": { "type": "string" }
+    }
+  },
+  "$defs": {
+    "note": {
+      "type": "object",
+      "required": ["severity", "message"],
+      "properties": {
+        "severity": { "enum": ["info", "warning", "error"] },
+        "message": { "type": "string" },
+        "detail": { "type": "string" }
+      }
+    },
+    "syncRoot": {
+      "type": "object",
+      "required": ["provider", "root"],
+      "properties": {
+        "provider": { "type": "string", "examples": ["onedrive", "nextcloud"] },
+        "root": { "type": "string" },
+        "label": { "type": ["string", "null"] },
+        "account_hint": {
+          "type": ["string", "null"],
+          "description": "A non-secret hint about which account owns the folder, so the restore report can say which one to sign in to."
+        },
+        "known_folders_redirected": { "type": "array", "items": { "type": "string" } },
+        "bytes_skipped": { "type": "integer", "minimum": 0 },
+        "files_skipped": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "item": {
+      "type": "object",
+      "required": ["id", "category", "kind", "title", "action", "sensitivity"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Stable identifier, unique within a manifest, e.g. 'files:documents'."
+        },
+        "category": {
+          "enum": [
+            "user_files", "browser_profile", "browser_passwords", "wifi", "printers",
+            "mapped_drives", "env_vars", "scheduled_tasks", "fonts", "outlook",
+            "dev_config", "file_associations", "software", "office"
+          ]
+        },
+        "kind": {
+          "enum": ["tree", "file", "record", "report"],
+          "description": "'record' data lives in the manifest itself; 'report' items are captured for reporting only and restore nothing."
+        },
+        "title": { "type": "string" },
+        "action": { "enum": ["capture", "skip", "manual"] },
+        "sensitivity": {
+          "enum": ["normal", "secret"],
+          "description": "'secret' items exist only inside the encrypted payload; the public view reduces them to a redacted stub."
+        },
+        "skip_reason": {
+          "enum": [
+            "synced", "excluded", "regenerable", "cloud_placeholder", "empty",
+            "unreadable", "not_present", "reparse_point", "files_only_mode"
+          ]
+        },
+        "source_path": { "type": "string" },
+        "archive_path": {
+          "type": "string",
+          "description": "Location inside the bundle payload, POSIX separators."
+        },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "file_count": { "type": "integer", "minimum": 0 },
+        "skipped": { "type": "array", "items": { "$ref": "#/$defs/skippedGroup" } },
+        "restore": { "$ref": "#/$defs/restoreSpec" },
+        "digest": { "type": "string" },
+        "digest_algo": { "enum": ["sha256", "sha256-tree-v1"] },
+        "record": { "type": "object" },
+        "notes": { "type": "array", "items": { "$ref": "#/$defs/note" } },
+        "redacted": { "const": true }
+      }
+    },
+    "skippedGroup": {
+      "type": "object",
+      "required": ["reason", "path", "bytes", "files"],
+      "properties": {
+        "reason": { "type": "string" },
+        "path": { "type": "string" },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "files": { "type": "integer", "minimum": 0 },
+        "detail": { "type": "string" }
+      }
+    },
+    "restoreSpec": {
+      "type": "object",
+      "required": ["target", "strategy"],
+      "properties": {
+        "target": { "type": "string", "description": "May contain %USERPROFILE% and similar." },
+        "strategy": {
+          "enum": ["merge", "replace", "guided", "manual"],
+          "description": "'guided' means the tool prepares the step and the user completes it."
+        },
+        "requires_elevation": { "type": "boolean" },
+        "notes": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "followup": {
+      "type": "object",
+      "required": ["id", "title", "why"],
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "why": { "type": "string" },
+        "steps": { "type": "array", "items": { "type": "string" } },
+        "category": { "type": ["string", "null"] },
+        "required": { "type": "boolean" }
+      }
+    },
+    "totals": {
+      "type": "object",
+      "properties": {
+        "capture_bytes": { "type": "integer", "minimum": 0 },
+        "capture_files": { "type": "integer", "minimum": 0 },
+        "skipped_bytes": { "type": "integer", "minimum": 0 },
+        "skipped_files": { "type": "integer", "minimum": 0 },
+        "item_count": { "type": "integer", "minimum": 0 },
+        "secret_item_count": { "type": "integer", "minimum": 0 },
+        "manual_item_count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "bundle": {
+      "type": "object",
+      "properties": {
+        "filename": { "type": "string" },
+        "cipher": { "const": "AES-256-GCM" },
+        "compression": { "type": "string" },
+        "kdf": {
+          "type": "object",
+          "properties": {
+            "name": { "enum": ["argon2id", "pbkdf2-hmac-sha256"] },
+            "time_cost": { "type": "integer" },
+            "memory_cost_kib": { "type": "integer" },
+            "parallelism": { "type": "integer" },
+            "iterations": { "type": "integer" },
+            "key_len": { "type": "integer" },
+            "salt_b64": { "type": "string" }
+          }
+        },
+        "ciphertext": {
+          "type": "object",
+          "properties": {
+            "sha256": { "type": ["string", "null"] },
+            "size_bytes": { "type": ["integer", "null"] }
+          }
+        },
+        "payload": {
+          "type": "object",
+          "description": "Digest of the plaintext payload. Present only in the encrypted manifest; omitted from the public view so a file holder cannot confirm guesses about the contents.",
+          "properties": {
+            "sha256": { "type": ["string", "null"] },
+            "size_bytes": { "type": ["integer", "null"] }
+          }
+        }
+      }
+    }
+  }
+}

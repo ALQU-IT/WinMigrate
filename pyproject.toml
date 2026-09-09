@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "winmigrate"
+version = "0.1.0"
+description = "Owner-run Windows user-profile migration and backup utility"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "GPL-3.0-or-later" }
+authors = [{ name = "WinMigrate contributors" }]
+keywords = ["windows", "migration", "backup", "usmt", "profile"]
+classifiers = [
+    "Environment :: Console",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: System :: Archiving :: Backup",
+]
+dependencies = [
+    "rich>=13.7",
+    # Phase 1 packaging/crypto (bundle writer lands in the next drop, pinned now
+    # so the environment is ready and the manifest header params are testable).
+    "cryptography>=42.0",
+    "argon2-cffi>=23.1",
+]
+
+[project.optional-dependencies]
+windows = ["pywin32>=306"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+winmigrate = "winmigrate.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/ALQU-IT/WinMigrate"
+
+[tool.setuptools.packages.find]
+include = ["winmigrate*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
