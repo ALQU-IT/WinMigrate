@@ -423,6 +423,41 @@ def _slice_columns(line: str, offsets: dict[str, int]) -> dict[str, str]:
 #: winget truncates long names to fit its columns, marking them with an ellipsis.
 TRUNCATION_MARKERS = ("\u2026", "...")
 
+TOKEN_PATTERN = re.compile(r"[A-Z]+(?![a-z])|[A-Z][a-z]+|[a-z]+|\d+")
+
+
+def tokens(text: str) -> list[str]:
+    """Split an identifier into lowercase words, honouring CamelCase.
+
+    ``Microsoft.DesktopAppInstaller`` -> ``[microsoft, desktop, app, installer]``.
+    """
+    return [match.group(0).lower() for match in TOKEN_PATTERN.finditer(text or "")]
+
+
+def is_subsequence(needle: list[str], haystack: list[str]) -> bool:
+    """True when every word of ``needle`` appears in ``haystack``, in order."""
+    iterator = iter(haystack)
+    return all(word in iterator for word in needle)
+
+
+def identity_resembles(appx_name: str, identifier: str) -> bool:
+    """True when an MSIX package identity plainly denotes a winget package.
+
+    Microsoft ships these under names that differ by a word or two -- the
+    package ``Microsoft.DesktopAppInstaller`` is winget's ``Microsoft.AppInstaller``,
+    and ``Microsoft.OutlookForWindows`` is ``Microsoft.Outlook``. The publisher
+    must agree and the id's remaining words must appear in the package's name in
+    order, which is loose enough for those and tight enough to keep unrelated
+    packages apart.
+    """
+    package_words = tokens(appx_name)
+    id_words = tokens(identifier)
+    if len(package_words) < 2 or len(id_words) < 2:
+        return False
+    if package_words[0] != id_words[0]:
+        return False
+    return is_subsequence(id_words[1:], package_words[1:])
+
 
 @dataclass(slots=True)
 class JoinStats:
@@ -496,6 +531,16 @@ def apply_winget_listings(
         by_identity = False
         if listing is None and entry.appx_family:
             listing = by_identifier.get(key)
+            if listing is None:
+                listing = next(
+                    (
+                        candidate
+                        for candidate in listings
+                        if candidate.has_package
+                        and identity_resembles(entry.name, candidate.identifier)
+                    ),
+                    None,
+                )
             by_identity = listing is not None
         if listing is None:
             listing = next(
@@ -517,9 +562,18 @@ def apply_winget_listings(
         else:
             entry.winget_knows_no_package = True
 
+    # Counted per package id, not per row: one application installed at two
+    # versions produces two rows with the same id, and the second was being
+    # reported as a package that joined to nothing.
+    claimed = {squash(entry.winget_id) for entry in entries if entry.winget_id}
+    seen_identifiers: set[str] = set()
     for listing in listings:
+        identifier = squash(listing.identifier)
         if not listing.has_package or id(listing) in used_listings:
             continue
+        if identifier in claimed or identifier in seen_identifiers:
+            continue
+        seen_identifiers.add(identifier)
         if is_framework_package(listing.identifier):
             stats.unjoined_framework_packages += 1
             continue

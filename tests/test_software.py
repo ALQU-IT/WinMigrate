@@ -582,3 +582,74 @@ def test_an_identity_join_is_counted_separately_from_a_name_join():
     assert stats.joined_exactly == 1
     assert stats.joined_by_identity == 1
     assert stats.unjoined_rows_with_package == 0
+
+
+# --- the last of the unjoined, named by a real machine's diagnostics --------
+@pytest.mark.parametrize(
+    ("appx_name", "identifier", "expected"),
+    [
+        # Microsoft ships these under names a word or two apart.
+        ("Microsoft.DesktopAppInstaller", "Microsoft.AppInstaller", True),
+        ("Microsoft.OutlookForWindows", "Microsoft.Outlook", True),
+        ("Microsoft.MicrosoftEdge.Stable", "Microsoft.Edge", True),
+        # ...but not merely sharing a publisher, or a first word.
+        ("Microsoft.WindowsTerminal", "Microsoft.WindowsCalculator", False),
+        ("Microsoft.Paint", "Microsoft.PowerToys", False),
+        ("SpotifyAB.SpotifyMusic", "Microsoft.Outlook", False),
+        ("Something", "Other", False),
+    ],
+)
+def test_an_msix_identity_can_resemble_a_winget_id_without_equalling_it(
+    appx_name, identifier, expected
+):
+    assert software.identity_resembles(appx_name, identifier) is expected
+
+
+def test_camel_case_identifiers_are_split_into_words():
+    assert software.tokens("Microsoft.DesktopAppInstaller") == [
+        "microsoft",
+        "desktop",
+        "app",
+        "installer",
+    ]
+    assert software.tokens("7zip.7zip") == ["7", "zip", "7", "zip"]
+
+
+def test_an_application_installed_twice_is_not_counted_as_a_failed_join():
+    """One application at two versions gives two rows with the same package id.
+
+    The second was being reported as a package that joined to nothing --
+    "Microsoft.DirectX" appeared twice in a real machine's unjoined examples.
+    """
+    entries = [
+        software.SoftwareEntry(name="CalDavSynchronizer", version="4.4.1", sources=["registry"]),
+        software.SoftwareEntry(name="CalDavSynchronizer", version="4.7.1", sources=["registry"]),
+    ]
+    listing = (
+        "Name                Id                                  Version Available Source\n"
+        "-------------------------------------------------------------------------------\n"
+        "CalDavSynchronizer  aluxnimm.OutlookCalDavSynchronizer  4.4.1             winget\n"
+        "CalDavSynchronizer  aluxnimm.OutlookCalDavSynchronizer  4.7.1             winget\n"
+    )
+    stats = software.apply_winget_listings(entries, software.parse_winget_list(listing))
+    assert stats.unjoined_rows_with_package == 0
+    assert stats.unjoined_identifiers == []
+
+
+def test_a_resembling_identity_joins_and_is_counted_as_an_identity_join():
+    entries = [
+        software.SoftwareEntry(
+            name="Microsoft.DesktopAppInstaller",
+            sources=["appx"],
+            appx_family="Microsoft.DesktopAppInstaller_8wekyb3d8bbwe",
+        )
+    ]
+    listing = (
+        "Name             Id                      Version Available Source\n"
+        "-----------------------------------------------------------------\n"
+        "App Installer    Microsoft.AppInstaller  1.29              winget\n"
+    )
+    stats = software.apply_winget_listings(entries, software.parse_winget_list(listing))
+    assert entries[0].winget_id == "Microsoft.AppInstaller"
+    assert stats.joined_by_identity == 1
+    assert stats.unjoined_rows_with_package == 0
