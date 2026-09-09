@@ -62,7 +62,7 @@ def _detect_onedrive(env: Environment) -> list[SyncRoot]:
             )
         )
     for name in ONEDRIVE_ENV_VARS:
-        value = env.environ.get(name)
+        value = env.env_var(name)
         if value:
             path = env.resolve_path(value)
             roots.append(SyncRoot(provider="onedrive", root=str(path), label=path.name))
@@ -172,7 +172,7 @@ def measure(roots: list[SyncRoot], measure_contents: bool = True) -> None:
             for entry in entries:
                 try:
                     if entry.is_dir(follow_symlinks=False):
-                        stack.append(Path(entry.path))
+                        stack.append(current / entry.name)
                     else:
                         total += entry.stat(follow_symlinks=False).st_size
                         files += 1

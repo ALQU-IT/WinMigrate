@@ -66,8 +66,23 @@ def hash_tree(root: os.PathLike[str] | str) -> tuple[str, list[tuple[str, str]]]
 def iter_tree_files(root: os.PathLike[str] | str) -> Iterator[tuple[str, Path]]:
     """Yield ``(relative_posix_path, absolute_path)`` for files under ``root``."""
     root_path = Path(os.fspath(root))
-    for dirpath, dirnames, filenames in os.walk(pathutil.extended(root_path)):
-        dirnames.sort()
-        for name in sorted(filenames):
-            absolute = Path(dirpath) / name
-            yield pathutil.relative_posix(absolute, root_path), absolute
+    stack = [root_path]
+    while stack:
+        current = stack.pop()
+        try:
+            entries = list(os.scandir(pathutil.extended(current)))
+        except OSError:
+            continue
+        directories = []
+        for entry in entries:
+            # Canonical path from the parent; see pathutil.strip_extended.
+            absolute = current / entry.name
+            try:
+                is_dir = entry.is_dir(follow_symlinks=False)
+            except OSError:
+                continue
+            if is_dir:
+                directories.append(absolute)
+            else:
+                yield pathutil.relative_posix(absolute, root_path), absolute
+        stack.extend(sorted(directories, reverse=True))

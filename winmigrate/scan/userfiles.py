@@ -155,9 +155,13 @@ def _walk(
 
         measurement.dir_count += 1
         for entry in entries:
-            path = Path(entry.path)
+            # Built from the canonical parent, never from ``entry.path``: the
+            # directory was opened through pathutil.extended(), so entry.path
+            # carries the \\?\ prefix on Windows and would poison every
+            # relative path, exclusion match and recorded source path.
+            path = current / entry.name
             relative = pathutil.relative_posix(path, base)
-            if pathutil.needs_long_path_support(entry.path):
+            if pathutil.needs_long_path_support(path):
                 measurement.long_path_count += 1
 
             try:
@@ -254,7 +258,7 @@ def _measure_raw(path: Path, config: ScanConfig) -> tuple[int, int]:
         for entry in entries:
             try:
                 if entry.is_dir(follow_symlinks=False):
-                    stack.append(Path(entry.path))
+                    stack.append(current / entry.name)
                 else:
                     total += entry.stat(follow_symlinks=False).st_size
                     files += 1

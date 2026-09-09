@@ -171,21 +171,24 @@ def _scan_other_profile_dirs(
         except OSError:
             continue
         name = entry.name
-        key = pathutil.normalize_key(entry.path)
+        # As in the walk: reconstruct from the profile root rather than trusting
+        # entry.path, which carries the extended-length prefix on Windows.
+        entry_path = env.profile_root / name
+        key = pathutil.normalize_key(entry_path)
         if name.lower() in PROFILE_DIRS_NOT_USER_DATA or name.startswith("."):
             continue
         if key in known_paths or key in sync_paths:
             continue
-        if config.is_excluded(pathutil.relative_posix(entry.path, env.profile_root), name):
+        if config.is_excluded(pathutil.relative_posix(entry_path, env.profile_root), name):
             continue
         _emit(progress, f"Scanning {name}")
-        measurement = measure_tree(Path(entry.path), config, env, result.sync_roots)
+        measurement = measure_tree(entry_path, config, env, result.sync_roots)
         long_paths += measurement.long_path_count
         result.items.append(
             _item_from_measurement(
                 item_id=f"files:other:{name.lower()}",
                 title=name,
-                path=Path(entry.path),
+                path=entry_path,
                 measurement=measurement,
                 archive_path=f"data/user_files/_other/{name}",
                 restore_target=f"%USERPROFILE%\\{name}",

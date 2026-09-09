@@ -152,6 +152,24 @@ class Environment:
             HKLM: winreg.HKEY_LOCAL_MACHINE,
         }[hive]
 
+    # -- environment --------------------------------------------------------
+    def env_var(self, name: str) -> str | None:
+        """Case-insensitive environment lookup.
+
+        Windows environment variable names are case-insensitive, but
+        ``dict(os.environ)`` snapshots them upper-cased, so a literal
+        ``environ.get("OneDrive")`` never matches on the very platform the
+        variable comes from.
+        """
+        value = self.environ.get(name)
+        if value is not None:
+            return value
+        lowered = name.lower()
+        for key, candidate in self.environ.items():
+            if key.lower() == lowered:
+                return candidate
+        return None
+
     # -- path resolution ----------------------------------------------------
     def resolve_path(self, raw: str) -> Path:
         """Turn a registry-shaped path string into a usable :class:`Path`.
@@ -186,12 +204,12 @@ class Environment:
 
     # -- filesystem ---------------------------------------------------------
     def appdata_roaming(self) -> Path:
-        value = self.environ.get("APPDATA")
-        return Path(value) if value else self.profile_root / "AppData" / "Roaming"
+        value = self.env_var("APPDATA")
+        return self.resolve_path(value) if value else self.profile_root / "AppData" / "Roaming"
 
     def appdata_local(self) -> Path:
-        value = self.environ.get("LOCALAPPDATA")
-        return Path(value) if value else self.profile_root / "AppData" / "Local"
+        value = self.env_var("LOCALAPPDATA")
+        return self.resolve_path(value) if value else self.profile_root / "AppData" / "Local"
 
     def file_attributes(self, entry: os.DirEntry[str] | os.stat_result) -> int:
         """Win32 attribute bits for a directory entry, 0 where unavailable."""

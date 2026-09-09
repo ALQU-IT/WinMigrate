@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 import sys
-from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePath, PureWindowsPath
 
 #: Windows' classic MAX_PATH. Paths at or beyond this need the \\?\ prefix
 #: unless the machine has long paths enabled system-wide.
@@ -39,6 +39,24 @@ def extended(path: os.PathLike[str] | str) -> str:
     return _EXTENDED_PREFIX + absolute
 
 
+def strip_extended(path: os.PathLike[str] | str) -> str:
+    r"""Remove an extended-length prefix (``\\?\`` or ``\\?\UNC\``) if present.
+
+    :func:`extended` output must never be stored -- ``os.DirEntry.path`` inherits
+    the prefix from the directory that was scanned, and a stored prefixed path
+    breaks every relative-path and containment computation downstream. This is
+    the safety net for anywhere one slips through.
+    """
+    text = os.fspath(path)
+    # Accept either separator: the prefix may survive a backslash-to-slash pass.
+    probe = text.replace("/", "\\")
+    if probe.startswith(_UNC_EXTENDED_PREFIX):
+        return text[:2] + text[len(_UNC_EXTENDED_PREFIX) :]
+    if probe.startswith(_EXTENDED_PREFIX):
+        return text[len(_EXTENDED_PREFIX) :]
+    return text
+
+
 def needs_long_path_support(path: os.PathLike[str] | str) -> bool:
     """True when ``path`` would break tools that are not long-path aware."""
     return len(os.fspath(path)) >= MAX_PATH
@@ -51,7 +69,7 @@ def normalize_key(path: os.PathLike[str] | str) -> str:
     case-insensitively because the filesystem is; POSIX fixture paths keep their
     case so tests stay meaningful on Linux.
     """
-    text = os.fspath(path).replace("\\", "/").rstrip("/")
+    text = strip_extended(path).replace("\\", "/").rstrip("/")
     if not text:
         text = "/"
     return text.casefold() if _looks_windows(text) or is_windows() else text
@@ -70,7 +88,7 @@ def is_within(child: os.PathLike[str] | str, parent: os.PathLike[str] | str) -> 
 
 def to_posix(path: os.PathLike[str] | str) -> str:
     """Return ``path`` with ``/`` separators, preserving case and drive letter."""
-    return os.fspath(path).replace("\\", "/")
+    return strip_extended(path).replace("\\", "/")
 
 
 def relative_posix(path: os.PathLike[str] | str, root: os.PathLike[str] | str) -> str:
@@ -85,7 +103,11 @@ def relative_posix(path: os.PathLike[str] | str, root: os.PathLike[str] | str) -
     if is_within(child, parent):
         rel = child[len(parent) :].lstrip("/")
         return rel or "."
-    return PurePosixPath(child).relative_to("/").as_posix() if child.startswith("/") else child
+    # Not under the base. Exclusion matching still needs *something* stable, and
+    # a scan must not die on one odd path, so fall back to the child with any
+    # drive letter and leading separators removed.
+    without_drive = child.split(":", 1)[1] if _looks_windows(child) else child
+    return without_drive.lstrip("/") or child
 
 
 def expand(text: str, environ: dict[str, str] | None = None) -> str:

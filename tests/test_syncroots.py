@@ -72,3 +72,12 @@ def test_measure_can_be_switched_off_for_a_fast_scan(profile: Path):
     roots = [SyncRoot(provider="onedrive", root=str(profile / "OneDrive"))]
     syncroots.measure(roots, measure_contents=False)
     assert roots[0].bytes_skipped == 0
+
+
+def test_onedrive_env_vars_are_found_despite_windows_upper_casing(tmp_path):
+    """dict(os.environ) upper-cases keys on Windows; the lookup must still match."""
+    root = tmp_path / "profile"
+    (root / "Work").mkdir(parents=True)
+    env = Environment.fixture(root, {}, environ={"ONEDRIVECOMMERCIAL": str(root / "Work")})
+    roots = syncroots.detect(env)
+    assert str(root / "Work") in {entry.root for entry in roots}
