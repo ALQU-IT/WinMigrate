@@ -27,8 +27,8 @@ jobs:
         # so both are checked on every push.
         os: [windows-latest, ubuntu-latest]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip
@@ -48,8 +48,8 @@ jobs:
     needs: test
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip
@@ -207,7 +207,7 @@ jobs:
             throw "init.tcl is not beside the executable; the window would not start"
           }
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: WinMigrate-${{ steps.version.outputs.version }}-windows
           path: staging/*
@@ -222,7 +222,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: WinMigrate-*-windows
           merge-multiple: true
@@ -237,7 +237,7 @@ jobs:
           cd ..
           cp package/winmigrate-cli.exe package/SHA256SUMS.txt .
           unzip -l WinMigrate-windows.zip | head -20
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: |
             WinMigrate-windows.zip
