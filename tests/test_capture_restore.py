@@ -404,3 +404,67 @@ def test_a_file_the_user_kept_is_partially_verified_not_a_mismatch(captured, tmp
     assert kept.kept_existing == 1
     assert kept.digest_mismatches == []
     assert any("partially verified" in note.message for note in kept.notes)
+
+
+def test_the_bundle_is_left_out_of_its_own_capture(tmp_path: Path):
+    """Writing the bundle onto the Desktop is the normal habit, and the Desktop
+    is captured.
+
+    Without this the walk reaches the bundle while it is still being written and
+    copies it into itself. tarfile is told a size from the stat and the file
+    keeps growing, so what lands inside is a truncated, unopenable copy -- which
+    then restores onto the new machine as a file called backup.dat, looking
+    exactly like a real backup for as long as it takes someone to try it.
+    """
+    profile = tmp_path / "alice"
+    (profile / "Desktop").mkdir(parents=True)
+    (profile / "Desktop" / "note.txt").write_text("real user data")
+    # An unrelated file that merely shares the sidecar's suffix must still travel.
+    (profile / "Desktop" / "notes.manifest.json").write_text('{"mine": true}')
+
+    env = Environment.fixture(profile, {})
+    config = ScanConfig(profile_root=profile, include_software=False)
+    scan = run_scan(config, env)
+    output = profile / "Desktop" / "backup.dat"
+    report = capture_mod.capture(
+        scan, CaptureOptions(output=output, passphrase=PASSPHRASE, use_vss=False), config, env
+    )
+
+    assert not report.failures
+    assert any("inside the profile" in (note.message or "") for note in report.notes)
+
+    destination = tmp_path / "restored"
+    result = restore_mod.restore(
+        RestoreOptions(bundle=output, passphrase=PASSPHRASE, destination=destination)
+    )
+    assert result.ok and not result.digest_mismatches
+    names = {f.name for f in destination.rglob("*") if f.is_file()}
+    assert names == {"note.txt", "notes.manifest.json"}
+
+
+def test_recapturing_over_last_weeks_bundle_does_not_swallow_it(tmp_path: Path):
+    """The second run is the more likely one: the old bundle is already there
+    when the scan measures the folder, so it is in the plan. Capture has to drop
+    it without leaving the item's digest tree disagreeing with what was written
+    -- otherwise the restore reports corruption that is not there."""
+    profile = tmp_path / "alice"
+    (profile / "Desktop").mkdir(parents=True)
+    (profile / "Desktop" / "note.txt").write_text("real user data")
+    output = profile / "Desktop" / "backup.dat"
+    output.write_bytes(b"LAST-WEEKS-BUNDLE" * 100)
+    (profile / "Desktop" / "backup.manifest.json").write_text('{"old": true}')
+
+    env = Environment.fixture(profile, {})
+    config = ScanConfig(profile_root=profile, include_software=False)
+    scan = run_scan(config, env)
+    assert scan.totals().capture_files == 3  # the plan does count the old pair
+
+    capture_mod.capture(
+        scan, CaptureOptions(output=output, passphrase=PASSPHRASE, use_vss=False), config, env
+    )
+    destination = tmp_path / "restored"
+    result = restore_mod.restore(
+        RestoreOptions(bundle=output, passphrase=PASSPHRASE, destination=destination)
+    )
+    assert result.ok and not result.digest_mismatches
+    assert {f.name for f in destination.rglob("*") if f.is_file()} == {"note.txt"}

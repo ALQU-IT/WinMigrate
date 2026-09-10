@@ -123,6 +123,26 @@ def capture(
             )
 
     report = CaptureReport(bundle_path=output, manifest_path=manifest_path)
+
+    # Writing the bundle into a folder that is being captured is the normal
+    # habit -- the Desktop, or Documents -- and without this the walk reaches
+    # the bundle and copies it into itself: a partial, useless duplicate that
+    # restores onto the new machine looking exactly like a real backup.
+    own_files = {
+        pathutil.normalize_key(path)
+        for path in (output, manifest_path, output.with_suffix(".manifest.json"))
+    }
+    if pathutil.is_within(output, env.profile_root):
+        report.notes.append(
+            Note(
+                Severity.INFO,
+                f"the bundle is being written inside the profile it is capturing "
+                f"({pathutil.display(output.parent, env.profile_root)})",
+                "It is left out of its own capture; everything else in that "
+                "folder is captured as usual.",
+            )
+        )
+
     shadow = _open_shadow_copy(scan, options, report)
 
     kdf = crypto.default_kdf_params()
@@ -141,7 +161,9 @@ def capture(
             for item in scan.items:
                 if item.action is not Action.CAPTURE or item.kind not in {Kind.TREE, Kind.FILE}:
                     continue
-                _capture_item(item, writer, scan, config, env, shadow, report, progress)
+                _capture_item(
+                    item, writer, scan, config, env, shadow, report, progress, own_files
+                )
             manifest = manifest_mod.build(scan)
             writer.add_bytes(
                 manifest_mod.MANIFEST_ARCHIVE_NAME,
@@ -205,6 +227,7 @@ def _capture_item(
     shadow,
     report: CaptureReport,
     progress: ProgressCallback | None,
+    own_files: frozenset[str] | set[str] = frozenset(),
 ) -> None:
     if not item.source_path or not item.archive_path:
         return
@@ -215,6 +238,8 @@ def _capture_item(
     # A single-file item (a dotfile such as .gitconfig) is added directly rather
     # than walked; only trees go through walk_tree.
     if item.kind is Kind.FILE:
+        if pathutil.normalize_key(root) in own_files:
+            return
         source = shadow.map(root) if shadow is not None else root
         try:
             digest = writer.add_file(source, item.archive_path)
@@ -241,6 +266,8 @@ def _capture_item(
 
     for event in walk_tree(root, config, env, scan.sync_roots, relative_base=env.profile_root):
         if not isinstance(event, CaptureFile):
+            continue
+        if pathutil.normalize_key(event.path) in own_files:
             continue
         archive_name = f"{item.archive_path}/{event.relative}"
         source = shadow.map(event.path) if shadow is not None else event.path
