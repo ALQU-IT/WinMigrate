@@ -90,6 +90,7 @@ def run_scan(
     _scan_system_settings(env, result, progress)
     _scan_wifi(env, result, config, progress)
     _scan_browsers(env, result, config, progress)
+    _scan_notepad(env, result, config, progress)
     _note_long_paths(result, long_paths)
 
     result.duration_seconds = time.monotonic() - started
@@ -500,6 +501,21 @@ def _scan_browsers(
     result.items.extend(items)
     result.followups.extend(followups)
     result.notes.extend(notes)
+
+
+def _scan_notepad(
+    env: Environment, result: ScanResult, config: ScanConfig, progress: ProgressCallback | None
+) -> None:
+    """Capture Notepad's running session -- the tabs never saved to a file."""
+    from . import notepad as notepad_mod  # noqa: PLC0415 -- optional stage
+
+    if not config.include_notepad:
+        return
+    _emit(progress, "Checking Notepad session")
+    items, followups = notepad_mod.scan_notepad(env, files_only=config.files_only)
+    _measure_capture_items(items, config, env)
+    result.items.extend(items)
+    result.followups.extend(followups)
 
 
 def _scan_dev_config(

@@ -246,6 +246,12 @@ def _add_scan_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="include saved Wi-Fi profiles (their export contains the network passwords)",
     )
+    parser.add_argument(
+        "--no-notepad",
+        dest="include_notepad",
+        action="store_false",
+        help="skip Notepad's unsaved tabs (they travel encrypted-only by default)",
+    )
     parser.add_argument("--json", action="store_true", help="print the plan as JSON instead of a table")
     parser.add_argument(
         "--save-plan",
@@ -302,6 +308,7 @@ def _config_from_args(args: argparse.Namespace) -> ScanConfig:
     config.measure_skipped = args.measure_skipped and config.measure_skipped
     config.include_software = args.include_software and config.include_software
     config.include_wifi = getattr(args, "include_wifi", False) or config.include_wifi
+    config.include_notepad = getattr(args, "include_notepad", True) and config.include_notepad
     preset_names = list(getattr(args, "exclude_preset", []) or []) + list(
         _config_preset_names(args)
     )

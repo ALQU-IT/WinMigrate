@@ -28,6 +28,7 @@ class Category(str, Enum):
     SCHEDULED_TASKS = "scheduled_tasks"
     FONTS = "fonts"
     OUTLOOK = "outlook"
+    NOTEPAD = "notepad"
     DEV_CONFIG = "dev_config"
     FILE_ASSOCIATIONS = "file_associations"
     SOFTWARE = "software"

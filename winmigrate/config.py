@@ -181,6 +181,13 @@ class ScanConfig:
     #: Wi-Fi profiles include the network passwords, so they are opt-in.
     include_wifi: bool = False
 
+    #: Notepad's running session -- the tabs never saved to a file. On by
+    #: default because nothing else in a migration carries them and they are
+    #: gone with the old machine; opt out with ``--no-notepad`` for the one
+    #: case that matters, an unsaved tab holding something you would rather
+    #: did not travel at all.
+    include_notepad: bool = True
+
     #: Walk excluded/synced subtrees to report how many bytes they came to.
     #: Honest numbers cost one extra stat pass; ``--fast`` turns it off.
     measure_skipped: bool = True
@@ -262,6 +269,7 @@ def config_from_dict(data: dict[str, Any], base: ScanConfig | None = None) -> Sc
         "measure_skipped",
         "include_software",
         "include_wifi",
+        "include_notepad",
         "exclude_presets",  # resolved by the CLI into exclusion patterns
     }
     unknown = set(data) - known
