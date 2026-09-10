@@ -48,13 +48,24 @@ log = logging.getLogger(__name__)
 PASSWORDS_ARCHIVE_DIR = "secrets/WinMigrate-Passwords"
 PASSWORDS_RESTORE_DIR = "WinMigrate-Passwords"
 
-#: The built-in password manager page each browser opens to for export/import.
+#: The page each browser opens to, chosen so the user lands *on* the control
+#: they need rather than one navigation away from it.
+#:
+#: For the Chromium family that is the password manager's **settings** page,
+#: which is where both "Export passwords" and "Import passwords" live. The
+#: passwords list (``.../password-manager/passwords``) shows the saved entries
+#: and no export button at all -- landing there means finding Settings in the
+#: sidebar first, which is exactly the fiddling this is meant to remove. The
+#: same page serves the restore direction, so one address covers both.
+#:
+#: Firefox keeps both behind the "..." menu on ``about:logins``; there is no
+#: deeper URL to aim at.
 EXPORT_PAGES: dict[str, str] = {
-    "chrome": "chrome://password-manager/passwords",
-    "edge": "edge://wallet/passwords",
-    "brave": "brave://password-manager/passwords",
-    "vivaldi": "chrome://password-manager/passwords",
-    "chromium": "chrome://password-manager/passwords",
+    "chrome": "chrome://password-manager/settings",
+    "edge": "edge://settings/passwords",
+    "brave": "brave://password-manager/settings",
+    "vivaldi": "vivaldi://settings/passwords",
+    "chromium": "chrome://password-manager/settings",
     "firefox": "about:logins",
 }
 
@@ -168,7 +179,7 @@ def import_followup(target: ExportTarget) -> Followup:
         ),
         steps=[
             f"Open {target.title} and go to {target.export_page or 'the password manager'}.",
-            f"Settings -> Passwords -> Import, and choose "
+            f"Choose Import (the same page the export came from) and select "
             f"{PASSWORDS_RESTORE_DIR}\\{target.browser_key}-passwords.csv.",
             f"Delete {PASSWORDS_RESTORE_DIR}\\{target.browser_key}-passwords.csv afterwards -- "
             "it is plaintext.",

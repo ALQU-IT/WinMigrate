@@ -527,21 +527,20 @@ def _collect_browser_passwords(args, result, env, console) -> list[Path]:
             ).strip().lower() not in {"y", "yes"}:
                 continue
             opened = passwords_mod.open_export_page(target, env)
-            if opened:
-                console.print(
-                    f"[dim]{target.title} should have opened at its password page. "
-                    "Use Export (it will ask for Windows Hello), save the CSV, then "
-                    "paste its path below.[/dim]"
-                )
-            else:
-                # Better to say where to go than to open the wrong thing: these
-                # are internal browser URLs and only that browser resolves them.
-                console.print(
-                    f"[dim]Could not launch {target.title} here. Open it yourself and "
-                    f"go to:[/dim]\n    [bold]{target.export_page}[/bold]\n"
-                    "[dim]then Export (it will ask for Windows Hello), save the CSV, "
-                    "and paste its path below.[/dim]"
-                )
+            # The address is printed either way. These are internal browser URLs
+            # that differ between versions, so if the browser lands somewhere
+            # other than the export screen the user needs to know where to go --
+            # and finding that out after the browser opened is too late.
+            lead = (
+                f"{target.title} should have opened here:"
+                if opened
+                else f"Could not launch {target.title} here. Open it yourself and go to:"
+            )
+            console.print(
+                f"[dim]{lead}[/dim]\n    [bold]{target.export_page}[/bold]\n"
+                "[dim]Use 'Export passwords' (it will ask for Windows Hello), save the "
+                "CSV, then paste its path below.[/dim]"
+            )
             raw = console.input("Path to the exported CSV (blank to skip): ").strip().strip('"')
             if not raw:
                 continue

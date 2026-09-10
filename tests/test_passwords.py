@@ -35,7 +35,7 @@ def test_only_browsers_without_sync_are_offered_for_export(tmp_path: Path):
     local = chrome_profile(tmp_path / "b", sync=False)
     targets = passwords.export_targets(local)
     assert [t.browser_key for t in targets] == ["chrome"]
-    assert targets[0].export_page == "chrome://password-manager/passwords"
+    assert targets[0].export_page == "chrome://password-manager/settings"
     assert targets[0].account_email == "me@example.com"
 
 
@@ -191,7 +191,7 @@ def test_the_export_page_is_opened_with_the_browser_not_the_windows_shell(tmp_pa
         browser_key="brave",
         title="Brave",
         engine="chromium",
-        export_page="brave://password-manager/passwords",
+        export_page="brave://password-manager/settings",
     )
 
     # Machine-wide install.
@@ -216,3 +216,40 @@ def test_every_browser_offered_for_export_has_an_executable_to_launch(tmp_path: 
     from winmigrate import passwords as passwords_mod
 
     assert set(passwords_mod.EXPORT_PAGES) <= set(passwords_mod.BROWSER_EXECUTABLES)
+
+
+def test_each_browser_lands_on_the_page_that_has_the_export_control():
+    """Chromium's password manager splits the list from the controls.
+
+    ``.../password-manager/passwords`` shows saved entries and no export button;
+    "Export passwords" and "Import passwords" both live on
+    ``.../password-manager/settings``. Aiming at the list means the user still
+    has to find Settings in the sidebar -- the exact step opening the page for
+    them was meant to remove. Firefox has no deeper URL: both sit behind the
+    "..." menu on about:logins.
+    """
+    from winmigrate import passwords as passwords_mod
+
+    for key, page in passwords_mod.EXPORT_PAGES.items():
+        if key == "firefox":
+            assert page == "about:logins"
+            continue
+        assert page.endswith("/settings") or page.endswith("/settings/passwords"), (
+            f"{key} points at {page}, which is not where the export control is"
+        )
+        # And it must use a scheme that browser actually resolves.
+        assert "://" in page and not page.startswith("http")
+
+
+def test_the_page_is_shown_to_the_user_whether_or_not_the_browser_opened(tmp_path: Path):
+    """A browser that opens somewhere unexpected is the failure this cannot
+    detect, so the address is printed either way rather than only on launch
+    failure -- finding out after the browser opened is too late."""
+    import inspect
+
+    from winmigrate import cli
+
+    source = inspect.getsource(cli._collect_browser_passwords)
+    # One print, outside the if/else, carrying the address.
+    assert source.count("target.export_page") == 1
+    assert "lead = (" in source
