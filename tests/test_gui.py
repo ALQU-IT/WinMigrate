@@ -195,6 +195,15 @@ def test_importing_the_gui_package_does_not_need_tkinter():
 
 
 # --- the window itself -----------------------------------------------------
+def _module_source(name: str) -> str:
+    import importlib.util
+    from pathlib import Path as _Path
+
+    spec = importlib.util.find_spec(name)
+    assert spec and spec.origin
+    return _Path(spec.origin).read_text(encoding="utf-8")
+
+
 def _app_source() -> str:
     """The window's source, read the only way that works on both platforms.
 
@@ -235,18 +244,58 @@ def test_the_window_module_imports_and_keeps_its_methods(monkeypatch):
 
     stub_tkinter(monkeypatch)
     app = importlib.import_module("winmigrate.gui.app")
-    methods = {name for name, _ in inspect.getmembers(app.WinMigrateApp, inspect.isfunction)}
+    methods = {name for name, _ in inspect.getmembers(app.WinMigrateWizard, inspect.isfunction)}
     assert {
-        "_build",
+        "_build_chrome",
+        "_build_pages",
+        "_show",
+        "_go_next",
+        "_go_back",
+        "_maybe_elevate",
         "_start_scan",
         "_scan_worker",
         "_start_capture",
         "_capture_worker",
         "_drain_events",
         "_handle",
-        "_toggle",
         "_render_rows",
     } <= methods
+
+
+def test_every_page_of_the_wizard_has_a_builder():
+    """A Step with no page is a window that goes blank when it gets there --
+    no error, nothing drawn, and the buttons still work."""
+    import re
+    from winmigrate.gui.wizard import Step
+
+    registered = set(re.findall(r"\(Step\.(\w+), self\._page_", _app_source()))
+    assert registered == {step.name for step in Step}
+
+
+def test_every_ttk_style_the_window_uses_is_configured():
+    """An unknown style name is not an error in ttk -- the widget silently falls
+    back to the default and the page looks wrong in a way no test would catch
+    and no traceback would mention."""
+    import re
+
+    from winmigrate.gui import theme
+
+    used = set(re.findall(r'style="([\w.]+)"', _app_source()))
+    theme_source = _module_source("winmigrate.gui.theme")
+    configured = set(re.findall(r'style\.configure\(\s*"([\w.]+)"', theme_source))
+    named = {theme.RAIL_ON, theme.RAIL_DONE, theme.RAIL_OFF}
+    assert used - configured - named == set()
+
+
+def test_the_passphrase_is_cleared_as_soon_as_the_capture_has_it():
+    """It lives in the widget and the options object, and nowhere else. The
+    window is open for the length of an hour-long capture with the fields
+    visible on screen."""
+    source = _app_source()
+    start = source.index("def _start_capture")
+    body = source[start : source.index("def _capture_worker")]
+    assert 'self.passphrase.delete(0, "end")' in body
+    assert 'self.passphrase2.delete(0, "end")' in body
 
 
 def test_every_event_a_worker_emits_is_handled(monkeypatch):
@@ -284,18 +333,22 @@ def test_every_event_a_worker_emits_is_handled(monkeypatch):
     assert emitted <= handled, f"unhandled: {emitted - handled}"
 
 
-def test_the_window_reads_only_fields_the_capture_report_has(monkeypatch):
-    """The summary box reads a CaptureReport by attribute. A renamed field would
+def test_the_final_page_reads_only_fields_the_capture_report_has(monkeypatch):
+    """The summary reads a CaptureReport by attribute. A renamed field would
     raise inside a callback, where the traceback goes to a console the user
     launched from Explorer and never sees."""
-    from pathlib import Path as _Path
-
     import importlib
+    from pathlib import Path as _Path
 
     from winmigrate.capture import CaptureReport
 
     stub_tkinter(monkeypatch)
     app = importlib.import_module("winmigrate.gui.app")
-    report = CaptureReport(bundle_path=_Path("b.dat"), manifest_path=_Path("b.manifest.json"))
-    summary = app._summary(report)
+
+    wizard = object.__new__(app.WinMigrateWizard)
+    wizard.capture_report = CaptureReport(
+        bundle_path=_Path("b.dat"), manifest_path=_Path("b.manifest.json")
+    )
+    wizard.scan_result = None
+    summary = app.WinMigrateWizard._done_summary(wizard)
     assert "b.dat" in summary and "b.manifest.json" in summary

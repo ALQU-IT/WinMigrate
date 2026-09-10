@@ -9,11 +9,14 @@ for tkinter, and it says something useful when it is not there.
 from __future__ import annotations
 
 
-def run() -> int:
-    """Open the window. Returns a process exit code."""
+def run(options: dict | None = None) -> int:
+    """Open the window. Returns a process exit code.
+
+    ``options`` carries the first page's choices across an elevation restart.
+    """
     from .app import run as _run  # noqa: PLC0415 -- keeps tkinter out of import time
 
-    return _run()
+    return _run(options)
 
 
 __all__ = ["run"]

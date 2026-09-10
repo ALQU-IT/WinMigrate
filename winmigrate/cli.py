@@ -29,6 +29,7 @@ from rich.progress import (
 
 from . import __version__, capture as capture_mod, compression as compression_mod, logging_setup, presets, report, restore as restore_mod, vss
 from .config import ScanConfig, config_from_dict, load_config_file
+from .gui import elevate as elevate_mod
 from .util import humanize
 from .errors import ConfigError, WinMigrateError
 from .capture import CaptureOptions
@@ -104,14 +105,48 @@ def build_parser() -> argparse.ArgumentParser:
     gui_parser = subparsers.add_parser(
         "gui", parents=[common], help="open the desktop window"
     )
+    # These exist so the window can restart itself with administrator rights and
+    # come back looking the way the user left it. A shadow copy needs elevation,
+    # elevation restarts the process, and asking after a ten-minute scan would
+    # throw that scan away -- so the first page's choices ride across on the
+    # command line. Nothing secret is ever among them: the passphrase is
+    # collected pages later, in the process that will use it.
+    gui_parser.add_argument("--profile-root", type=Path, help=argparse.SUPPRESS)
+    gui_parser.add_argument("--files-only", action="store_true", help=argparse.SUPPRESS)
+    gui_parser.add_argument("--include-wifi", action="store_true", help=argparse.SUPPRESS)
+    gui_parser.add_argument(
+        "--no-software", dest="include_software", action="store_false", help=argparse.SUPPRESS
+    )
+    gui_parser.add_argument(
+        "--no-notepad", dest="include_notepad", action="store_false", help=argparse.SUPPRESS
+    )
+    gui_parser.add_argument(
+        "--compression", choices=compression_mod.CHOICES, default="auto", help=argparse.SUPPRESS
+    )
+    gui_parser.add_argument(
+        elevate_mod.ALREADY_TRIED_FLAG,
+        dest="elevation_attempted",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     gui_parser.set_defaults(func=cmd_gui)
     return parser
 
 
-def cmd_gui(_args: argparse.Namespace, _console: Console) -> int:
+def cmd_gui(args: argparse.Namespace, _console: Console) -> int:
     from . import gui  # noqa: PLC0415 -- keeps tkinter out of every other command
 
-    return gui.run()
+    return gui.run(
+        {
+            "profile_root": str(args.profile_root) if args.profile_root else "",
+            "files_only": args.files_only,
+            "include_wifi": args.include_wifi,
+            "include_software": args.include_software,
+            "include_notepad": args.include_notepad,
+            "compression": args.compression,
+            "elevation_attempted": args.elevation_attempted,
+        }
+    )
 
 
 def _add_reinstall_arguments(parser: argparse.ArgumentParser) -> None:

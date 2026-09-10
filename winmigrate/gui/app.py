@@ -1,53 +1,55 @@
-"""The desktop window: scan, choose, capture.
+"""The window: a setup wizard over the same pipeline the command line drives.
 
-Deliberately a thin shell. Every decision about what a bundle contains lives in
-:mod:`winmigrate.scan`, :mod:`winmigrate.gui.selection` and
-:mod:`winmigrate.capture`, and this module only shows them and collects clicks.
-A second implementation of "what goes in the bundle" is the one thing a GUI
-must not become, because it would be the one nobody tests.
+One page at a time, in the order every Windows installer has trained people to
+expect. The rules about which page follows which, and when the forward button
+works, live in :mod:`winmigrate.gui.wizard`; the palette lives in
+:mod:`winmigrate.gui.theme`; what a bundle contains lives in the scan and
+capture modules. What is left here is widgets and wiring, which is the only part
+that genuinely needs a display.
 
-tkinter, because it ships with Python: no wheel to find for a frozen build, no
-extra licence, and an .exe measured in tens of megabytes rather than hundreds.
+Three things this window does that a console does not have to think about:
 
-Two rules the window keeps that a console does not have to think about:
-
-* **The work happens off the UI thread.** A scan of a real profile takes
-  minutes and a capture takes an hour; doing either on the main thread gives
-  Windows a frozen, "not responding" window, and the whole point of this tool is
-  that it shows what it is doing. Progress comes back through a queue that the
-  main thread drains on a timer.
-* **The passphrase is never anywhere but the widget.** Not in a variable that
-  outlives the capture, not in the log, not in the window title. It is read at
-  the moment it is needed and the field is cleared afterwards.
+* **The scan starts by itself.** Someone who opened a backup tool wants to know
+  what is on the machine, and making them press a button to find out is a step
+  that exists only because it was easy to write.
+* **Elevation is asked for once, at the start.** A shadow copy needs
+  administrator rights, and elevation restarts the process -- so the prompt has
+  to come before the scan, not after, or minutes of work are thrown away.
+* **Slow work runs off the UI thread.** A scan takes minutes and a capture an
+  hour. On the main thread Windows paints a frozen "not responding" window over
+  a tool whose entire premise is showing what it is doing.
 """
 
 from __future__ import annotations
 
+import logging
 import queue
 import threading
 import traceback
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from .. import capture as capture_mod
 from ..capture import CaptureOptions
-from ..compression import CHOICES as COMPRESSION_CHOICES
 from ..config import ScanConfig
 from ..manifest import detect_source_machine
 from ..models import ScanResult
 from ..platform_win import Environment
 from ..scan import run_scan
 from ..util import humanize
-from . import defaults, selection
+from . import defaults, elevate, selection, theme
+from .wizard import Step, WizardData
 
-TICKED = "☑"      # ☑
-UNTICKED = "☐"    # ☐
-BLOCKED = "–"     # –
+log = logging.getLogger(__name__)
+
+TICKED = "☑"
+UNTICKED = "☐"
+BLOCKED = "–"
 
 
-def run() -> int:
-    """Open the window. Returns a process exit code."""
+def run(options: dict | None = None) -> int:
+    """Open the window. ``options`` carries the first page's choices across an
+    elevation restart. Returns a process exit code."""
     try:
         import tkinter as tk  # noqa: PLC0415
     except ImportError:
@@ -57,188 +59,446 @@ def run() -> int:
         )
         return 2
     root = tk.Tk()
-    WinMigrateApp(root)
+    WinMigrateWizard(root, options or {})
     root.mainloop()
     return 0
 
 
-class WinMigrateApp:
-    """The window and its state."""
+class WinMigrateWizard:
+    """The window, its pages, and the two background workers."""
 
-    def __init__(self, root: Any) -> None:
+    def __init__(self, root: Any, options: dict) -> None:
         import tkinter as tk  # noqa: PLC0415
         from tkinter import ttk  # noqa: PLC0415
 
         self.tk = tk
         self.ttk = ttk
         self.root = root
-        root.title("WinMigrate")
-        root.geometry("980x680")
-        root.minsize(760, 520)
+        self.options = options
 
+        self.data = WizardData(profile_root=options.get("profile_root") or str(Path.home()))
+        self.step = Step.WELCOME
         self.scan_result: ScanResult | None = None
-        self.rows: list[selection.Row] = []
-        self.selected: set[str] = set()
+        self.capture_report: Any = None
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
-        self.busy = False
+        self.elevation_attempted = bool(options.get("elevation_attempted"))
+        self._capture_total = 1
+        self._capture_done = 0
 
-        self._build()
-        self.root.after(100, self._drain_events)
+        root.title("WinMigrate")
+        root.geometry(f"{theme.WINDOW_WIDTH}x{theme.WINDOW_HEIGHT}")
+        root.minsize(820, 560)
 
-    # --- layout ------------------------------------------------------------
-    def _build(self) -> None:
+        self.family = theme.font_family()
+        self.style = ttk.Style(root)
+        theme.apply(self.style, self.family)
+        root.configure(background=theme.PAGE)
+
+        self._build_chrome()
+        self._build_pages()
+        self._show(Step.WELCOME)
+        self.root.after(80, self._drain_events)
+
+    # --- the frame around every page ---------------------------------------
+    def _build_chrome(self) -> None:
+        ttk = self.ttk
+
+        body = ttk.Frame(self.root, style="Page.TFrame")
+        body.pack(fill="both", expand=True)
+
+        self.rail = ttk.Frame(body, style="Rail.TFrame", width=theme.RAIL_WIDTH)
+        self.rail.pack(side="left", fill="y")
+        self.rail.pack_propagate(False)
+        ttk.Label(self.rail, text="WinMigrate", style="RailTitle.TLabel").pack(
+            anchor="w", padx=18, pady=(22, 2)
+        )
+        ttk.Label(self.rail, text="profile backup", style="RailOff.TLabel").pack(
+            anchor="w", padx=18, pady=(0, 18)
+        )
+        self.rail_labels: list[Any] = []
+        from .wizard import RAIL_LABELS, progress_steps
+
+        for entry in progress_steps():
+            label = ttk.Label(
+                self.rail, text=f"  {RAIL_LABELS[entry]}", style=theme.RAIL_OFF
+            )
+            label.pack(anchor="w", padx=16, pady=4)
+            self.rail_labels.append(label)
+
+        right = ttk.Frame(body, style="Page.TFrame")
+        right.pack(side="left", fill="both", expand=True)
+
+        head = ttk.Frame(right, style="Page.TFrame")
+        head.pack(fill="x", padx=theme.PAD, pady=(24, 0))
+        self.title_label = ttk.Label(head, text="", style="Title.TLabel")
+        self.title_label.pack(anchor="w")
+        self.subtitle_label = ttk.Label(
+            head, text="", style="Subtitle.TLabel", wraplength=640, justify="left"
+        )
+        self.subtitle_label.pack(anchor="w", pady=(6, 0))
+        ttk.Separator(right, orient="horizontal").pack(fill="x", padx=theme.PAD, pady=16)
+
+        self.page_area = ttk.Frame(right, style="Page.TFrame")
+        self.page_area.pack(fill="both", expand=True, padx=theme.PAD)
+
+        footer = ttk.Frame(self.root, style="Band.TFrame")
+        footer.pack(fill="x", side="bottom")
+        ttk.Separator(footer, orient="horizontal").pack(fill="x")
+        inner = ttk.Frame(footer, style="Band.TFrame")
+        inner.pack(fill="x", padx=theme.PAD, pady=12)
+        self.hint = ttk.Label(inner, text="", style="BandHint.TLabel")
+        self.hint.pack(side="left")
+        self.next_button = self.ttk.Button(
+            inner, text="Next", style="Wizard.TButton", command=self._go_next
+        )
+        self.next_button.pack(side="right")
+        self.back_button = self.ttk.Button(
+            inner, text="Back", style="Wizard.TButton", command=self._go_back
+        )
+        self.back_button.pack(side="right", padx=(0, 8))
+        self.cancel_button = self.ttk.Button(
+            inner, text="Cancel", style="Wizard.TButton", command=self._cancel
+        )
+        self.cancel_button.pack(side="right", padx=(0, 8))
+
+    # --- pages -------------------------------------------------------------
+    def _build_pages(self) -> None:
+        self.pages: dict[Step, Any] = {}
+        for step, builder in (
+            (Step.WELCOME, self._page_welcome),
+            (Step.SCANNING, self._page_scanning),
+            (Step.SELECT, self._page_select),
+            (Step.DESTINATION, self._page_destination),
+            (Step.CONFIRM, self._page_confirm),
+            (Step.WORKING, self._page_working),
+            (Step.DONE, self._page_done),
+        ):
+            frame = self.ttk.Frame(self.page_area, style="Page.TFrame")
+            builder(frame)
+            self.pages[step] = frame
+
+    def _page_welcome(self, page: Any) -> None:
         tk, ttk = self.tk, self.ttk
-        pad = {"padx": 10, "pady": 6}
-
-        top = ttk.Frame(self.root)
-        top.pack(fill="x", **pad)
-        ttk.Label(top, text="Profile").grid(row=0, column=0, sticky="w")
-        self.profile_var = tk.StringVar(value=str(Path.home()))
-        ttk.Entry(top, textvariable=self.profile_var, width=60).grid(
-            row=0, column=1, sticky="we", padx=(6, 6)
+        ttk.Label(page, text="Profile to back up", style="Body.TLabel").pack(anchor="w")
+        row = ttk.Frame(page, style="Page.TFrame")
+        row.pack(fill="x", pady=(4, 2))
+        self.profile_var = tk.StringVar(value=self.data.profile_root)
+        ttk.Entry(row, textvariable=self.profile_var).pack(
+            side="left", fill="x", expand=True
         )
-        ttk.Button(top, text="Browse…", command=self._pick_profile).grid(row=0, column=2)
-        self.scan_button = ttk.Button(top, text="Scan", command=self._start_scan)
-        self.scan_button.grid(row=0, column=3, padx=(6, 0))
-        top.columnconfigure(1, weight=1)
+        ttk.Button(row, text="Change…", command=self._pick_profile).pack(
+            side="left", padx=(8, 0)
+        )
+        ttk.Label(
+            page,
+            text="Detected automatically. Change it only to back up a different account.",
+            style="Hint.TLabel",
+        ).pack(anchor="w", pady=(0, 18))
 
-        options = ttk.LabelFrame(self.root, text="Options")
-        options.pack(fill="x", **pad)
-        self.files_only = tk.BooleanVar(value=False)
-        self.include_wifi = tk.BooleanVar(value=False)
-        self.include_software = tk.BooleanVar(value=True)
-        self.use_vss = tk.BooleanVar(value=True)
-        for column, (text, var) in enumerate(
+        ttk.Label(page, text="Options", style="Body.TLabel").pack(anchor="w")
+        options = ttk.Frame(page, style="Page.TFrame")
+        options.pack(fill="x", pady=(6, 0))
+
+        self.use_vss = tk.BooleanVar(value=self.options.get("use_vss", True))
+        self.files_only = tk.BooleanVar(value=self.options.get("files_only", False))
+        self.include_wifi = tk.BooleanVar(value=self.options.get("include_wifi", False))
+        self.include_software = tk.BooleanVar(value=self.options.get("include_software", True))
+        self.include_notepad = tk.BooleanVar(value=self.options.get("include_notepad", True))
+
+        for text, var, hint in (
             (
-                ("Files only (no credentials)", self.files_only),
-                ("Include Wi-Fi passwords", self.include_wifi),
-                ("Inventory software", self.include_software),
-                ("Shadow copy (needs admin)", self.use_vss),
-            )
+                "Copy files that programs are using (recommended)",
+                self.use_vss,
+                "Uses a shadow copy, which needs administrator rights. Windows will ask.",
+            ),
+            (
+                "Include the software list",
+                self.include_software,
+                "What is installed, so it can be reinstalled on the new machine.",
+            ),
+            (
+                "Include Wi-Fi networks",
+                self.include_wifi,
+                "Their saved passwords travel with them, encrypted.",
+            ),
+            (
+                "Files only — leave all credentials behind",
+                self.files_only,
+                "No browser profiles, no keys, no saved passwords of any kind.",
+            ),
         ):
-            ttk.Checkbutton(options, text=text, variable=var).grid(
-                row=0, column=column, sticky="w", padx=8, pady=4
-            )
-        ttk.Label(options, text="Compression").grid(row=0, column=4, sticky="e", padx=(16, 4))
-        self.compression = tk.StringVar(value="auto")
-        ttk.Combobox(
-            options,
-            textvariable=self.compression,
-            values=list(COMPRESSION_CHOICES),
-            width=8,
-            state="readonly",
-        ).grid(row=0, column=5, sticky="w")
+            ttk.Checkbutton(
+                page, text=text, variable=var, style="Wizard.TCheckbutton",
+                command=self._refresh_buttons,
+            ).pack(anchor="w", pady=(8, 0))
+            ttk.Label(page, text="     " + hint, style="Hint.TLabel").pack(anchor="w")
 
-        middle = ttk.LabelFrame(self.root, text="What to capture")
-        middle.pack(fill="both", expand=True, **pad)
-        columns = ("pick", "title", "category", "size", "files", "note")
-        self.tree = ttk.Treeview(middle, columns=columns, show="headings", selectmode="none")
-        for name, text, width, anchor in (
-            ("pick", "", 34, "center"),
-            ("title", "Item", 330, "w"),
-            ("category", "Kind", 130, "w"),
-            ("size", "Size", 100, "e"),
-            ("files", "Files", 80, "e"),
-            ("note", "", 220, "w"),
-        ):
-            self.tree.heading(name, text=text)
-            self.tree.column(name, width=width, anchor=anchor, stretch=(name in ("title", "note")))
-        scroll = ttk.Scrollbar(middle, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=scroll.set)
-        self.tree.pack(side="left", fill="both", expand=True)
-        scroll.pack(side="right", fill="y")
-        self.tree.bind("<Button-1>", self._on_click)
-        self.tree.bind("<space>", self._on_space)
-        self.tree.tag_configure("secret", foreground="#8a5cf6")
-        self.tree.tag_configure("blocked", foreground="#888888")
+        self.elevation_note = ttk.Label(page, text="", style="Warn.TLabel", wraplength=620)
+        self.elevation_note.pack(anchor="w", pady=(16, 0))
 
-        buttons = ttk.Frame(self.root)
-        buttons.pack(fill="x", padx=10)
-        ttk.Button(buttons, text="Select all", command=lambda: self._set_all(True)).pack(side="left")
-        ttk.Button(buttons, text="Select none", command=lambda: self._set_all(False)).pack(
-            side="left", padx=6
+    def _page_scanning(self, page: Any) -> None:
+        ttk = self.ttk
+        self.scan_bar = ttk.Progressbar(page, mode="indeterminate")
+        self.scan_bar.pack(fill="x", pady=(30, 14))
+        self.scan_status = ttk.Label(page, text="Starting…", style="Body.TLabel")
+        self.scan_status.pack(anchor="w")
+        ttk.Label(
+            page,
+            text="Large folders take a moment. Nothing is written during this step.",
+            style="Hint.TLabel",
+        ).pack(anchor="w", pady=(6, 0))
+
+    def _page_select(self, page: Any) -> None:
+        ttk = self.ttk
+        holder = ttk.Frame(page, style="Page.TFrame")
+        holder.pack(fill="both", expand=True)
+        columns = ("pick", "title", "kind", "size", "files", "note")
+        self.tree = ttk.Treeview(
+            holder, columns=columns, show="headings", selectmode="none",
+            style="Wizard.Treeview",
         )
-        self.total_label = ttk.Label(buttons, text="Nothing scanned yet.")
+        for name, heading, width, anchor, stretch in (
+            ("pick", "", 36, "center", False),
+            ("title", "Item", 300, "w", True),
+            ("kind", "Kind", 120, "w", False),
+            ("size", "Size", 90, "e", False),
+            ("files", "Files", 80, "e", False),
+            ("note", "", 200, "w", True),
+        ):
+            self.tree.heading(name, text=heading)
+            self.tree.column(name, width=width, anchor=anchor, stretch=stretch)
+        bar = ttk.Scrollbar(holder, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=bar.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        bar.pack(side="right", fill="y")
+        self.tree.tag_configure("secret", foreground=theme.SECRET)
+        self.tree.tag_configure("blocked", foreground=theme.INK_FAINT)
+        self.tree.bind("<Button-1>", self._on_tree_click)
+
+        row = ttk.Frame(page, style="Page.TFrame")
+        row.pack(fill="x", pady=(10, 4))
+        ttk.Button(row, text="Select all", command=lambda: self._set_all(True)).pack(side="left")
+        ttk.Button(row, text="Select none", command=lambda: self._set_all(False)).pack(
+            side="left", padx=8
+        )
+        self.total_label = ttk.Label(row, text="", style="Body.TLabel")
         self.total_label.pack(side="right")
 
-        bottom = ttk.LabelFrame(self.root, text="Bundle")
-        bottom.pack(fill="x", **pad)
-        ttk.Label(bottom, text="Save to").grid(row=0, column=0, sticky="w", padx=6, pady=4)
-        self.output_var = tk.StringVar(value=str(self._proposed_output()))
-        ttk.Entry(bottom, textvariable=self.output_var).grid(
-            row=0, column=1, sticky="we", padx=6
+    def _page_destination(self, page: Any) -> None:
+        tk, ttk = self.tk, self.ttk
+        ttk.Label(page, text="Save the backup as", style="Body.TLabel").pack(anchor="w")
+        row = ttk.Frame(page, style="Page.TFrame")
+        row.pack(fill="x", pady=(4, 2))
+        self.output_var = tk.StringVar(value="")
+        ttk.Entry(row, textvariable=self.output_var).pack(side="left", fill="x", expand=True)
+        ttk.Button(row, text="Change…", command=self._pick_output).pack(
+            side="left", padx=(8, 0)
         )
-        ttk.Button(bottom, text="Browse…", command=self._pick_output).grid(row=0, column=2, padx=6)
-        ttk.Label(bottom, text="Passphrase").grid(row=1, column=0, sticky="w", padx=6, pady=4)
-        self.passphrase = ttk.Entry(bottom, show="•")
-        self.passphrase.grid(row=1, column=1, sticky="we", padx=6)
-        ttk.Label(bottom, text="Confirm").grid(row=2, column=0, sticky="w", padx=6, pady=4)
-        self.passphrase2 = ttk.Entry(bottom, show="•")
-        self.passphrase2.grid(row=2, column=1, sticky="we", padx=6)
-        self.capture_button = ttk.Button(
-            bottom, text="Capture", command=self._start_capture, state="disabled"
-        )
-        self.capture_button.grid(row=1, column=2, rowspan=2, padx=6, sticky="ns")
-        bottom.columnconfigure(1, weight=1)
+        self.output_hint = ttk.Label(page, text="", style="Hint.TLabel", wraplength=620)
+        self.output_hint.pack(anchor="w", pady=(0, 20))
+
+        ttk.Label(page, text="Passphrase", style="Body.TLabel").pack(anchor="w")
+        self.passphrase = ttk.Entry(page, show="•")
+        self.passphrase.pack(fill="x", pady=(4, 10))
+        self.passphrase.bind("<KeyRelease>", lambda _e: self._refresh_buttons())
+        ttk.Label(page, text="Type it again", style="Body.TLabel").pack(anchor="w")
+        self.passphrase2 = ttk.Entry(page, show="•")
+        self.passphrase2.pack(fill="x", pady=(4, 6))
+        self.passphrase2.bind("<KeyRelease>", lambda _e: self._refresh_buttons())
         ttk.Label(
-            bottom,
-            text="The bundle is encrypted with this passphrase only. There is no recovery "
-            "if you lose it.",
-            foreground="#a06010",
-        ).grid(row=3, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 6))
+            page,
+            text="This passphrase is the only way back into the backup. Nobody can "
+            "recover it for you — not us, not Microsoft. Write it down somewhere "
+            "that is not the machine you are replacing.",
+            style="Warn.TLabel",
+            wraplength=620,
+            justify="left",
+        ).pack(anchor="w", pady=(10, 0))
 
-        status = ttk.Frame(self.root)
-        status.pack(fill="x", **pad)
-        self.progress = ttk.Progressbar(status, mode="determinate", maximum=1000)
-        self.progress.pack(fill="x")
-        self.status_var = tk.StringVar(value="Ready.")
-        ttk.Label(status, textvariable=self.status_var).pack(anchor="w", pady=(4, 0))
+    def _page_confirm(self, page: Any) -> None:
+        self.confirm_text = self.ttk.Label(
+            page, text="", style="Body.TLabel", justify="left", wraplength=640
+        )
+        self.confirm_text.pack(anchor="w", pady=(6, 0))
 
-    # --- helpers -----------------------------------------------------------
-    def _proposed_output(self) -> Path:
-        try:
-            source = detect_source_machine(self.profile_var.get())
-            return defaults.default_bundle_path(source.hostname, source.username)
-        except Exception:  # noqa: BLE001 -- a default must never fail to appear
-            return defaults.default_bundle_path(now=datetime.now())
+    def _page_working(self, page: Any) -> None:
+        ttk = self.ttk
+        self.capture_bar = ttk.Progressbar(page, mode="determinate", maximum=1000)
+        self.capture_bar.pack(fill="x", pady=(30, 14))
+        self.capture_status = ttk.Label(page, text="Starting…", style="Body.TLabel")
+        self.capture_status.pack(anchor="w")
+        self.capture_detail = ttk.Label(page, text="", style="Hint.TLabel", wraplength=640)
+        self.capture_detail.pack(anchor="w", pady=(6, 0))
 
-    def _config(self) -> ScanConfig:
-        root = self.profile_var.get().strip()
-        config = ScanConfig(profile_root=Path(root) if root else None)
-        config.files_only = self.files_only.get()
-        config.include_wifi = self.include_wifi.get()
-        config.include_software = self.include_software.get()
-        return config
+    def _page_done(self, page: Any) -> None:
+        self.done_text = self.ttk.Label(
+            page, text="", style="Body.TLabel", justify="left", wraplength=640
+        )
+        self.done_text.pack(anchor="w", pady=(6, 0))
+        self.open_button = self.ttk.Button(
+            page, text="Open the folder", command=self._open_output_folder
+        )
+        self.open_button.pack(anchor="w", pady=(18, 0))
 
-    def _environment(self, config: ScanConfig) -> Environment:
-        return (
-            Environment.fixture(config.profile_root)
-            if config.profile_root is not None
-            else Environment.live()
+    # --- navigation --------------------------------------------------------
+    def _show(self, step: Step) -> None:
+        from . import wizard
+
+        for frame in self.pages.values():
+            frame.pack_forget()
+        self.step = step
+        heading, subtitle = wizard.title(step)
+        self.title_label.configure(text=heading)
+        self.subtitle_label.configure(text=subtitle)
+        self.pages[step].pack(fill="both", expand=True)
+
+        current = wizard.rail_index(step)
+        for index, label in enumerate(self.rail_labels):
+            marker = theme.rail_marker(index, current)
+            text = label.cget("text").strip()
+            for glyph in ("✓", "●", "○"):
+                text = text.replace(glyph, "").strip()
+            label.configure(text=f"{marker}  {text}", style=theme.rail_style(index, current))
+
+        self._on_enter(step)
+        self._refresh_buttons()
+
+    def _on_enter(self, step: Step) -> None:
+        if step is Step.WELCOME:
+            self._update_elevation_note()
+        elif step is Step.SCANNING:
+            self.scan_bar.start(14)
+            self._start_scan()
+        elif step is Step.SELECT:
+            self._render_rows()
+        elif step is Step.DESTINATION:
+            if not self.output_var.get():
+                self.output_var.set(str(self._proposed_output()))
+            self._update_output_hint()
+        elif step is Step.CONFIRM:
+            self.confirm_text.configure(text=self._confirm_summary())
+        elif step is Step.WORKING:
+            self._start_capture()
+        elif step is Step.DONE:
+            self.done_text.configure(text=self._done_summary())
+
+    def _collect(self) -> None:
+        """Pull the widgets' values into the data the rules are checked against."""
+        self.data.profile_root = self.profile_var.get()
+        self.data.output_path = self.output_var.get()
+        self.data.passphrase = self.passphrase.get()
+        self.data.passphrase_confirm = self.passphrase2.get()
+
+    def _refresh_buttons(self) -> None:
+        from . import wizard
+
+        self._collect()
+        verdict = wizard.check(self.step, self.data)
+        automatic = self.step in wizard.AUTOMATIC
+        self.next_button.configure(
+            text=wizard.next_label(self.step),
+            state="disabled" if (automatic or not verdict.ok) else "normal",
+        )
+        self.back_button.configure(
+            state="normal" if wizard.can_go_back(self.step) else "disabled"
+        )
+        self.cancel_button.configure(text="Close" if self.step is Step.DONE else "Cancel")
+        self.hint.configure(text=verdict.message if not verdict.ok else "")
+        if self.step is Step.WELCOME:
+            self._update_elevation_note()
+
+    def _go_next(self) -> None:
+        from . import wizard
+
+        self._collect()
+        if not wizard.check(self.step, self.data).ok:
+            return
+        if self.step is Step.DONE:
+            self.root.destroy()
+            return
+        if self.step is Step.WELCOME and self._maybe_elevate():
+            return
+        following = wizard.next_step(self.step)
+        if following is not None:
+            self._show(following)
+
+    def _go_back(self) -> None:
+        from . import wizard
+
+        earlier = wizard.previous_step(self.step)
+        if earlier is not None:
+            self._show(earlier)
+
+    def _cancel(self) -> None:
+        from tkinter import messagebox  # noqa: PLC0415
+
+        if self.step is Step.DONE:
+            self.root.destroy()
+            return
+        if self.step is Step.WORKING:
+            if messagebox.askyesno(
+                "WinMigrate",
+                "Stop the backup?\n\nThe part written so far will not be a usable "
+                "backup and should be deleted.",
+            ):
+                self.root.destroy()
+            return
+        self.root.destroy()
+
+    # --- elevation ---------------------------------------------------------
+    def _update_elevation_note(self) -> None:
+        if not elevate.should_offer(self.use_vss.get(), self.elevation_attempted):
+            if self.use_vss.get() and elevate.is_windows() and elevate.is_elevated():
+                self.elevation_note.configure(
+                    text="Running as administrator — files that programs are using "
+                    "will be copied cleanly."
+                )
+            elif self.use_vss.get() and self.elevation_attempted:
+                self.elevation_note.configure(
+                    text="Continuing without administrator rights. Files held open by "
+                    "running programs may be skipped; they are listed at the end."
+                )
+            else:
+                self.elevation_note.configure(text="")
+            return
+        self.elevation_note.configure(
+            text="Windows will ask for administrator rights when you continue. "
+            "That is what allows a shadow copy, which is the only way to copy "
+            "files your browser and Outlook are holding open."
         )
 
-    def _set_busy(self, busy: bool, status: str = "") -> None:
-        self.busy = busy
-        state = "disabled" if busy else "normal"
-        self.scan_button.configure(state=state)
-        self.capture_button.configure(
-            state="normal" if (not busy and self.scan_result is not None) else "disabled"
+    def _maybe_elevate(self) -> bool:
+        """Restart elevated if that is what the options need. True means this
+        process is going away and should do nothing further."""
+        if not elevate.should_offer(self.use_vss.get(), self.elevation_attempted):
+            return False
+        arguments = elevate.forward_arguments(
+            profile_root=self.profile_var.get(),
+            files_only=self.files_only.get(),
+            include_wifi=self.include_wifi.get(),
+            include_software=self.include_software.get(),
+            include_notepad=self.include_notepad.get(),
         )
-        if status:
-            self.status_var.set(status)
+        if elevate.relaunch_as_admin(arguments):
+            self.root.destroy()
+            return True
+        # Declined, or no UAC to ask. Carrying on without a shadow copy is what
+        # the command line does, so it is what this does -- with the note on the
+        # page updated to say so rather than a dialog nobody reads.
+        self.elevation_attempted = True
+        self._update_elevation_note()
+        return False
 
     # --- the list ----------------------------------------------------------
     def _render_rows(self) -> None:
         self.tree.delete(*self.tree.get_children())
-        for row in self.rows:
+        for row in self.data.rows:
             if row.selectable:
-                mark = TICKED if row.item_id in self.selected else UNTICKED
-                note = "encrypted-only" if row.secret else ""
+                mark = TICKED if row.item_id in self.data.selected else UNTICKED
+                note = "encrypted only" if row.secret else ""
                 tags = ("secret",) if row.secret else ()
             else:
-                mark = BLOCKED
-                note = row.reason
-                tags = ("blocked",)
+                mark, note, tags = BLOCKED, row.reason, ("blocked",)
             self.tree.insert(
                 "",
                 "end",
@@ -253,74 +513,173 @@ class WinMigrateApp:
                 ),
                 tags=tags,
             )
-        self._update_total()
-
-    def _update_total(self) -> None:
-        total_bytes, total_files = selection.selected_totals(self.rows, self.selected)
-        available = sum(r.size_bytes for r in self.rows if r.selectable)
-        self.total_label.configure(
-            text=f"Selected {humanize.bytes_(total_bytes)} in {total_files:,} files "
-            f"of {humanize.bytes_(available)} available"
+        total_bytes, total_files = selection.selected_totals(
+            self.data.rows, self.data.selected
         )
+        available = sum(r.size_bytes for r in self.data.rows if r.selectable)
+        self.total_label.configure(
+            text=f"{humanize.bytes_(total_bytes)} in {total_files:,} files, "
+            f"of {humanize.bytes_(available)}"
+        )
+        self._refresh_buttons()
 
-    def _toggle(self, item_id: str) -> None:
-        row = next((r for r in self.rows if r.item_id == item_id), None)
-        if row is None or not row.selectable:
-            return
-        if item_id in self.selected:
-            self.selected.discard(item_id)
-        else:
-            self.selected.add(item_id)
-        self._render_rows()
-
-    def _on_click(self, event: Any) -> None:
-        if self.busy or self.tree.identify_region(event.x, event.y) != "cell":
+    def _on_tree_click(self, event: Any) -> None:
+        if self.tree.identify_region(event.x, event.y) != "cell":
             return
         item_id = self.tree.identify_row(event.y)
-        if item_id:
-            self._toggle(item_id)
-
-    def _on_space(self, _event: Any) -> None:
-        focused = self.tree.focus()
-        if focused and not self.busy:
-            self._toggle(focused)
+        row = next((r for r in self.data.rows if r.item_id == item_id), None)
+        if row is None or not row.selectable:
+            return
+        if item_id in self.data.selected:
+            self.data.selected.discard(item_id)
+        else:
+            self.data.selected.add(item_id)
+        self._render_rows()
 
     def _set_all(self, on: bool) -> None:
-        if self.busy:
-            return
-        self.selected = {r.item_id for r in self.rows if r.selectable} if on else set()
+        self.data.selected = (
+            {r.item_id for r in self.data.rows if r.selectable} if on else set()
+        )
         self._render_rows()
 
     # --- pickers -----------------------------------------------------------
     def _pick_profile(self) -> None:
         from tkinter import filedialog  # noqa: PLC0415
 
-        chosen = filedialog.askdirectory(title="Profile folder", initialdir=self.profile_var.get())
+        chosen = filedialog.askdirectory(
+            title="Profile folder", initialdir=self.profile_var.get()
+        )
         if chosen:
             self.profile_var.set(chosen)
-            self.output_var.set(str(self._proposed_output()))
+            self.output_var.set("")
+            self._refresh_buttons()
 
     def _pick_output(self) -> None:
         from tkinter import filedialog  # noqa: PLC0415
 
-        current = Path(self.output_var.get())
+        current = Path(self.output_var.get() or self._proposed_output())
         chosen = filedialog.asksaveasfilename(
-            title="Save the bundle as",
+            title="Save the backup as",
             initialdir=str(current.parent),
             initialfile=current.name,
             defaultextension=".dat",
-            filetypes=[("WinMigrate bundle", "*.dat")],
+            filetypes=[("WinMigrate backup", "*.dat")],
         )
         if chosen:
             self.output_var.set(chosen)
+            self._update_output_hint()
+            self._refresh_buttons()
 
-    # --- scanning ----------------------------------------------------------
+    def _proposed_output(self) -> Path:
+        try:
+            source = detect_source_machine(self.profile_var.get())
+            return defaults.default_bundle_path(source.hostname, source.username)
+        except Exception:  # noqa: BLE001 -- a default must always appear
+            return defaults.default_bundle_path()
+
+    def _update_output_hint(self) -> None:
+        output = self.output_var.get()
+        drive = defaults.program_drive()
+        if output and defaults.same_drive(output, self.profile_var.get()):
+            self.output_hint.configure(
+                text="This is the same drive the profile is on, so it needs as much "
+                "free space again as the backup will take. An external drive is safer."
+            )
+        else:
+            self.output_hint.configure(
+                text=f"Defaults to {drive}, the drive WinMigrate is running from."
+            )
+
+    # --- summaries ---------------------------------------------------------
+    def _confirm_summary(self) -> str:
+        total_bytes, total_files = selection.selected_totals(
+            self.data.rows, self.data.selected
+        )
+        secret = sum(
+            1 for r in self.data.rows if r.secret and r.item_id in self.data.selected
+        )
+        elevated = elevate.is_windows() and elevate.is_elevated()
+        shadow = "yes" if (self.use_vss.get() and elevated) else "no"
+        lines = [
+            f"From:         {self.profile_var.get()}",
+            f"To:           {self.output_var.get()}",
+            "",
+            f"Items:        {len(self.data.selected)} selected",
+            f"Size:         {humanize.bytes_(total_bytes)} in {total_files:,} files",
+            f"Encrypted-only items: {secret}",
+            f"Shadow copy:  {shadow}",
+            "",
+            "The backup is encrypted with the passphrase you typed. Nothing is",
+            "uploaded anywhere; the file stays where you put it.",
+        ]
+        if self.use_vss.get() and not elevated:
+            lines.append("")
+            lines.append(
+                "Without administrator rights, files that programs are holding open"
+            )
+            lines.append("may be skipped. They are listed at the end.")
+        return "\n".join(lines)
+
+    def _done_summary(self) -> str:
+        report = self.capture_report
+        if report is None:
+            return "Nothing was written."
+        lines = [
+            f"Backup:       {report.bundle_path}",
+            f"Contents:     {report.captured_files:,} files, "
+            f"{humanize.bytes_(report.captured_bytes)}",
+            f"File size:    {humanize.bytes_(report.bundle_bytes)}",
+            f"Shadow copy:  {'yes' if report.used_shadow_copy else 'no'}",
+            "",
+            f"Keep {report.manifest_path.name} beside the backup. It lets the backup "
+            "be checked without the passphrase.",
+        ]
+        if report.failures:
+            lines += ["", f"{len(report.failures)} file(s) could not be read. See the log."]
+        if report.vanished:
+            lines += [
+                "",
+                f"{len(report.vanished)} temporary file(s) disappeared while the backup "
+                "ran. Nothing is missing.",
+            ]
+        followups = len(self.scan_result.followups) if self.scan_result else 0
+        if followups:
+            lines += [
+                "",
+                f"{followups} thing(s) still need you on the new machine — signing "
+                "in to accounts, reinstalling software. Run 'winmigrate restore' there "
+                "and it will list them.",
+            ]
+        return "\n".join(lines)
+
+    def _open_output_folder(self) -> None:
+        import subprocess  # noqa: PLC0415
+
+        target = Path(self.output_var.get()).parent
+        try:
+            if elevate.is_windows():
+                subprocess.Popen(["explorer", str(target)])  # noqa: S603, S607
+        except OSError as exc:
+            log.warning("could not open %s: %s", target, exc)
+
+    # --- workers -----------------------------------------------------------
+    def _config(self) -> ScanConfig:
+        root = self.profile_var.get().strip()
+        config = ScanConfig(profile_root=Path(root) if root else None)
+        config.files_only = self.files_only.get()
+        config.include_wifi = self.include_wifi.get()
+        config.include_software = self.include_software.get()
+        config.include_notepad = self.include_notepad.get()
+        return config
+
+    def _environment(self, config: ScanConfig) -> Environment:
+        return (
+            Environment.fixture(config.profile_root)
+            if config.profile_root is not None
+            else Environment.live()
+        )
+
     def _start_scan(self) -> None:
-        if self.busy:
-            return
-        self._set_busy(True, "Scanning…")
-        self.progress.configure(mode="indeterminate")
-        self.progress.start(12)
         config = self._config()
         threading.Thread(target=self._scan_worker, args=(config,), daemon=True).start()
 
@@ -332,74 +691,45 @@ class WinMigrateApp:
         except Exception as exc:  # noqa: BLE001 -- surfaced in the window
             self.events.put(("error", (str(exc), traceback.format_exc())))
 
-    # --- capturing ---------------------------------------------------------
     def _start_capture(self) -> None:
-        from tkinter import messagebox  # noqa: PLC0415
-
-        if self.busy or self.scan_result is None:
-            return
-        passphrase = self.passphrase.get()
-        if not passphrase:
-            messagebox.showerror("WinMigrate", "A passphrase is required; bundles are always encrypted.")
-            return
-        if passphrase != self.passphrase2.get():
-            messagebox.showerror("WinMigrate", "The passphrases did not match.")
-            return
-        if not self.selected:
-            messagebox.showerror("WinMigrate", "Nothing is selected.")
-            return
-
-        output = Path(self.output_var.get())
-        profile = self.profile_var.get()
-        if defaults.same_drive(output, profile):
-            # Writing the bundle onto the drive being captured needs the
-            # profile's size again in free space. Worth asking about now rather
-            # than running out at 90%.
-            if not messagebox.askyesno(
-                "WinMigrate",
-                f"{output} is on the same drive as the profile being captured.\n\n"
-                "That needs as much free space again as the profile. Continue?",
-            ):
-                return
-
-        total_bytes, _files = selection.selected_totals(self.rows, self.selected)
-        self._set_busy(True, "Capturing…")
-        self.progress.stop()
-        self.progress.configure(mode="determinate", value=0)
+        total_bytes, _files = selection.selected_totals(self.data.rows, self.data.selected)
         self._capture_total = max(total_bytes, 1)
         self._capture_done = 0
-
+        self.capture_bar.configure(value=0)
         options = CaptureOptions(
-            output=output,
-            passphrase=passphrase,
+            output=Path(self.output_var.get()),
+            passphrase=self.passphrase.get(),
             use_vss=self.use_vss.get(),
-            compression=self.compression.get(),
+            compression=self.options.get("compression", "auto"),
         )
-        # Cleared immediately: the passphrase lives in the worker's argument and
-        # nowhere else for longer than it takes to derive the key.
+        # Cleared the moment the worker has them: the passphrase lives in the
+        # options object and nowhere the window can leak it.
         self.passphrase.delete(0, "end")
         self.passphrase2.delete(0, "end")
-
         threading.Thread(
             target=self._capture_worker,
-            args=(options, self._config(), set(self.selected)),
+            args=(options, self._config(), set(self.data.selected)),
             daemon=True,
         ).start()
 
-    def _capture_worker(self, options: CaptureOptions, config: ScanConfig, chosen: set[str]) -> None:
+    def _capture_worker(
+        self, options: CaptureOptions, config: ScanConfig, chosen: set[str]
+    ) -> None:
         try:
             env = self._environment(config)
             plan = selection.apply(self.scan_result, chosen)
-
-            def progress(title: str, size: int) -> None:
-                self.events.put(("bytes", (title, size)))
-
-            report = capture_mod.capture(plan, options, config, env, progress)
+            report = capture_mod.capture(
+                plan,
+                options,
+                config,
+                env,
+                lambda title, size: self.events.put(("bytes", (title, size))),
+            )
             self.events.put(("captured", report))
         except Exception as exc:  # noqa: BLE001 -- surfaced in the window
             self.events.put(("error", (str(exc), traceback.format_exc())))
 
-    # --- events from the workers -------------------------------------------
+    # --- events ------------------------------------------------------------
     def _drain_events(self) -> None:
         try:
             while True:
@@ -407,55 +737,40 @@ class WinMigrateApp:
                 self._handle(kind, payload)
         except queue.Empty:
             pass
-        self.root.after(100, self._drain_events)
+        self.root.after(80, self._drain_events)
 
     def _handle(self, kind: str, payload: Any) -> None:
         from tkinter import messagebox  # noqa: PLC0415
 
         if kind == "status":
-            self.status_var.set(str(payload))
+            if self.step is Step.SCANNING:
+                self.scan_status.configure(text=str(payload))
         elif kind == "bytes":
             title, size = payload
             self._capture_done += size
-            self.progress.configure(
+            self.capture_bar.configure(
                 value=min(1000, int(self._capture_done / self._capture_total * 1000))
             )
-            self.status_var.set(
-                f"{title} — {humanize.bytes_(self._capture_done)} of "
+            self.capture_status.configure(
+                text=f"{humanize.bytes_(self._capture_done)} of "
                 f"{humanize.bytes_(self._capture_total)}"
             )
+            self.capture_detail.configure(text=str(title))
         elif kind == "scanned":
-            self.progress.stop()
-            self.progress.configure(mode="determinate", value=0)
+            self.scan_bar.stop()
             self.scan_result = payload
-            self.rows = selection.rows_for(payload)
-            self.selected = {r.item_id for r in self.rows if r.selected}
-            self._render_rows()
-            self._set_busy(False, f"Scanned in {payload.duration_seconds:.1f}s. Choose what to keep.")
+            self.data.rows = selection.rows_for(payload)
+            self.data.selected = {r.item_id for r in self.data.rows if r.selected}
+            self.data.scan_done = True
+            self._show(Step.SELECT)
         elif kind == "captured":
-            self.progress.configure(value=1000)
-            self._set_busy(False, f"Written to {payload.bundle_path}")
-            messagebox.showinfo("WinMigrate", _summary(payload))
+            self.capture_bar.configure(value=1000)
+            self.capture_report = payload
+            self.data.capture_done = True
+            self._show(Step.DONE)
         elif kind == "error":
             message, detail = payload
-            self.progress.stop()
-            self.progress.configure(mode="determinate", value=0)
-            self._set_busy(False, "Stopped.")
+            self.scan_bar.stop()
+            log.error("%s", detail)
             messagebox.showerror("WinMigrate", message)
-            print(detail)
-
-
-def _summary(report: Any) -> str:
-    lines = [
-        f"Bundle: {report.bundle_path}",
-        f"{report.captured_files:,} files, {humanize.bytes_(report.captured_bytes)} captured",
-        f"Bundle size: {humanize.bytes_(report.bundle_bytes)}",
-        f"Shadow copy: {'yes' if report.used_shadow_copy else 'no'}",
-    ]
-    if report.failures:
-        lines.append(f"{len(report.failures)} file(s) could not be read — see the log.")
-    if report.vanished:
-        lines.append(f"{len(report.vanished)} temporary file(s) disappeared while running.")
-    lines.append("")
-    lines.append(f"Keep {report.manifest_path.name} beside the bundle.")
-    return "\n".join(lines)
+            self._show(Step.WELCOME if not self.data.scan_done else Step.SELECT)
