@@ -314,6 +314,17 @@ def render_capture_report(report, console: Console) -> None:
             "[dim]Locked files are usually captured cleanly by running the capture "
             "from an elevated prompt, which allows a shadow copy.[/dim]"
         )
+
+    if report.vanished:
+        # Deliberately one dim line, not a table of errors. A live profile is
+        # always churning -- a browser compacting its LevelDB writes and deletes
+        # temporary files continuously -- and dressing that up as failure trains
+        # people to skim past the list that does matter.
+        console.print(
+            f"[dim]{len(report.vanished)} temporary file(s) were created and deleted "
+            f"while the capture ran (browser and database scratch files). Nothing is "
+            f"missing from the bundle; see the log for the names.[/dim]"
+        )
     console.print(
         f"[dim]Keep {report.manifest_path.name} beside the bundle: it lets the bundle be "
         "identified and integrity-checked without the passphrase.[/dim]"

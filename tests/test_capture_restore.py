@@ -10,6 +10,7 @@ import pytest
 
 from winmigrate import bundle as bundle_mod
 from winmigrate import capture as capture_mod
+from winmigrate import manifest as manifest_mod
 from winmigrate import restore as restore_mod
 from winmigrate.capture import CaptureError, CaptureOptions
 from winmigrate.config import ScanConfig
@@ -468,3 +469,142 @@ def test_recapturing_over_last_weeks_bundle_does_not_swallow_it(tmp_path: Path):
     )
     assert result.ok and not result.digest_mismatches
     assert {f.name for f in destination.rglob("*") if f.is_file()} == {"note.txt"}
+
+
+def test_a_file_the_snapshot_predates_is_read_from_the_live_volume(tmp_path: Path):
+    """The walk enumerates the live volume; the reads come from the snapshot.
+
+    Those are not the same filesystem. A file created after the snapshot was
+    taken is listed by the walk and is simply not in the snapshot -- which is
+    not an error, it is Brave compacting its LevelDB while the capture runs.
+    Reported as "could not capture: the system cannot find the file specified",
+    it reads as data loss; read from the live volume instead, it is just a file.
+    """
+    profile = tmp_path / "alice"
+    (profile / "Documents").mkdir(parents=True)
+    (profile / "Documents" / "steady.txt").write_text("was there all along")
+    (profile / "Documents" / "new.txt").write_text("created after the snapshot")
+
+    # A snapshot that has the profile but not the newer file, exactly as a
+    # real one taken moments earlier would be.
+    snapshot = tmp_path / "snap"
+    (snapshot / "Documents").mkdir(parents=True)
+    (snapshot / "Documents" / "steady.txt").write_text("was there all along")
+
+    class Snapshot:
+        def map(self, path):
+            return str(snapshot / Path(path).relative_to(profile))
+
+        def remove(self):
+            pass
+
+    env = Environment.fixture(profile, {})
+    config = ScanConfig(profile_root=profile, include_software=False)
+    scan = run_scan(config, env)
+    bundle = tmp_path / "b.dat"
+    with bundle_mod.BundleWriter(bundle, PASSPHRASE, _header()) as writer:
+        report = capture_mod.CaptureReport(
+            bundle_path=bundle, manifest_path=tmp_path / "b.manifest.json"
+        )
+        for item in scan.items:
+            if item.archive_path and item.source_path:
+                capture_mod._capture_item(
+                    item, writer, scan, config, env, Snapshot(), report, None
+                )
+        writer.add_bytes(manifest_mod.MANIFEST_ARCHIVE_NAME, b'{"items": []}')
+
+    assert not report.failures, report.failures
+    assert not report.vanished
+    assert report.captured_files == 2  # both, the newer one via the live volume
+
+
+def test_a_file_that_is_in_neither_is_reported_as_vanished_not_as_a_failure(tmp_path: Path):
+    """Created and deleted inside the capture window. Normal for a database's
+    scratch files, and reporting it as "could not capture" trains people to
+    skim past the list that does matter."""
+    profile = tmp_path / "alice"
+    (profile / "Documents").mkdir(parents=True)
+    (profile / "Documents" / "022352.log").write_text("leveldb scratch")
+
+    env = Environment.fixture(profile, {})
+    config = ScanConfig(profile_root=profile, include_software=False)
+    scan = run_scan(config, env)
+
+    # The window that matters is between the walk yielding the path and the read
+    # opening it -- too narrow to hit by deleting the file here, since the
+    # capture re-walks and would simply never list it.
+    real_add = bundle_mod.BundleWriter.add_file
+
+    def vanish(self, source, archive_name):
+        if str(source).endswith("022352.log"):
+            raise FileNotFoundError(2, "The system cannot find the file specified")
+        return real_add(self, source, archive_name)
+
+    bundle = tmp_path / "b.dat"
+    with bundle_mod.BundleWriter(bundle, PASSPHRASE, _header()) as writer:
+        report = capture_mod.CaptureReport(
+            bundle_path=bundle, manifest_path=tmp_path / "b.manifest.json"
+        )
+        bundle_mod.BundleWriter.add_file = vanish
+        try:
+            for item in scan.items:
+                if item.archive_path and item.source_path:
+                    capture_mod._capture_item(
+                        item, writer, scan, config, env, None, report, None
+                    )
+        finally:
+            bundle_mod.BundleWriter.add_file = real_add
+        writer.add_bytes(manifest_mod.MANIFEST_ARCHIVE_NAME, b'{"items": []}')
+
+    assert not report.failures
+    assert [Path(p).name for p in report.vanished] == ["022352.log"]
+
+
+def test_a_locked_file_is_still_a_real_failure(tmp_path: Path):
+    """The point of separating "vanished" is to keep the failure list worth
+    reading, not to empty it. A permission error is not a vanished file."""
+    profile = tmp_path / "alice"
+    (profile / "Documents").mkdir(parents=True)
+    (profile / "Documents" / "locked.bin").write_bytes(b"data")
+
+    env = Environment.fixture(profile, {})
+    config = ScanConfig(profile_root=profile, include_software=False)
+    scan = run_scan(config, env)
+
+    real_add = bundle_mod.BundleWriter.add_file
+
+    def refuse(self, source, archive_name):
+        if str(source).endswith("locked.bin"):
+            raise PermissionError(13, "Access is denied")
+        return real_add(self, source, archive_name)
+
+    bundle = tmp_path / "b.dat"
+    with bundle_mod.BundleWriter(bundle, PASSPHRASE, _header()) as writer:
+        report = capture_mod.CaptureReport(
+            bundle_path=bundle, manifest_path=tmp_path / "b.manifest.json"
+        )
+        bundle_mod.BundleWriter.add_file = refuse
+        try:
+            for item in scan.items:
+                if item.archive_path and item.source_path:
+                    capture_mod._capture_item(
+                        item, writer, scan, config, env, None, report, None
+                    )
+        finally:
+            bundle_mod.BundleWriter.add_file = real_add
+        writer.add_bytes(manifest_mod.MANIFEST_ARCHIVE_NAME, b'{"items": []}')
+
+    assert not report.vanished
+    assert [Path(p).name for p, _ in report.failures] == ["locked.bin"]
+    assert report.failures[0][1] == "Access is denied"
+
+
+def _header() -> dict:
+    from winmigrate import crypto
+
+    return {
+        "format": manifest_mod.BUNDLE_FORMAT_VERSION,
+        "cipher": manifest_mod.CIPHER,
+        "compression": "none",
+        "kdf": crypto.kdf_params_to_json(crypto.default_kdf_params()),
+    }

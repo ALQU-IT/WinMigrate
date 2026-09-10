@@ -22,6 +22,7 @@ than left looking restorable, and the run must start again.
 from __future__ import annotations
 
 import logging
+import errno
 import os
 import shutil
 import time
@@ -80,6 +81,10 @@ class CaptureReport:
     used_shadow_copy: bool = False
     compression: str = compression_mod.GZIP
     failures: list[tuple[str, str]] = field(default_factory=list)
+    #: Files listed by the walk that were gone by the time they were read.
+    #: Normal on a live profile -- a database compacting its own temporary
+    #: files -- and reported separately so it does not read as data loss.
+    vanished: list[str] = field(default_factory=list)
     #: Files that changed while being read. They are in the bundle at their
     #: declared length, but their contents were caught mid-write.
     changed_while_reading: list[str] = field(default_factory=list)
@@ -277,6 +282,39 @@ def _under_any(key: str, roots: tuple[str, ...]) -> bool:
     return any(key == root or key.startswith(root + "/") for root in roots)
 
 
+def _add_with_fallback(writer, real: Path, shadow, archive_name: str) -> tuple[str | None, str]:
+    """Add a file, returning ``(digest, outcome)``.
+
+    ``outcome`` is "captured", "vanished", or a failure reason.
+
+    The walk enumerates the live volume while the reads come from the frozen
+    snapshot, so the two do not see quite the same filesystem. A file created
+    after the snapshot was taken is listed by the walk and simply is not in the
+    snapshot -- which is not an error, it is a browser compacting its LevelDB
+    while the capture runs. Those get read from the live volume instead, which
+    is where they actually are.
+
+    Only when neither has it is the file really gone: it was created and deleted
+    inside the capture window, which for a database's temporary files is normal
+    and is worth saying much more quietly than "could not capture".
+    """
+    source = shadow.map(real) if shadow is not None else real
+    try:
+        return writer.add_file(source, archive_name), "captured"
+    except OSError as exc:
+        if exc.errno != errno.ENOENT:
+            return None, (exc.strerror or str(exc))
+
+    if shadow is not None:
+        # Not in the snapshot; it may be a file the snapshot predates.
+        try:
+            return writer.add_file(real, archive_name), "captured"
+        except OSError as exc:
+            if exc.errno != errno.ENOENT:
+                return None, (exc.strerror or str(exc))
+    return None, "vanished"
+
+
 def _capture_item(
     item: Item,
     writer: bundle_mod.BundleWriter,
@@ -304,13 +342,14 @@ def _capture_item(
     if item.kind is Kind.FILE:
         if pathutil.normalize_key(root) in own_files:
             return
-        source = shadow.map(root) if shadow is not None else root
-        try:
-            digest = writer.add_file(source, item.archive_path)
-        except OSError as exc:
-            reason = exc.strerror or str(exc)
-            report.failures.append((str(root), reason))
-            log.warning("could not capture %s: %s", root, reason)
+        digest, outcome = _add_with_fallback(writer, root, shadow, item.archive_path)
+        if digest is None:
+            if outcome == "vanished":
+                report.vanished.append(str(root))
+                log.info("%s vanished while capturing", root)
+            else:
+                report.failures.append((str(root), outcome))
+                log.warning("could not capture %s: %s", root, outcome)
             item.size_bytes = 0
             item.file_count = 0
             return
@@ -335,14 +374,15 @@ def _capture_item(
         if key in own_files or _under_any(key, secret_sources):
             continue
         archive_name = f"{item.archive_path}/{event.relative}"
-        source = shadow.map(event.path) if shadow is not None else event.path
-        try:
-            digest = writer.add_file(source, archive_name)
-        except OSError as exc:
+        digest, outcome = _add_with_fallback(writer, event.path, shadow, archive_name)
+        if digest is None:
             # One locked or vanished file must not cost the whole capture.
-            reason = exc.strerror or str(exc)
-            report.failures.append((str(event.path), reason))
-            log.warning("could not capture %s: %s", event.path, reason)
+            if outcome == "vanished":
+                report.vanished.append(str(event.path))
+                log.info("%s vanished while capturing", event.path)
+            else:
+                report.failures.append((str(event.path), outcome))
+                log.warning("could not capture %s: %s", event.path, outcome)
             continue
         digests.append((event.relative, digest))
         captured_bytes += event.size
