@@ -152,6 +152,68 @@ def test_no_notepad_leaves_the_session_out_of_the_scan(tmp_path: Path):
 
 
 # --- tab counting ----------------------------------------------------------
+def test_a_closed_tab_leaves_its_buffer_behind_and_is_not_counted(tmp_path: Path):
+    """Taken verbatim from a real Windows 11 profile with three tabs open.
+
+    Four GUID-named buffers were present. The three live tabs each had numbered
+    companions -- .0.bin and .1.bin, which Notepad writes while you type and
+    removes when a tab closes -- and the fourth had only its main .bin, left
+    behind by a tab closed earlier and not yet cleaned up. Counting .bin files
+    reported four tabs to a user looking at three.
+
+    Note the two zero-length .1.bin companions: presence is the signal, not
+    size, so they must still count as companions.
+    """
+    root = tmp_path / "alice"
+    (root / "Documents").mkdir(parents=True)
+    tab_state = local_state(root) / "TabState"
+    tab_state.mkdir(parents=True)
+    listing = {
+        "01735f75-64e0-4e33-a14c-74a60a856b35.0.bin": 20,
+        "01735f75-64e0-4e33-a14c-74a60a856b35.1.bin": 0,
+        "01735f75-64e0-4e33-a14c-74a60a856b35.bin": 132,
+        "174dda67-2da9-4eeb-8ae5-71b8749f2fca.0.bin": 22,
+        "174dda67-2da9-4eeb-8ae5-71b8749f2fca.1.bin": 22,
+        "174dda67-2da9-4eeb-8ae5-71b8749f2fca.bin": 3865,
+        "6ab07dd5-1bfb-46dd-9b6b-b799e8702fed.bin": 109,   # closed, no companions
+        "a3a859b5-fbb7-4a54-ae6f-28db13664ad5.0.bin": 20,
+        "a3a859b5-fbb7-4a54-ae6f-28db13664ad5.1.bin": 0,
+        "a3a859b5-fbb7-4a54-ae6f-28db13664ad5.bin": 176,
+    }
+    for name, size in listing.items():
+        (tab_state / name).write_bytes(b"x" * size)
+
+    items, _ = notepad.scan_notepad(Environment.fixture(root, {}))
+    assert "3 tab" in items[0].title
+
+    # The closed tab's buffer is still captured -- deciding which files Notepad
+    # needs is not this tool's job. Only the reported number is affected.
+    scanned = run_scan(ScanConfig(profile_root=root, include_software=False),
+                       Environment.fixture(root, {}))
+    session = next(i for i in scanned.items if i.id == "notepad:session")
+    assert session.file_count == len(listing)
+
+
+def test_companions_are_ignored_as_a_signal_when_they_distinguish_nothing(tmp_path: Path):
+    """If every buffer has companions, or none does, they say nothing about
+    which tabs are live -- so every buffer is counted rather than none."""
+    root = tmp_path / "alice"
+    (root / "Documents").mkdir(parents=True)
+    tab_state = local_state(root) / "TabState"
+    tab_state.mkdir(parents=True)
+    for index in range(3):
+        guid = f"a1b2c3d4-0000-0000-0000-00000000000{index}"
+        (tab_state / f"{guid}.bin").write_bytes(b"a note")
+    items, _ = notepad.scan_notepad(Environment.fixture(root, {}))
+    assert "3 tab" in items[0].title
+
+    for index in range(3):
+        guid = f"a1b2c3d4-0000-0000-0000-00000000000{index}"
+        (tab_state / f"{guid}.0.bin").write_bytes(b"pending")
+    items, _ = notepad.scan_notepad(Environment.fixture(root, {}))
+    assert "3 tab" in items[0].title
+
+
 def test_only_real_tab_buffers_are_counted(tmp_path: Path):
     """The count is the only thing telling the user whether their notes are in
     the bundle, so it has to match what Notepad shows them.
@@ -165,8 +227,9 @@ def test_only_real_tab_buffers_are_counted(tmp_path: Path):
     root = tmp_path / "alice"
     state = build_session(root, tabs=3)
     tab_state = state / "TabState"
-    guid = "a1b2c3d4-0000-0000-0000-000000000000"
-    (tab_state / f"{guid}.1.bin").write_bytes(b"pending edit")       # same tab
+    for index in range(3):
+        guid = f"a1b2c3d4-0000-0000-0000-00000000000{index}"
+        (tab_state / f"{guid}.0.bin").write_bytes(b"pending edit")   # same tab
     (tab_state / "a1b2c3d4-0000-0000-0000-000000000099.bin").write_bytes(b"")  # empty
     (tab_state / "tabstate.metadata.bin").write_bytes(b"bookkeeping")  # not a tab
 

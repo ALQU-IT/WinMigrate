@@ -159,18 +159,26 @@ _GUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 
 
 def _count_tabs(tab_state: Path) -> int:
-    """How many tab buffers are in TabState.
+    """How many tabs Notepad actually has open.
 
-    Each tab is a GUID-named ``.bin``. Notepad also writes numbered side files
-    (``<guid>.1.bin``) holding edits it has not folded into the main buffer yet;
-    those belong to the same tab, so they are grouped rather than counted again.
+    Every tab has a GUID-named ``<guid>.bin`` holding its buffer, and a live one
+    also has numbered companions -- ``<guid>.0.bin``, ``<guid>.1.bin`` -- that
+    Notepad writes as you type and removes when the tab is closed. The main
+    buffer is left behind until some later cleanup, so counting ``.bin`` files
+    reports tabs that were closed days ago: a real profile with three tabs open
+    had four buffers, the fourth being the only one with no companions.
 
-    Two things are deliberately not counted. A ``.bin`` whose name is not a GUID
-    is not a tab -- Notepad keeps other state in this folder -- and a zero-byte
-    buffer is a file Notepad has created but not written, which is not a tab the
-    user would recognise either. Both would inflate the number, and a count that
-    says four when the user can see three is worse than no count at all: it is
-    the only thing telling them whether their notes are in the bundle.
+    The companions are therefore the signal, but only when they distinguish
+    anything. If every GUID has them, or none does, that tells us nothing about
+    which tabs are live and all of them are counted. Same for a ``.bin`` whose
+    name is not a GUID, or a zero-byte main buffer: neither is a tab, but if
+    *nothing* matches the naming this was written against, the buffers present
+    are counted rather than reporting zero.
+
+    Everything in the folder is captured regardless. Only the number reported
+    depends on any of this -- and that number is the only thing telling the user
+    whether their notes made it into the bundle, so it has to match what they
+    can see in front of them.
     """
     if not tab_state.is_dir():
         return 0
@@ -180,35 +188,44 @@ def _count_tabs(tab_state: Path) -> int:
         log.warning("could not read %s: %s", tab_state, exc)
         return 0
 
-    guid_named: set[str] = set()
-    any_named: set[str] = set()
+    #: stem -> whether a numbered companion was seen for it
+    tabs: dict[str, bool] = {}
+    non_guid: set[str] = set()
     for entry in entries:
         if not entry.is_file() or entry.suffix.lower() != ".bin":
             continue
-        try:
-            if entry.stat().st_size == 0:
-                log.debug("ignoring empty tab buffer: %s", entry.name)
-                continue
-        except OSError:
+        parts = entry.name.lower().split(".")
+        stem = parts[0].strip("{}")
+        # "<guid>.0.bin" is a companion; "<guid>.bin" is the buffer itself.
+        companion = len(parts) == 3 and parts[1].isdigit()
+        if not _GUID_RE.match(stem):
+            non_guid.add(stem)
             continue
-        # "<guid>.bin" and "<guid>.1.bin" are one tab; key on the leading part.
-        stem = entry.name.split(".", 1)[0].lower().strip("{}")
-        any_named.add(stem)
-        if _GUID_RE.match(stem):
-            guid_named.add(stem)
+        if not companion:
+            try:
+                if entry.stat().st_size == 0:
+                    log.debug("ignoring empty tab buffer: %s", entry.name)
+                    continue
+            except OSError:
+                continue
+        tabs[stem] = tabs.get(stem, False) or companion
 
-    if guid_named:
-        return len(guid_named)
-    if any_named:
-        # Nothing matched the naming this was written against. Rather than
-        # report zero tabs for a folder that plainly has buffers in it -- the
-        # one answer that would make the user think their notes were not
-        # captured -- fall back to counting them and say so in the log.
-        log.info(
-            "TabState holds %d buffer(s) that are not GUID-named; counting them all",
-            len(any_named),
-        )
-    return len(any_named)
+    if not tabs:
+        if non_guid:
+            # The naming is not what this was written against. Reporting zero
+            # for a folder that plainly holds buffers is the one answer that
+            # would make someone think their notes were not captured.
+            log.info(
+                "TabState holds %d buffer(s) that are not GUID-named; counting them all",
+                len(non_guid),
+            )
+        return len(non_guid)
+
+    live = [stem for stem, companion in tabs.items() if companion]
+    if live and len(live) < len(tabs):
+        log.debug("%d of %d tab buffers look live", len(live), len(tabs))
+        return len(live)
+    return len(tabs)
 
 
 def _followup(tabs: int) -> Followup:
