@@ -23,7 +23,9 @@ Three things this window does that a console does not have to think about:
 from __future__ import annotations
 
 import logging
+import os
 import queue
+import sys
 import threading
 import traceback
 from pathlib import Path
@@ -47,18 +49,86 @@ UNTICKED = "☐"
 BLOCKED = "–"
 
 
+def fatal(message: str) -> None:
+    """Say something the user will actually see.
+
+    A ``--windowed`` build has no console, so ``print`` goes nowhere and a
+    traceback disappears entirely. MessageBoxW is Win32, needs no Tcl, and
+    therefore still works when the reason for the message is that Tcl does not.
+    """
+    log.error("%s", message)
+    if sys.platform == "win32":
+        try:
+            import ctypes  # noqa: PLC0415
+
+            # MB_ICONERROR | MB_OK
+            ctypes.windll.user32.MessageBoxW(None, message, "WinMigrate", 0x10)
+            return
+        except Exception:  # noqa: BLE001 -- fall through to stdout
+            pass
+    print(message)
+
+
+def scrub_tcl_environment() -> None:
+    """Drop TCL_LIBRARY and TK_LIBRARY when they point outside this program.
+
+    Another Python on the machine can leave these set system-wide, and Tcl
+    believes them over anything the frozen build says -- so a perfectly good
+    build looks for init.tcl in some other installation's folder and reports
+    that "Tcl wasn't installed properly". Only inherited values are removed;
+    the ones PyInstaller sets point inside the application and are what makes
+    it work.
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    here = Path(sys.executable).resolve().parent
+    bundled = Path(getattr(sys, "_MEIPASS", here)).resolve()
+    for name in ("TCL_LIBRARY", "TK_LIBRARY", "TCLLIBPATH"):
+        value = os.environ.get(name)
+        if not value:
+            continue
+        try:
+            resolved = Path(value).resolve()
+        except (OSError, ValueError):
+            os.environ.pop(name, None)
+            continue
+        if not (resolved.is_relative_to(bundled) or resolved.is_relative_to(here)):
+            log.info("ignoring inherited %s=%s", name, value)
+            os.environ.pop(name, None)
+
+
+TCL_ADVICE = (
+    "WinMigrate could not start its window because Tcl/Tk, the toolkit it draws "
+    "with, could not be loaded.\n\n"
+    "If you are running WinMigrate.exe from inside a .zip, extract the whole "
+    "folder to a real location first and run it from there. The program needs "
+    "the files that sit next to it.\n\n"
+    "The command-line version does not use Tcl/Tk and will work either way:\n"
+    "    winmigrate-cli.exe scan\n\n"
+    "Details: {error}"
+)
+
+
 def run(options: dict | None = None) -> int:
     """Open the window. ``options`` carries the first page's choices across an
     elevation restart. Returns a process exit code."""
+    scrub_tcl_environment()
     try:
         import tkinter as tk  # noqa: PLC0415
-    except ImportError:
-        print(
+    except ImportError as exc:
+        fatal(
             "The graphical interface needs tkinter, which is missing from this "
             "Python installation. Use the command line instead: winmigrate --help"
+            f"\n\nDetails: {exc}"
         )
         return 2
-    root = tk.Tk()
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:
+        # The failure this build is shaped to avoid, reported in words rather
+        # than as a PyInstaller crash dialog quoting search paths.
+        fatal(TCL_ADVICE.format(error=exc))
+        return 2
     WinMigrateWizard(root, options or {})
     root.mainloop()
     return 0

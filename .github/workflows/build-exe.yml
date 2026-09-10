@@ -67,20 +67,35 @@ jobs:
           "version=$v" >> $env:GITHUB_OUTPUT
           Write-Host "winmigrate $v"
 
-      # Two executables from one codebase. The windowed build is what someone
-      # double-clicks; the console build is what they run when they want the
-      # command line, because a windowed exe has no stdout to print to.
+      # The window ships as a folder, not a single file, and that is deliberate.
+      #
+      # --onefile unpacks the whole application into %TEMP%\_MEIxxxxxx on every
+      # launch and loads Tcl from there. Elevating changes %TEMP% to
+      # C:\Windows\Temp, which is shared between accounts, more tightly
+      # ACL'd, and cleaned aggressively -- so the same executable that works
+      # when double-clicked dies with "Can't find a usable init.tcl" when it
+      # relaunches itself as administrator, which is exactly what this tool does
+      # to get a shadow copy. Antivirus scanning the extraction as it happens is
+      # the other way it fails, and both are intermittent, which is the worst
+      # kind of broken to hand someone backing up a machine.
+      #
+      # --onedir has no extraction step at all: Tcl sits next to the exe and is
+      # found the same way every time, elevated or not. The cost is a folder
+      # instead of a file, which is why it is zipped.
       - name: Build the window
         run: >
-          pyinstaller --noconfirm --clean --onefile --windowed
+          pyinstaller --noconfirm --clean --onedir --windowed
           --name WinMigrate
           --collect-submodules winmigrate
+          --collect-all tkinter
           --hidden-import tkinter
           --hidden-import tkinter.ttk
           --hidden-import tkinter.filedialog
           --hidden-import tkinter.messagebox
           gui_entry.py
 
+      # The command-line build has no tkinter in it, so none of the above
+      # applies and a single file is genuinely nicer for a tool you type.
       - name: Build the console tool
         run: >
           pyinstaller --noconfirm --clean --onefile --console
@@ -88,7 +103,7 @@ jobs:
           --collect-submodules winmigrate
           cli_entry.py
 
-      - name: Check the executables actually start
+      - name: Check the console build actually starts
         shell: pwsh
         run: |
           # A build that imports cleanly on the runner but dies on a missing
@@ -98,39 +113,58 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "the console build does not start" }
           & ".\dist\winmigrate-cli.exe" presets
           if ($LASTEXITCODE -ne 0) { throw "presets failed" }
-          # The windowed build cannot be opened headlessly, so this checks the
-          # one thing that can be checked: that it is a real PE that Windows
-          # will load, and that its tkinter came along.
-          $exe = Get-Item ".\dist\WinMigrate.exe"
-          if ($exe.Length -lt 5MB) { throw "WinMigrate.exe is suspiciously small: $($exe.Length) bytes" }
-          Write-Host "WinMigrate.exe $([math]::Round($exe.Length / 1MB, 1)) MB"
-          Write-Host "winmigrate-cli.exe $([math]::Round((Get-Item '.\dist\winmigrate-cli.exe').Length / 1MB, 1)) MB"
 
-      - name: Verify tkinter was bundled
+      - name: Verify Tcl shipped beside the window
         shell: pwsh
         run: |
-          # --windowed swallows import errors into a message box nobody sees on
-          # a runner, so tkinter is verified through a console build of the same
-          # entry point instead.
-          pyinstaller --noconfirm --clean --onefile --console --name tkcheck `
-            --collect-submodules winmigrate --hidden-import tkinter tkcheck_entry.py
-          & ".\dist\tkcheck.exe"
+          # The exact failure this build layout exists to prevent: init.tcl not
+          # being where Tcl looks for it. With --onedir that is a path on disk
+          # which can simply be checked, rather than a temp directory that only
+          # exists while the program is running.
+          $root = ".\dist\WinMigrate"
+          $found = Get-ChildItem $root -Recurse -Filter init.tcl -ErrorAction SilentlyContinue
+          if (-not $found) {
+            Write-Host "--- contents of $root ---"
+            Get-ChildItem $root | Select-Object -ExpandProperty Name
+            throw "init.tcl is not in the build; the window would fail with 'Tcl wasn''t installed properly'"
+          }
+          Write-Host "init.tcl: $($found[0].FullName.Replace((Resolve-Path $root).Path, ''))"
+          foreach ($name in @("tk.tcl")) {
+            if (-not (Get-ChildItem $root -Recurse -Filter $name -ErrorAction SilentlyContinue)) {
+              throw "$name is missing from the build"
+            }
+          }
+
+      - name: Verify tkinter survives freezing, in the shipped layout
+        shell: pwsh
+        run: |
+          # --windowed swallows import errors into a message box no runner will
+          # ever see, so the same imports are exercised through a console build.
+          # Built --onedir too, so it proves the layout that actually ships
+          # rather than a different one that happens to work.
+          pyinstaller --noconfirm --clean --onedir --console --name tkcheck `
+            --collect-submodules winmigrate --collect-all tkinter `
+            --hidden-import tkinter tkcheck_entry.py
+          & ".\dist\tkcheck\tkcheck.exe"
           if ($LASTEXITCODE -ne 0) { throw "tkinter did not survive freezing" }
 
-      - name: Checksums
+      - name: Package
         shell: pwsh
         run: |
-          Get-FileHash .\dist\WinMigrate.exe -Algorithm SHA256 | Format-List
-          Get-FileHash .\dist\winmigrate-cli.exe -Algorithm SHA256 | Format-List
-          Get-FileHash .\dist\*.exe -Algorithm SHA256 |
+          $size = (Get-ChildItem .\dist\WinMigrate -Recurse | Measure-Object -Property Length -Sum).Sum
+          Write-Host "WinMigrate folder: $([math]::Round($size / 1MB, 1)) MB"
+          Compress-Archive -Path .\dist\WinMigrate\* -DestinationPath .\dist\WinMigrate-windows.zip -Force
+          Copy-Item .\dist\winmigrate-cli.exe .\dist\ -ErrorAction SilentlyContinue
+          Get-FileHash .\dist\WinMigrate-windows.zip, .\dist\winmigrate-cli.exe -Algorithm SHA256 |
             ForEach-Object { "$($_.Hash)  $(Split-Path $_.Path -Leaf)" } |
             Set-Content .\dist\SHA256SUMS.txt
+          Get-Content .\dist\SHA256SUMS.txt
 
       - uses: actions/upload-artifact@v4
         with:
           name: WinMigrate-${{ steps.version.outputs.version }}-windows
           path: |
-            dist/WinMigrate.exe
+            dist/WinMigrate-windows.zip
             dist/winmigrate-cli.exe
             dist/SHA256SUMS.txt
           retention-days: 30
@@ -152,17 +186,23 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/WinMigrate.exe
+            dist/WinMigrate-windows.zip
             dist/winmigrate-cli.exe
             dist/SHA256SUMS.txt
           body: |
-            Windows build of WinMigrate.
+            Windows build of WinMigrate. Neither download needs Python installed.
 
-            - `WinMigrate.exe` — the window. Double-click it.
-            - `winmigrate-cli.exe` — the command line, for scripted runs.
+            - `WinMigrate-windows.zip` — the window. **Extract the whole folder**
+              somewhere first (a USB drive is a good place), then run
+              `WinMigrate.exe` from inside it. Running it from inside the zip
+              works by accident and will not keep working: the program needs the
+              files that sit next to it.
+            - `winmigrate-cli.exe` — the command line, a single file, for
+              scripted runs.
 
-            Neither needs Python installed. Check `SHA256SUMS.txt` against your
-            download before running either.
+            Check `SHA256SUMS.txt` against your download before running either.
 
-            Run from an elevated prompt to allow a shadow copy, which is what
-            lets files held open by running programs be captured cleanly.
+            The window asks for administrator rights when it starts, which is
+            what allows a shadow copy — the only way to copy files your browser
+            and Outlook are holding open. Saying no still produces a backup;
+            those files are listed at the end as skipped.

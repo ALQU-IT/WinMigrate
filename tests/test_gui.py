@@ -8,6 +8,7 @@ and lived in a widget callback would be untested by construction.
 
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -352,3 +353,86 @@ def test_the_final_page_reads_only_fields_the_capture_report_has(monkeypatch):
     wizard.scan_result = None
     summary = app.WinMigrateWizard._done_summary(wizard)
     assert "b.dat" in summary and "b.manifest.json" in summary
+
+
+# --- surviving being frozen ------------------------------------------------
+def test_an_inherited_tcl_library_is_ignored_but_the_bundled_one_is_kept(
+    monkeypatch, tmp_path: Path
+):
+    """Another Python on the machine can leave TCL_LIBRARY set system-wide, and
+    Tcl believes it over anything the frozen build says. A perfectly good build
+    then hunts for init.tcl in some other installation and reports that "Tcl
+    wasn't installed properly" -- with the real files sitting right there.
+
+    Only inherited values are dropped. PyInstaller's own point inside the
+    application and are the reason it works at all.
+    """
+    import sys
+
+    from winmigrate.gui import app
+
+    monkeypatch.setenv("TCL_LIBRARY", "/some/other/python/lib/tcl8.6")
+
+    # Not frozen: not our business, and removing it could break a dev machine.
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    app.scrub_tcl_environment()
+    assert os.environ["TCL_LIBRARY"] == "/some/other/python/lib/tcl8.6"
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "WinMigrate.exe"))
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+
+    app.scrub_tcl_environment()
+    assert "TCL_LIBRARY" not in os.environ
+
+    monkeypatch.setenv("TCL_LIBRARY", str(tmp_path / "_tcl_data"))
+    app.scrub_tcl_environment()
+    assert os.environ["TCL_LIBRARY"] == str(tmp_path / "_tcl_data")
+
+
+def test_a_tcl_failure_is_explained_rather_than_crashing(monkeypatch):
+    """--windowed has no console, so a raw TclError is either silence or
+    PyInstaller's crash dialog quoting search paths. Neither tells someone that
+    the fix is to extract the folder."""
+    import importlib
+    import sys
+    import types
+
+    said: list[str] = []
+
+    stub = types.ModuleType("tkinter")
+
+    class TclError(Exception):
+        pass
+
+    def explode():
+        raise TclError("Can't find a usable init.tcl")
+
+    stub.TclError = TclError
+    stub.Tk = explode
+    stub.TkVersion = 8.6
+    monkeypatch.setitem(sys.modules, "tkinter", stub)
+    for name in ("tkinter.ttk", "tkinter.filedialog", "tkinter.messagebox"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    stub.ttk = sys.modules["tkinter.ttk"]
+
+    app = importlib.import_module("winmigrate.gui.app")
+    monkeypatch.setattr(app, "fatal", said.append)
+
+    assert app.run({}) == 2
+    assert len(said) == 1
+    message = said[0]
+    assert "extract" in message.lower() and ".zip" in message.lower()
+    assert "winmigrate-cli" in message.lower()  # the way out that still works
+    assert "init.tcl" in message  # the actual error, not swallowed
+
+
+def test_the_frozen_entry_point_reports_anything_that_escapes():
+    """A windowed build that dies silently is indistinguishable from one that
+    was never launched."""
+    root = Path(__file__).resolve().parent.parent
+    source = (root / "gui_entry.py").read_text(encoding="utf-8")
+    assert "freeze_support()" in source
+    assert "MessageBoxW" in source
+    assert "except BaseException" in source
+    assert "extract" in source.lower()
