@@ -81,6 +81,7 @@ def run_scan(
         _scan_software(env, result, progress, installation)
         _record_office(result, installation)
     _scan_dev_config(env, result, config, progress)
+    _scan_browsers(env, result, config, progress)
     _note_long_paths(result, long_paths)
 
     result.duration_seconds = time.monotonic() - started
@@ -450,6 +451,49 @@ def _scan_software(
         )
 
 
+def _measure_capture_items(items: list[Item], config: ScanConfig, env: Environment) -> None:
+    """Fill in size and skip accounting for capture items so the preview is honest.
+
+    The browser and dev-config scanners produce items without walking them;
+    without this the preview would show every one as 0 bytes, which reads as a
+    failed capture rather than an unmeasured one. Same walk capture will use, so
+    the numbers match. Skipped items (files-only mode) and non-file kinds are
+    left alone.
+    """
+    from .userfiles import measure_tree  # noqa: PLC0415
+
+    for item in items:
+        if item.action is not Action.CAPTURE or not item.source_path:
+            continue
+        source = Path(item.source_path)
+        if item.kind is Kind.TREE:
+            measurement = measure_tree(source, config, env, relative_base=env.profile_root)
+            item.size_bytes = measurement.size_bytes
+            item.file_count = measurement.file_count
+            item.skipped = list(measurement.skipped)
+        elif item.kind is Kind.FILE:
+            try:
+                item.size_bytes = os.stat(pathutil.extended(source)).st_size
+                item.file_count = 1
+            except OSError:
+                item.action = Action.SKIP
+                item.skip_reason = SkipReason.UNREADABLE
+
+
+def _scan_browsers(
+    env: Environment, result: ScanResult, config: ScanConfig, progress: ProgressCallback | None
+) -> None:
+    """Capture browser profiles and report how their passwords come across."""
+    from . import browsers as browsers_mod  # noqa: PLC0415 -- optional stage
+
+    _emit(progress, "Checking browsers")
+    items, followups, notes = browsers_mod.scan_browsers(env, files_only=config.files_only)
+    _measure_capture_items(items, config, env)
+    result.items.extend(items)
+    result.followups.extend(followups)
+    result.notes.extend(notes)
+
+
 def _scan_dev_config(
     env: Environment, result: ScanResult, config: ScanConfig, progress: ProgressCallback | None
 ) -> None:
@@ -458,6 +502,7 @@ def _scan_dev_config(
 
     _emit(progress, "Checking developer configuration")
     items, notes = devconfig_mod.scan_dev_config(env, files_only=config.files_only)
+    _measure_capture_items(items, config, env)
     result.items.extend(items)
     result.notes.extend(notes)
 

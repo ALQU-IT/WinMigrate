@@ -89,6 +89,7 @@ winmigrate/
     software.py      installed-software inventory (registry + winget + Appx)
     office.py        Click-to-Run detection and licence status (no key extraction)
     devconfig.py     developer/credential config (encrypted-only, secret items)
+    browsers.py      browser profiles + sign-in/sync detection (config-read only)
 schema/manifest.schema.json   machine-readable mirror of the manifest
 docs/manifest-schema.md       prose description of the same
 tests/                        pytest suite; runs on any OS via fixture profiles
@@ -199,6 +200,22 @@ cannot read them, so the placement information is not exposed even though it is
 not itself in the (encrypted) authoritative manifest's redacted twin. WSL
 distributions are recorded as a list only; the virtual disks are not copied.
 
+Browser profiles are captured the same way -- a folder copy under `secrets/`,
+marked SECRET -- but with two deliberate omissions. Caches (the bulk of a
+profile's size) are dropped as regenerable, and the password and cookie stores
+(`Login Data`, `Cookies`) are dropped as well: they are DPAPI-encrypted to the
+source machine, so they are useless on a different machine and account, and
+carrying them would be pure risk. What crosses is bookmarks, history,
+extensions, preferences and open tabs.
+
+Sign-in and sync state is read from configuration files only -- Chromium's
+`Preferences` JSON (`account_info`, `sync`) and Firefox's `prefs.js`
+(`services.sync.username`). Nothing opens `Login Data` or calls
+`CryptUnprotectData`. That detection drives the password follow-up: sync on
+means "sign in and they come back"; sync off means "use the browser's own
+export, behind its own Windows Hello prompt" -- the browser does the
+decryption, never WinMigrate.
+
 ## Skip accounting
 
 A migration tool that quietly drops data is worse than one that copies too much,
@@ -225,7 +242,7 @@ Two rules keep the numbers honest:
 | 1b | File capture with sync-skip, packaging (AES-256-GCM + Argon2id), manifest hashes, restore with verification | **shipped** |
 | 2 | VSS for locked files, resume, space pre-check, long-path handling, restore report | **shipped** (VSS untested on real Windows) |
 | 3 | App inventory + `winget import`; Office detect + ODT reinstall | **shipped** (untested against real winget/Office) |
-| 4 | Dev config (encrypted-only) + game-launcher classification **shipped**; browsers, password handoff, Wi-Fi, printers, env vars, fonts, Outlook next | in progress |
+| 4 | Dev config, game launchers, and browser profiles + sign-in/sync detection **shipped**; the browser password-export handoff, Wi-Fi, printers, env vars, fonts, Outlook next | in progress |
 | 5 | Files-only mode polish, optional exclusion presets (device backups, VM images), config file, optional GUI | |
 
 ## Why the payload is encrypted in chunks

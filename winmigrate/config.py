@@ -47,6 +47,14 @@ EXCLUDE_ALWAYS: tuple[str, ...] = (
     "AppData/Local/Google/Chrome/User Data/*/Cache/*",
     "AppData/Local/pip/cache/*",
     "AppData/Local/npm-cache/*",
+    # Browser credential and cookie stores: encrypted to the source machine, so
+    # useless on another, and sensitive. Never carried in a profile copy.
+    "Login Data",
+    "Login Data-journal",
+    "Cookies",
+    "Login Data For Account",
+    "Login Data For Account-journal",
+    "Cookies-journal",
 )
 
 #: Regenerable build/dependency output. Excluded by default but reported and
@@ -69,6 +77,23 @@ EXCLUDE_REGENERABLE: tuple[str, ...] = (
     "build",
     ".next",
     ".cache",
+    # Chromium-family and Firefox cache directories -- regenerable, and the
+    # bulk of a browser profile's size.
+    "Cache",
+    "Cache_Data",
+    "cache2",
+    "Code Cache",
+    "GPUCache",
+    "GrShaderCache",
+    "ShaderCache",
+    "DawnCache",
+    "DawnGraphiteCache",
+    "DawnWebGPUCache",
+    "GraphiteDawnCache",
+    "Service Worker",
+    "component_crx_cache",
+    "Crashpad",
+    "Media Cache",
 )
 
 #: Known folders captured by default, in report order.
