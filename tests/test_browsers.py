@@ -273,3 +273,76 @@ def test_a_firefox_profile_inside_the_user_folder_is_untouched_by_the_relocation
     item = next(i for i in items if i.category is Category.BROWSER_PROFILE)
     assert item.archive_path == "secrets/AppData/Roaming/Mozilla/Firefox/Profiles/abc.default"
     assert not any(f.id.startswith("browser:relocated:") for f in followups)
+
+
+def firefox_profile_with_stores(root: Path) -> Path:
+    """A Firefox profile holding both real data and the credential stores."""
+    profile = root / "AppData" / "Roaming" / "Mozilla" / "Firefox" / "Profiles" / "abc.default"
+    profile.mkdir(parents=True)
+    (root / "Documents").mkdir(parents=True, exist_ok=True)
+    for name, blob in [
+        ("prefs.js", b'user_pref("browser.startup.page", 3);'),
+        ("places.sqlite", b"BOOKMARKS-AND-HISTORY"),
+        ("logins.json", b"SAVED-PASSWORDS"),
+        ("logins-backup.json", b"SAVED-PASSWORDS-BACKUP"),
+        ("key4.db", b"THE-KEY-THAT-OPENS-THEM"),
+        ("cookies.sqlite", b"SESSION-COOKIES"),
+    ]:
+        (profile / name).write_bytes(blob)
+    (profile.parent.parent / "profiles.ini").write_text(
+        "[Profile0]\nName=default\nIsRelative=1\nPath=Profiles/abc.default\n"
+    )
+    return profile
+
+
+def restored_names(root: Path, tmp_path: Path, extra_includes=()) -> set[str]:
+    config = ScanConfig(
+        profile_root=root, include_software=False, extra_includes=tuple(extra_includes)
+    )
+    scan_result = run_scan(config, Environment.fixture(root, {}))
+    bundle = tmp_path / "bundle" / "b.dat"
+    capture_mod.capture(
+        scan_result,
+        CaptureOptions(output=bundle, passphrase=PASSPHRASE, use_vss=False),
+        config,
+        Environment.fixture(root, {}),
+    )
+    destination = tmp_path / "restored"
+    destination.mkdir()
+    restore_mod.restore(
+        RestoreOptions(bundle=bundle, passphrase=PASSPHRASE, destination=destination)
+    )
+    return {f.name for f in destination.rglob("*") if f.is_file()}
+
+
+def test_firefoxs_password_store_is_never_carried_in_a_profile_copy(tmp_path: Path):
+    """Chromium's store is DPAPI-bound and useless off the source machine.
+    Firefox's is not.
+
+    ``key4.db`` holds the key that unwraps ``logins.json``, wrapped in turn by
+    the primary password -- which almost nobody sets. Carried together to
+    another machine they hand over every saved password in plaintext, asking
+    nothing of whoever holds the bundle. WinMigrate refuses to write the routine
+    that decrypts a password store; a profile copy that ships the store and its
+    key is the same outcome by a longer road, and it used to do exactly that,
+    while the item's own note told the user the password stores were left out.
+    """
+    root = tmp_path / "alice"
+    firefox_profile_with_stores(root)
+    names = restored_names(root, tmp_path)
+
+    assert "places.sqlite" in names and "prefs.js" in names   # the profile did travel
+    assert not names & {"logins.json", "logins-backup.json", "key4.db", "cookies.sqlite"}
+
+
+def test_a_wide_include_pattern_cannot_pull_the_credential_stores_back_in(tmp_path: Path):
+    """Every other exclusion is a default the user may overrule. This one is a
+    guarantee about what a bundle can contain, so ``--include *.json`` -- aimed
+    at some config file and catching logins.json by accident -- must not cancel
+    it."""
+    root = tmp_path / "alice"
+    firefox_profile_with_stores(root)
+    names = restored_names(root, tmp_path, extra_includes=["*.json", "key4.db", "*.sqlite"])
+
+    assert "places.sqlite" in names  # the include did work for everything else
+    assert not names & {"logins.json", "logins-backup.json", "key4.db", "cookies.sqlite"}

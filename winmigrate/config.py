@@ -47,14 +47,43 @@ EXCLUDE_ALWAYS: tuple[str, ...] = (
     "AppData/Local/Google/Chrome/User Data/*/Cache/*",
     "AppData/Local/pip/cache/*",
     "AppData/Local/npm-cache/*",
-    # Browser credential and cookie stores: encrypted to the source machine, so
-    # useless on another, and sensitive. Never carried in a profile copy.
+)
+
+#: Browser credential and cookie stores, never carried in a profile copy.
+#:
+#: For the Chromium family these are bound to the source machine by DPAPI, so
+#: they would be useless on the new one anyway. Firefox's are not: ``key4.db``
+#: holds the key that unwraps ``logins.json``, wrapped in turn by the primary
+#: password -- which is empty for almost everyone. Copied together to another
+#: machine they yield every saved password in plaintext, with nothing asked of
+#: whoever holds the bundle. That is precisely what WinMigrate refuses to build,
+#: so the profile copy must not smuggle it in through the back door: passwords
+#: move by the browser's own export, behind the browser's own re-authentication,
+#: or they stay where they are.
+#:
+#: This list is not subject to ``--include``. Every other exclusion is a
+#: judgement about size or usefulness that the user may overrule; this one is a
+#: promise the tool makes about what a bundle can contain, and a wide pattern
+#: like ``--include *.json`` must not quietly cancel it.
+EXCLUDE_CREDENTIAL_STORES: tuple[str, ...] = (
+    # Chromium family (Chrome, Edge, Brave, Vivaldi, Opera).
     "Login Data",
     "Login Data-journal",
-    "Cookies",
     "Login Data For Account",
     "Login Data For Account-journal",
+    "Cookies",
     "Cookies-journal",
+    # Firefox family. logins.json is the password store and key4.db the key
+    # that opens it; either alone is inert, so both are refused.
+    "logins.json",
+    "logins-backup.json",
+    "signons.sqlite",
+    "key3.db",
+    "key4.db",
+    "cookies.sqlite",
+    "cookies.sqlite-wal",
+    "cookies.sqlite-shm",
+    "cookies.sqlite-journal",
 )
 
 #: Regenerable build/dependency output. Excluded by default but reported and
@@ -176,6 +205,11 @@ class ScanConfig:
         """True when a path (relative to the profile root) is excluded."""
         lowered_name = name.lower()
         lowered_path = relative_posix.lower()
+        # Checked before --include: this exclusion is a guarantee about what a
+        # bundle can hold, not a default the user is overruling.
+        for pattern in EXCLUDE_CREDENTIAL_STORES:
+            if fnmatch.fnmatchcase(lowered_name, pattern.lower()):
+                return True
         for pattern in self.extra_includes:
             lowered_pattern = pattern.lower().replace("\\", "/")
             if "/" in lowered_pattern:

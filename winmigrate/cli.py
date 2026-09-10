@@ -441,7 +441,10 @@ def cmd_capture(args: argparse.Namespace, console: Console) -> int:
 
     _shred_password_csvs(shred_after, console)
     report.render_capture_report(capture_report, console)
-    return 0 if not capture_report.failures else 0
+    # 3, not 0: the bundle is valid and worth keeping, but it is not the whole
+    # plan, and a script that moves it to the NAS and wipes the source machine
+    # has to be able to tell the difference.
+    return 0 if not capture_report.failures else 3
 
 
 def _collect_browser_passwords(args, result, env, console) -> list[Path]:
