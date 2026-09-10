@@ -59,6 +59,11 @@ def _render_header(result: ScanResult, console: Console) -> None:
         f"os: {source.os_name} {source.os_version} {source.os_build} ({source.architecture})",
         f"mode: {mode}   scanned in {humanize.duration(result.duration_seconds)}",
     ]
+    preset_note = next(
+        (n for n in result.notes if n.message.startswith("Exclusion preset(s) active")), None
+    )
+    if preset_note is not None:
+        lines.append(f"[yellow]{preset_note.message}[/yellow]")
     console.print(Panel("\n".join(lines), title="WinMigrate — scan preview", border_style="cyan"))
     if not source.is_windows:
         console.print(

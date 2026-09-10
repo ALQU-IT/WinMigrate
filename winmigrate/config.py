@@ -143,6 +143,8 @@ class ScanConfig:
     follow_reparse_points: bool = False
     extra_excludes: tuple[str, ...] = ()
     extra_includes: tuple[str, ...] = ()  # patterns that override an exclusion
+    #: Names of exclusion presets applied, for the report only (not matching).
+    active_presets: tuple[str, ...] = ()
     #: Inventory installed software and Office. Costs a winget and a PowerShell
     #: call, so it can be switched off for a quick file-only scan.
     include_software: bool = True
@@ -226,11 +228,14 @@ def config_from_dict(data: dict[str, Any], base: ScanConfig | None = None) -> Sc
         "measure_skipped",
         "include_software",
         "include_wifi",
+        "exclude_presets",  # resolved by the CLI into exclusion patterns
     }
     unknown = set(data) - known
     if unknown:
         raise ConfigError(f"unknown config keys: {', '.join(sorted(unknown))}")
     for key, value in data.items():
+        if key == "exclude_presets":
+            continue  # not a ScanConfig field; handled where presets are resolved
         if key == "profile_root":
             value = Path(value)
         elif key in {"known_folders", "extra_excludes", "extra_includes"}:

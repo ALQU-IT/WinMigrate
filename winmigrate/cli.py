@@ -27,7 +27,7 @@ from rich.progress import (
     TransferSpeedColumn,
 )
 
-from . import __version__, capture as capture_mod, logging_setup, report, restore as restore_mod
+from . import __version__, capture as capture_mod, logging_setup, presets, report, restore as restore_mod
 from .config import ScanConfig, config_from_dict, load_config_file
 from .util import humanize
 from .errors import ConfigError, WinMigrateError
@@ -94,6 +94,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_reinstall_arguments(reinstall_parser)
     reinstall_parser.set_defaults(func=cmd_reinstall)
+
+    presets_parser = subparsers.add_parser(
+        "presets", parents=[common], help="list the exclusion presets you can apply"
+    )
+    presets_parser.set_defaults(func=cmd_presets)
     return parser
 
 
@@ -222,6 +227,14 @@ def _add_scan_arguments(parser: argparse.ArgumentParser) -> None:
         help="pattern that overrides an exclusion (repeatable)",
     )
     parser.add_argument(
+        "--exclude-preset",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="apply a named exclusion preset, e.g. device-backups or vm-images "
+        "(repeatable; see 'winmigrate presets')",
+    )
+    parser.add_argument(
         "--no-software",
         dest="include_software",
         action="store_false",
@@ -265,6 +278,17 @@ def emit_json(payload: dict) -> None:
     sys.stdout.flush()
 
 
+def _config_preset_names(args: argparse.Namespace) -> list[str]:
+    """Preset names named inside a --config file (key: exclude_presets)."""
+    if not getattr(args, "config", None):
+        return []
+    data = load_config_file(args.config)
+    value = data.get("exclude_presets", [])
+    if not isinstance(value, list):
+        raise ConfigError("config 'exclude_presets' must be a list of preset names")
+    return [str(name) for name in value]
+
+
 def _config_from_args(args: argparse.Namespace) -> ScanConfig:
     config = ScanConfig()
     if args.config:
@@ -277,6 +301,17 @@ def _config_from_args(args: argparse.Namespace) -> ScanConfig:
     config.measure_skipped = args.measure_skipped and config.measure_skipped
     config.include_software = args.include_software and config.include_software
     config.include_wifi = getattr(args, "include_wifi", False) or config.include_wifi
+    preset_names = list(getattr(args, "exclude_preset", []) or []) + list(
+        _config_preset_names(args)
+    )
+    if preset_names:
+        try:
+            preset_patterns = presets.resolve(preset_names)
+        except presets.UnknownPreset as exc:
+            names = ", ".join(p.name for p in presets.list_presets())
+            raise ConfigError(f"unknown exclusion preset {exc}; available: {names}") from exc
+        config.extra_excludes = tuple(config.extra_excludes) + preset_patterns
+        config.active_presets = tuple(dict.fromkeys(name.strip().lower() for name in preset_names))
     if args.exclude:
         config.extra_excludes = tuple(config.extra_excludes) + tuple(args.exclude)
     if args.include:
@@ -542,6 +577,23 @@ def cmd_restore(args: argparse.Namespace, console: Console) -> int:
         restore_report = restore_mod.restore(options)
     report.render_restore_report(restore_report, console, dry_run=args.dry_run)
     return 0 if restore_report.ok else 3
+
+
+def cmd_presets(args: argparse.Namespace, console: Console) -> int:
+    from rich.table import Table
+
+    table = Table(title="Exclusion presets", title_justify="left", expand=False)
+    table.add_column("Name")
+    table.add_column("Patterns", justify="right")
+    table.add_column("What it leaves out", overflow="fold")
+    for preset in presets.list_presets():
+        table.add_row(preset.name, str(len(preset.patterns)), preset.summary)
+    console.print(table)
+    console.print(
+        "\n[dim]Apply with:  winmigrate scan --exclude-preset device-backups "
+        "--exclude-preset vm-images[/dim]"
+    )
+    return 0
 
 
 def cmd_reinstall(args: argparse.Namespace, console: Console) -> int:

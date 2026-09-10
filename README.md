@@ -77,6 +77,7 @@ Useful flags:
 | `--files-only` | Plan a migration with no credential material at all |
 | `--fast` | Do not measure the size of what is being skipped |
 | `--exclude PATTERN` / `--include PATTERN` | Adjust the exclusion rules (repeatable) |
+| `--exclude-preset NAME` | Apply a named preset, e.g. `device-backups`, `vm-images` (see `winmigrate presets`) |
 | `--log-file PATH` | Write a detailed log |
 
 Restore flags:

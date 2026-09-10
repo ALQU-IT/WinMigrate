@@ -63,6 +63,12 @@ def run_scan(
         return result
 
     _emit(progress, "Detecting cloud-sync roots")
+    if config.active_presets:
+        result.add_note(
+            Severity.INFO,
+            "Exclusion preset(s) active: " + ", ".join(config.active_presets),
+            "the large items these cover are left out of the plan on purpose",
+        )
     result.sync_roots = syncroots_mod.detect(env) if config.skip_synced else []
     syncroots_mod.measure(result.sync_roots, config.measure_skipped)
     for root in result.sync_roots:

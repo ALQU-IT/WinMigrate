@@ -75,6 +75,7 @@ winmigrate/
   restore.py         verify → decrypt → write → report
   vss.py             Volume Shadow Copy lifecycle and path translation
   passwords.py       the browser password handoff (browser exports, we encrypt)
+  presets.py         named exclusion presets (device backups, VM images, ...)
   odt.py             Office Deployment Tool configuration generation
   reinstall.py       the reinstall artifacts, and running winget/Office setup
   report.py          rich rendering of the preview, capture and restore reports
@@ -263,7 +264,7 @@ Two rules keep the numbers honest:
 | 2 | VSS for locked files, resume, space pre-check, long-path handling, restore report | **shipped** (VSS untested on real Windows) |
 | 3 | App inventory + `winget import`; Office detect + ODT reinstall | **shipped** (untested against real winget/Office) |
 | 4 | Dev config, game launchers, and browser profiles + sign-in/sync detection **shipped**; the browser password-export handoff, Wi-Fi, printers, env vars, fonts, Outlook next | in progress |
-| 5 | Files-only mode polish, optional exclusion presets (device backups, VM images), config file, optional GUI | next |
+| 5 | Exclusion presets **shipped** and config-file presets; files-only polish, optional GUI still to come | in progress |
 
 ## Why the payload is encrypted in chunks
 
