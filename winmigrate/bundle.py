@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO, Iterator
 
+from . import compression as compression_mod
 from . import crypto
 from .errors import IntegrityError, WinMigrateError
 from .manifest import BUNDLE_MAGIC
@@ -163,8 +164,21 @@ class BundleWriter:
             self._outer_hasher, key, nonce_prefix, header_digest
         )
         self._payload_hasher = _HashingWriter(self._encryptor)
-        self._gzip = gzip.GzipFile(fileobj=self._payload_hasher, mode="wb", mtime=0)
-        self._tar = tarfile.open(fileobj=self._gzip, mode="w|")
+        # The header decides. "none" is not a degraded mode: on a profile that
+        # is mostly media, gzip returns its input unchanged at a third of the
+        # throughput, so skipping it is the difference between a capture bound
+        # by the compressor and one bound by the disk.
+        algorithm = self._header.get("compression", compression_mod.GZIP)
+        if algorithm == compression_mod.NONE:
+            self._gzip = None
+            stream = self._payload_hasher
+        else:
+            level = int(self._header.get("compression_level", compression_mod.FAST_LEVEL))
+            self._gzip = gzip.GzipFile(
+                fileobj=self._payload_hasher, mode="wb", compresslevel=level, mtime=0
+            )
+            stream = self._gzip
+        self._tar = tarfile.open(fileobj=stream, mode="w|")
         return self
 
     def add_file(self, source: os.PathLike[str] | str, archive_name: str) -> str:
@@ -263,8 +277,15 @@ class BundleReader:
         self._decryptor = crypto.ChunkedDecryptor(
             self._file, key, nonce_prefix, self._header_digest
         )
-        self._gzip = gzip.GzipFile(fileobj=self._decryptor, mode="rb")
-        self._tar = tarfile.open(fileobj=self._gzip, mode="r|")
+        # Bundles written before compression was a choice have no such field
+        # and are gzip, so that is the default a missing value falls back to.
+        if self.header.get("compression", compression_mod.GZIP) == compression_mod.NONE:
+            self._gzip = None
+            stream = self._decryptor
+        else:
+            self._gzip = gzip.GzipFile(fileobj=self._decryptor, mode="rb")
+            stream = self._gzip
+        self._tar = tarfile.open(fileobj=stream, mode="r|")
 
     def __enter__(self) -> "BundleReader":
         return self
@@ -276,6 +297,8 @@ class BundleReader:
 
     def close(self) -> None:
         for closeable in (self._tar, self._gzip, self._file):
+            if closeable is None:
+                continue
             try:
                 closeable.close()
             except Exception:  # noqa: BLE001 -- closing must not mask a real error

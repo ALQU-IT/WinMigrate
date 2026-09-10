@@ -22,6 +22,7 @@ from ..config import ScanConfig
 from ..models import Note, Severity, SkippedGroup, SkipReason, SyncRoot
 from ..platform_win import CLOUD_PLACEHOLDER_MASK, FILE_ATTRIBUTE_REPARSE_POINT, Environment
 from ..util import paths as pathutil
+from .. import compression
 from . import syncroots as syncroots_mod
 
 
@@ -61,6 +62,9 @@ class TreeMeasurement:
     notes: list[Note] = field(default_factory=list)
     long_path_count: int = 0
     placeholder_count: int = 0
+    #: Bytes in files whose extension does not say they are already
+    #: compressed. Decides whether the capture compresses at all.
+    compressible_bytes: int = 0
     #: Sync roots this tree (or part of it) lives inside. Their volume is
     #: reported on the sync-root line, not here.
     synced_into: set[str] = field(default_factory=set)
@@ -298,6 +302,9 @@ def walk_tree(
                     key=f"placeholder:{root_path}",
                 )
                 continue
+
+            if measurement is not None and not compression.is_incompressible(entry.name):
+                measurement.compressible_bytes += stat_result.st_size
 
             yield CaptureFile(
                 path=path,

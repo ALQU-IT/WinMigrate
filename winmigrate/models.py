@@ -195,6 +195,9 @@ class Item:
     skip_reason: SkipReason | None = None
     size_bytes: int = 0
     file_count: int = 0
+    #: Bytes in files that might actually shrink. Decides whether the capture
+    #: compresses at all; see :mod:`winmigrate.compression`.
+    compressible_bytes: int = 0
     skipped: list[SkippedGroup] = field(default_factory=list)
     restore: RestoreSpec | None = None
     digest: str | None = None            # filled by the package stage
@@ -312,6 +315,8 @@ class Totals:
 
     capture_bytes: int = 0
     capture_files: int = 0
+    #: How much of capture_bytes might actually shrink.
+    compressible_bytes: int = 0
     skipped_bytes: int = 0
     skipped_files: int = 0
     item_count: int = 0
@@ -342,6 +347,7 @@ class ScanResult:
             if item.action is Action.CAPTURE:
                 totals.capture_bytes += item.size_bytes
                 totals.capture_files += item.file_count
+                totals.compressible_bytes += item.compressible_bytes
             elif item.action is Action.MANUAL:
                 totals.manual_item_count += 1
             totals.skipped_bytes += item.skipped_bytes

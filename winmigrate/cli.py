@@ -27,7 +27,7 @@ from rich.progress import (
     TransferSpeedColumn,
 )
 
-from . import __version__, capture as capture_mod, logging_setup, presets, report, restore as restore_mod, vss
+from . import __version__, capture as capture_mod, compression as compression_mod, logging_setup, presets, report, restore as restore_mod, vss
 from .config import ScanConfig, config_from_dict, load_config_file
 from .util import humanize
 from .errors import ConfigError, WinMigrateError
@@ -143,6 +143,14 @@ def _add_capture_arguments(parser: argparse.ArgumentParser) -> None:
         dest="space_check",
         action="store_false",
         help="write even if the destination looks too small",
+    )
+    parser.add_argument(
+        "--compression",
+        choices=compression_mod.CHOICES,
+        default="auto",
+        help="auto (compress only when the data can actually shrink), none, fast "
+        "or best. Most profiles are mostly photos and video, which gzip cannot "
+        "shrink; auto skips it there and the capture runs several times faster",
     )
     parser.add_argument(
         "--yes", action="store_true", help="do not ask for confirmation before writing"
@@ -429,6 +437,7 @@ def cmd_capture(args: argparse.Namespace, console: Console) -> int:
         passphrase=passphrase,
         use_vss=args.use_vss,
         skip_space_check=not args.space_check,
+        compression=getattr(args, "compression", "auto"),
     )
 
     with Progress(

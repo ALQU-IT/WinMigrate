@@ -31,6 +31,7 @@ from pathlib import Path
 
 from . import __version__
 from . import bundle as bundle_mod
+from . import compression as compression_mod
 from . import crypto, manifest as manifest_mod, vss
 from .config import ScanConfig
 from .errors import WinMigrateError
@@ -62,6 +63,8 @@ class CaptureOptions:
     passphrase: str
     use_vss: bool = True
     skip_space_check: bool = False
+    #: "auto" | "none" | "fast" | "best"; see winmigrate.compression.
+    compression: str = "auto"
 
 
 @dataclass(slots=True)
@@ -75,6 +78,7 @@ class CaptureReport:
     bundle_bytes: int = 0
     duration_seconds: float = 0.0
     used_shadow_copy: bool = False
+    compression: str = compression_mod.GZIP
     failures: list[tuple[str, str]] = field(default_factory=list)
     #: Files that changed while being read. They are in the bundle at their
     #: declared length, but their contents were caught mid-write.
@@ -164,6 +168,19 @@ def capture(
 
     shadow = _open_shadow_copy(scan, options, report)
 
+    algorithm, level = compression_mod.choose(
+        options.compression, totals.compressible_bytes, totals.capture_bytes
+    )
+    report.compression = algorithm
+    report.notes.append(
+        Note(
+            Severity.INFO,
+            compression_mod.explain(
+                algorithm, totals.compressible_bytes, totals.capture_bytes
+            ),
+        )
+    )
+
     kdf = crypto.default_kdf_params()
     header = {
         "format": manifest_mod.BUNDLE_FORMAT_VERSION,
@@ -171,7 +188,8 @@ def capture(
         "tool": {"name": "winmigrate", "version": __version__},
         "created_utc": utcnow(),
         "cipher": manifest_mod.CIPHER,
-        "compression": manifest_mod.DEFAULT_COMPRESSION,
+        "compression": algorithm,
+        "compression_level": level,
         "kdf": crypto.kdf_params_to_json(kdf),
     }
 
@@ -200,7 +218,7 @@ def capture(
 
     info = manifest_mod.BundleInfo(
         filename=output.name,
-        compression=manifest_mod.DEFAULT_COMPRESSION,
+        compression=algorithm,
         kdf=crypto.kdf_params_to_json(kdf),
         salt=kdf.salt,
         ciphertext_sha256=result.ciphertext_sha256,

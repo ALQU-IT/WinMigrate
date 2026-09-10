@@ -463,7 +463,10 @@
           "const": "AES-256-GCM"
         },
         "compression": {
-          "type": "string"
+          "enum": [
+            "gzip",
+            "none"
+          ]
         },
         "kdf": {
           "type": "object",

@@ -31,6 +31,7 @@ from ..models import (
     utcnow,
 )
 from ..platform_win import KNOWN_FOLDERS, Environment
+from .. import compression
 from ..util import paths as pathutil
 from . import syncroots as syncroots_mod
 from .userfiles import TreeMeasurement, measure_tree
@@ -240,6 +241,7 @@ def _item_from_measurement(
         archive_path=archive_path,
         size_bytes=measurement.size_bytes,
         file_count=measurement.file_count,
+        compressible_bytes=measurement.compressible_bytes,
         skipped=list(measurement.skipped),
         notes=list(measurement.notes),
         restore=RestoreSpec(target=restore_target, strategy=RestoreStrategy.MERGE),
@@ -479,11 +481,14 @@ def _measure_capture_items(items: list[Item], config: ScanConfig, env: Environme
             measurement = measure_tree(source, config, env, relative_base=env.profile_root)
             item.size_bytes = measurement.size_bytes
             item.file_count = measurement.file_count
+            item.compressible_bytes = measurement.compressible_bytes
             item.skipped = list(measurement.skipped)
         elif item.kind is Kind.FILE:
             try:
                 item.size_bytes = os.stat(pathutil.extended(source)).st_size
                 item.file_count = 1
+                if not compression.is_incompressible(source.name):
+                    item.compressible_bytes = item.size_bytes
             except OSError:
                 item.action = Action.SKIP
                 item.skip_reason = SkipReason.UNREADABLE
