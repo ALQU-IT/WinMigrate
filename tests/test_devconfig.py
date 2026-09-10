@@ -122,7 +122,7 @@ def test_the_bundle_sidecar_written_by_capture_does_not_name_secret_files(tmp_pa
     scan = run_scan(config, env)
     bundle = tmp_path / "b.dat"
     capture_mod.capture(scan, CaptureOptions(output=bundle, passphrase=PASSPHRASE, use_vss=False), config, env)
-    sidecar = bundle.with_suffix(".manifest.json").read_text()
+    sidecar = bundle.with_suffix(".manifest.json").read_text(encoding="utf-8")
     # As above: titles are public; secret values, filenames and paths are not.
     for needle in (".ssh/", ".aws/", "id_rsa", "SHHH", "aws_secret_access_key"):
         assert needle not in sidecar

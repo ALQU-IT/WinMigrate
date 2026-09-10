@@ -195,6 +195,22 @@ def test_importing_the_gui_package_does_not_need_tkinter():
 
 
 # --- the window itself -----------------------------------------------------
+def _app_source() -> str:
+    """The window's source, read the only way that works on both platforms.
+
+    ``read_text()`` with no encoding uses the locale's -- cp1252 on a Windows
+    runner -- and app.py contains the box-drawing characters the tick column is
+    made of. Located through the module rather than the working directory,
+    because pytest does not promise to run from the repository root.
+    """
+    import importlib.util
+    from pathlib import Path as _Path
+
+    spec = importlib.util.find_spec("winmigrate.gui.app")
+    assert spec and spec.origin
+    return _Path(spec.origin).read_text(encoding="utf-8")
+
+
 def stub_tkinter(monkeypatch):
     """Enough of tkinter to import the window without a display.
 
@@ -239,10 +255,8 @@ def test_every_event_a_worker_emits_is_handled(monkeypatch):
     sits at "Scanning…" forever with no error, which is the worst way for this
     to fail."""
     import ast
-    from pathlib import Path as _Path
 
-    source = _Path("winmigrate/gui/app.py").read_text()
-    tree = ast.parse(source)
+    tree = ast.parse(_app_source())
 
     emitted = set()
     for node in ast.walk(tree):

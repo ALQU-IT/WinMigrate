@@ -24,10 +24,10 @@ def chromium_extension(
         manifest = {"name": "__MSG_extName__", "version": version, "default_locale": "en"}
         locale = version_dir / "_locales" / "en"
         locale.mkdir(parents=True)
-        (locale / "messages.json").write_text(json.dumps({"extName": {"message": name}}))
+        (locale / "messages.json").write_text(json.dumps({"extName": {"message": name}}), encoding="utf-8")
     else:
         manifest = {"name": name, "version": version}
-    (version_dir / "manifest.json").write_text(json.dumps(manifest))
+    (version_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     return version_dir
 
 
@@ -114,10 +114,10 @@ def test_firefox_lists_the_users_addons_and_not_mozillas(tmp_path: Path):
                 ]
             }
         )
-    )
+, encoding="utf-8")
     data = profile / "browser-extension-data" / "uBlock0@raymondhill.net"
     data.mkdir(parents=True)
-    (data / "storage.js").write_text('{"myFilters": "custom rules"}')
+    (data / "storage.js").write_text('{"myFilters": "custom rules"}', encoding="utf-8")
 
     found = extensions.inventory(profile, "firefox")
     assert [e.name for e in found] == ["uBlock Origin"]
@@ -131,17 +131,17 @@ def test_unreadable_or_malformed_manifests_do_not_break_the_scan(tmp_path: Path)
     profile = tmp_path / "Default"
     profile.mkdir()
     (profile / "Extensions").mkdir()
-    (profile / "Extensions" / "loose-file.txt").write_text("not a directory")
+    (profile / "Extensions" / "loose-file.txt").write_text("not a directory", encoding="utf-8")
     broken = profile / "Extensions" / ("d" * 32) / "1.0_0"
     broken.mkdir(parents=True)
-    (broken / "manifest.json").write_text("{not json")
+    (broken / "manifest.json").write_text("{not json", encoding="utf-8")
     chromium_extension(profile, "e" * 32, "Good One", "2.0")
 
     assert [e.name for e in extensions.inventory(profile, "chromium")] == ["Good One"]
 
     firefox = tmp_path / "ff"
     firefox.mkdir()
-    (firefox / "extensions.json").write_text("<html>not json</html>")
+    (firefox / "extensions.json").write_text("<html>not json</html>", encoding="utf-8")
     assert extensions.inventory(firefox, "firefox") == []
 
 
@@ -149,7 +149,7 @@ def test_no_extensions_means_no_followup_and_no_note(tmp_path: Path):
     root = tmp_path / "alice"
     profile = root / "AppData" / "Local" / "Google" / "Chrome" / "User Data" / "Default"
     profile.mkdir(parents=True)
-    (profile / "Preferences").write_text(json.dumps({"profile": {"name": "P"}}))
+    (profile / "Preferences").write_text(json.dumps({"profile": {"name": "P"}}), encoding="utf-8")
 
     _items, followups, _notes = browsers.scan_browsers(Environment.fixture(root, {}))
     assert not any(f.id.startswith("browser:extensions:") for f in followups)
@@ -165,7 +165,7 @@ def test_the_followup_names_each_extension_and_says_reinstalling_is_expected(tmp
     root = tmp_path / "alice"
     profile = root / "AppData" / "Local" / "Google" / "Chrome" / "User Data" / "Default"
     profile.mkdir(parents=True)
-    (profile / "Preferences").write_text(json.dumps({"profile": {"name": "P"}}))
+    (profile / "Preferences").write_text(json.dumps({"profile": {"name": "P"}}), encoding="utf-8")
     chromium_extension(profile, "f" * 32, "uBlock Origin", "1.60.0")
     settings = profile / "Local Extension Settings" / ("f" * 32)
     settings.mkdir(parents=True)

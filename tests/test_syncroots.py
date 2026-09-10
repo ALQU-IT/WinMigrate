@@ -44,7 +44,7 @@ def test_nextcloud_is_detected_from_appdata(profile: Path):
     config.parent.mkdir(parents=True, exist_ok=True)
     config.write_text(
         "[Accounts]\n0\\Folders\\1\\localPath=%s\n" % (profile / "Nextcloud").as_posix()
-    )
+, encoding="utf-8")
     (profile / "Nextcloud").mkdir()
     env = Environment.fixture(profile, {})
     providers = {root.provider for root in syncroots.detect(env)}

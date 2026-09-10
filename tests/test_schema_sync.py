@@ -26,7 +26,7 @@ SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schema" / "manifest.sche
 
 @pytest.fixture(scope="module")
 def schema() -> dict:
-    return json.loads(SCHEMA_PATH.read_text())
+    return json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
 
 
 def at(schema: dict, *path):

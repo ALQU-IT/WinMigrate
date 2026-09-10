@@ -23,7 +23,7 @@ def chrome_profile(root: Path, *, sync: bool, email: str | None = "me@example.co
         prefs["account_info"] = [{"email": email}]
     if sync:
         prefs["sync"] = {"requested": True}
-    (prof / "Preferences").write_text(json.dumps(prefs))
+    (prof / "Preferences").write_text(json.dumps(prefs), encoding="utf-8")
     return Environment.fixture(root, {})
 
 
@@ -59,7 +59,7 @@ def test_a_file_that_is_not_a_password_csv_is_rejected():
 
 def test_a_password_item_is_secret_and_never_parsed(tmp_path: Path):
     csv = tmp_path / "pw.csv"
-    csv.write_text("url,username,password\nhttps://x,me,SUPERSECRET\n")
+    csv.write_text("url,username,password\nhttps://x,me,SUPERSECRET\n", encoding="utf-8")
     target = passwords.ExportTarget("chrome", "Google Chrome", "chromium", "chrome://x")
     item = passwords.build_password_item(target, csv)
     assert item.category is Category.BROWSER_PASSWORDS
@@ -70,7 +70,7 @@ def test_a_password_item_is_secret_and_never_parsed(tmp_path: Path):
 
 def test_the_password_csv_is_redacted_in_the_public_sidecar(tmp_path: Path):
     csv = tmp_path / "pw.csv"
-    csv.write_text("url,username,password\nhttps://bank,me,SUPERSECRET\n")
+    csv.write_text("url,username,password\nhttps://bank,me,SUPERSECRET\n", encoding="utf-8")
     target = passwords.ExportTarget("chrome", "Google Chrome", "chromium", "chrome://x")
     result = ScanResult(source=manifest_mod.detect_source_machine(str(tmp_path)))
     result.items.append(passwords.build_password_item(target, csv))
@@ -94,7 +94,7 @@ def test_the_import_followup_names_the_file_and_says_to_delete_it():
 
 def test_shred_overwrites_and_removes(tmp_path: Path):
     csv = tmp_path / "pw.csv"
-    csv.write_text("url,username,password\nhttps://x,me,SECRET\n")
+    csv.write_text("url,username,password\nhttps://x,me,SECRET\n", encoding="utf-8")
     assert passwords.shred(csv) is True
     assert not csv.exists()
 
@@ -134,7 +134,7 @@ def test_the_exported_csv_does_not_also_travel_as_an_ordinary_file(tmp_path: Pat
     (profile / "Downloads" / "installer.exe").write_bytes(b"x" * 100)
     chrome = profile / "AppData" / "Local" / "Google" / "Chrome" / "User Data" / "Default"
     chrome.mkdir(parents=True)
-    (chrome / "Preferences").write_text('{"profile": {"name": "P"}, "account_info": []}')
+    (chrome / "Preferences").write_text('{"profile": {"name": "P"}, "account_info": []}', encoding="utf-8")
 
     env = Environment.fixture(profile, {})
     config = ScanConfig(profile_root=profile, include_software=False)
@@ -142,7 +142,7 @@ def test_the_exported_csv_does_not_also_travel_as_an_ordinary_file(tmp_path: Pat
 
     # The user exports now, after the scan, into the folder the dialog offers.
     csv = profile / "Downloads" / "Chrome Passwords.csv"
-    csv.write_text("name,url,username,password\nBank,https://bank.example,alice,hunter2\n")
+    csv.write_text("name,url,username,password\nBank,https://bank.example,alice,hunter2\n", encoding="utf-8")
     target = next(iter(passwords_mod.export_targets(env)))
     scan.items.append(passwords_mod.build_password_item(target, csv))
 
@@ -161,7 +161,7 @@ def test_the_exported_csv_does_not_also_travel_as_an_ordinary_file(tmp_path: Pat
     holding = {
         str(f.relative_to(destination))
         for f in destination.rglob("*")
-        if f.is_file() and "hunter2" in f.read_text(errors="replace")
+        if f.is_file() and "hunter2" in f.read_text(errors="replace", encoding="utf-8")
     }
     # Exactly one copy, in the one place the follow-up tells the user to clear.
     assert holding == {str(Path("WinMigrate-Passwords") / "chrome-passwords.csv")}

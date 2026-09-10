@@ -216,7 +216,7 @@ def _cell(value: Any) -> str:
     included, and one of those turns the rest of the table into loose text.
     """
     text = str(value if value is not None else "")
-    return " ".join(text.split()).replace("|", "\|")
+    return " ".join(text.split()).replace("|", r"\|")
 
 
 def _table_rows(applications: list[dict[str, Any]]) -> list[str]:

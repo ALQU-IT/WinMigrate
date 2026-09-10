@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import sys
+
 import pytest
 from conftest import snapshot
 
@@ -35,7 +37,7 @@ def test_save_plan_writes_json_and_nothing_else(profile: Path, tmp_path: Path):
     plan_path = tmp_path / "plans" / "plan.json"
     before = snapshot(profile)
     assert run(["--save-plan", str(plan_path), "--quiet"], profile) == 0
-    assert json.loads(plan_path.read_text())["items"]
+    assert json.loads(plan_path.read_text(encoding="utf-8"))["items"]
     assert snapshot(profile) == before, "scan must not touch the profile it inspects"
 
 
@@ -58,7 +60,7 @@ def test_files_only_mode_is_recorded_in_the_plan(profile: Path, capsys):
 
 def test_config_file_options_are_applied(profile: Path, tmp_path: Path, capsys):
     config = tmp_path / "conf.json"
-    config.write_text(json.dumps({"include_regenerable": True}))
+    config.write_text(json.dumps({"include_regenerable": True}), encoding="utf-8")
     main(["scan", "--profile-root", str(profile), "--config", str(config), "--json"])
     payload = json.loads(capsys.readouterr().out)
     documents = next(i for i in payload["items"] if i["id"] == "files:documents")
@@ -67,7 +69,7 @@ def test_config_file_options_are_applied(profile: Path, tmp_path: Path, capsys):
 
 def test_a_bad_config_file_exits_with_an_error_not_a_traceback(profile: Path, tmp_path: Path, capsys):
     config = tmp_path / "conf.json"
-    config.write_text("{oops")
+    config.write_text("{oops", encoding="utf-8")
     code = main(["scan", "--profile-root", str(profile), "--config", str(config)])
     assert code == 2
     assert "error:" in capsys.readouterr().out
@@ -76,10 +78,14 @@ def test_a_bad_config_file_exits_with_an_error_not_a_traceback(profile: Path, tm
 def test_log_file_is_written_when_asked(profile: Path, tmp_path: Path):
     log_path = tmp_path / "run.log"
     run(["--quiet", "-v"], profile, extra=["--log-file", str(log_path)])
-    assert "sync root" in log_path.read_text()
+    assert "sync root" in log_path.read_text(encoding="utf-8")
 
 
 def test_require_windows_refuses_without_the_development_override(monkeypatch):
+    # The guard's whole job is to refuse on a non-Windows host, so the test has
+    # to be one. On a Windows runner it correctly does not raise, which is the
+    # opposite of what is being asserted here.
+    monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.delenv("WINMIGRATE_ALLOW_NON_WINDOWS", raising=False)
     with pytest.raises(PlatformError, match="runs on Windows"):
         require_windows()

@@ -47,7 +47,7 @@ def test_extra_excludes_are_applied():
 
 def test_config_file_round_trip(tmp_path: Path):
     path = tmp_path / "winmigrate.json"
-    path.write_text(json.dumps({"include_regenerable": True, "extra_excludes": ["*.iso"]}))
+    path.write_text(json.dumps({"include_regenerable": True, "extra_excludes": ["*.iso"]}), encoding="utf-8")
     config = config_from_dict(load_config_file(path))
     assert config.include_regenerable is True
     assert config.extra_excludes == ("*.iso",)
@@ -66,6 +66,6 @@ def test_missing_config_file_is_reported_clearly(tmp_path: Path):
 
 def test_invalid_json_is_reported_clearly(tmp_path: Path):
     path = tmp_path / "bad.json"
-    path.write_text("{not json")
+    path.write_text("{not json", encoding="utf-8")
     with pytest.raises(ConfigError, match="not valid JSON"):
         load_config_file(path)

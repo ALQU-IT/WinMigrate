@@ -82,7 +82,7 @@ def test_per_user_fonts_are_captured_as_a_tree(tmp_path: Path):
 def test_outlook_signatures_and_pst_are_captured_but_ost_is_not(tmp_path: Path):
     sig = tmp_path / "AppData" / "Roaming" / "Microsoft" / "Signatures"
     sig.mkdir(parents=True)
-    (sig / "mine.htm").write_text("<p>Regards</p>")
+    (sig / "mine.htm").write_text("<p>Regards</p>", encoding="utf-8")
     outlook = tmp_path / "AppData" / "Local" / "Microsoft" / "Outlook"
     outlook.mkdir(parents=True)
     (outlook / "archive.pst").write_bytes(b"MAIL")
@@ -120,7 +120,7 @@ def test_settings_land_where_their_restore_spec_says_they_will(tmp_path: Path):
     (fonts / "MyFont.ttf").write_bytes(b"font")
     sig = tmp_path / "AppData" / "Roaming" / "Microsoft" / "Signatures"
     sig.mkdir(parents=True)
-    (sig / "mine.htm").write_text("<p>Regards</p>")
+    (sig / "mine.htm").write_text("<p>Regards</p>", encoding="utf-8")
     outlook = tmp_path / "AppData" / "Local" / "Microsoft" / "Outlook"
     outlook.mkdir(parents=True)
     (outlook / "archive.pst").write_bytes(b"MAIL")
@@ -131,6 +131,12 @@ def test_settings_land_where_their_restore_spec_says_they_will(tmp_path: Path):
         "%APPDATA%": "/dest/AppData/Roaming",
         "%USERPROFILE%": "/dest",
     }
+
+    def as_path(text: str) -> Path:
+        """Compare paths, not strings: str(Path) uses the host's separator, so a
+        POSIX-shaped expectation fails on Windows for a placement that is
+        actually correct."""
+        return Path(text)
     items, _ = syssettings.scan_system_settings(Environment.fixture(tmp_path, {}))
     checked = 0
     for entry in items:
@@ -139,7 +145,7 @@ def test_settings_land_where_their_restore_spec_says_they_will(tmp_path: Path):
         promised = entry.restore.target.replace("\\", "/")
         for name, value in expansions.items():
             promised = promised.replace(name, value)
-        assert str(_target_for(entry.archive_path, destination)) == promised, entry.id
+        assert _target_for(entry.archive_path, destination) == as_path(promised), entry.id
         checked += 1
     assert checked == 3  # fonts, signatures, the .pst
 

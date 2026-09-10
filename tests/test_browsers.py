@@ -172,7 +172,7 @@ def test_round_trip_keeps_content_and_drops_credential_stores(browser_profile: P
     capture_mod.capture(result, CaptureOptions(output=bundle, passphrase=PASSPHRASE, use_vss=False), config, env)
 
     # The sidecar names nothing sensitive.
-    sidecar = bundle.with_suffix(".manifest.json").read_text()
+    sidecar = bundle.with_suffix(".manifest.json").read_text(encoding="utf-8")
     for needle in ("ENCRYPTED-PASSWORD", "SESSION-COOKIES", "me@example.com", "Bookmarks", "History"):
         assert needle not in sidecar
 
@@ -207,7 +207,7 @@ def test_two_profiles_with_the_same_display_name_get_distinct_ids(tmp_path):
     for sub in ("Default", "Profile 1"):
         d = user_data / sub
         d.mkdir(parents=True)
-        (d / "Preferences").write_text(json.dumps({"profile": {"name": "Person 1"}}))
+        (d / "Preferences").write_text(json.dumps({"profile": {"name": "Person 1"}}), encoding="utf-8")
     env = Environment.fixture(root, {})
 
     items, _followups, _notes = browsers.scan_browsers(env)
@@ -235,10 +235,10 @@ def test_a_firefox_profile_outside_the_user_folder_is_not_silently_relocated(tmp
     firefox.mkdir(parents=True)
     outside = tmp_path / "D_drive" / "FFProfiles" / "work"
     outside.mkdir(parents=True)
-    (outside / "prefs.js").write_text('user_pref("browser.startup.page", 3);')
+    (outside / "prefs.js").write_text('user_pref("browser.startup.page", 3);', encoding="utf-8")
     (firefox / "profiles.ini").write_text(
         f"[Profile0]\nName=work\nIsRelative=0\nPath={outside}\n"
-    )
+, encoding="utf-8")
 
     env = Environment.fixture(root, {})
     items, followups, _notes = browsers.scan_browsers(env)
@@ -264,10 +264,10 @@ def test_a_firefox_profile_inside_the_user_folder_is_untouched_by_the_relocation
     root = tmp_path / "Users" / "a"
     profiles = root / "AppData" / "Roaming" / "Mozilla" / "Firefox" / "Profiles" / "abc.default"
     profiles.mkdir(parents=True)
-    (profiles / "prefs.js").write_text('user_pref("x", 1);')
+    (profiles / "prefs.js").write_text('user_pref("x", 1);', encoding="utf-8")
     (profiles.parent.parent / "profiles.ini").write_text(
         "[Profile0]\nName=default\nIsRelative=1\nPath=Profiles/abc.default\n"
-    )
+, encoding="utf-8")
 
     items, followups, _notes = browsers.scan_browsers(Environment.fixture(root, {}))
     item = next(i for i in items if i.category is Category.BROWSER_PROFILE)
@@ -291,7 +291,7 @@ def firefox_profile_with_stores(root: Path) -> Path:
         (profile / name).write_bytes(blob)
     (profile.parent.parent / "profiles.ini").write_text(
         "[Profile0]\nName=default\nIsRelative=1\nPath=Profiles/abc.default\n"
-    )
+, encoding="utf-8")
     return profile
 
 
@@ -357,11 +357,11 @@ def test_extension_code_and_data_both_survive_a_round_trip(tmp_path: Path):
     profile = root / "AppData" / "Local" / "Google" / "Chrome" / "User Data" / "Default"
     profile.mkdir(parents=True)
     (root / "Documents").mkdir(parents=True, exist_ok=True)
-    (profile / "Preferences").write_text(json.dumps({"profile": {"name": "P"}}))
+    (profile / "Preferences").write_text(json.dumps({"profile": {"name": "P"}}), encoding="utf-8")
     ext_id = "a" * 32
     code = profile / "Extensions" / ext_id / "1.60.0_0"
     code.mkdir(parents=True)
-    (code / "manifest.json").write_text(json.dumps({"name": "uBlock Origin", "version": "1.60.0"}))
+    (code / "manifest.json").write_text(json.dumps({"name": "uBlock Origin", "version": "1.60.0"}), encoding="utf-8")
     (code / "background.js").write_bytes(b"the extension itself")
     settings = profile / "Local Extension Settings" / ext_id
     settings.mkdir(parents=True)

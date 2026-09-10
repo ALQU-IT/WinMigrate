@@ -108,7 +108,7 @@ def build_bundle(path: Path, members: dict[str, bytes], manifest: dict) -> None:
         "sha256": writer.result.ciphertext_sha256,
         "size_bytes": writer.result.ciphertext_size,
     }
-    path.with_suffix(".manifest.json").write_text(manifest_mod.dumps(sidecar))
+    path.with_suffix(".manifest.json").write_text(manifest_mod.dumps(sidecar), encoding="utf-8")
 
 
 def minimal_manifest(items: list[dict]) -> dict:

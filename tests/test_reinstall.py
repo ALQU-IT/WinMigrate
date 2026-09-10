@@ -68,13 +68,13 @@ def test_artifacts_are_written_for_software_and_office(tmp_path: Path):
 def test_the_import_file_is_wingets_own_export_verbatim(tmp_path: Path):
     """Replaying winget's export is more reliable than rebuilding one."""
     artifacts = reinstall.write_artifacts(manifest_with(("software", SOFTWARE_RECORD)), tmp_path)
-    written = json.loads(artifacts.winget_import.read_text())
+    written = json.loads(artifacts.winget_import.read_text(encoding="utf-8"))
     assert written == SOFTWARE_RECORD["winget_export"]
 
 
 def test_applications_winget_cannot_handle_are_listed_not_dropped(tmp_path: Path):
     artifacts = reinstall.write_artifacts(manifest_with(("software", SOFTWARE_RECORD)), tmp_path)
-    text = artifacts.manual_list.read_text()
+    text = artifacts.manual_list.read_text(encoding="utf-8")
     assert "Bespoke Tool" in text
     assert "Mozilla Firefox" not in text
     # The list is a prompt to decide, not an instruction to reinstall everything.
@@ -101,7 +101,7 @@ def test_a_manifest_without_software_writes_no_directory(tmp_path: Path):
 
 def test_the_office_configuration_matches_the_captured_installation(tmp_path: Path):
     artifacts = reinstall.write_artifacts(manifest_with(("office", OFFICE_RECORD)), tmp_path)
-    xml = artifacts.office_configuration.read_text()
+    xml = artifacts.office_configuration.read_text(encoding="utf-8")
     assert 'OfficeClientEdition="64"' in xml
     assert 'Channel="Current"' in xml
     assert 'ID="O365ProPlusRetail"' in xml
@@ -124,7 +124,7 @@ def test_winget_import_is_invoked_with_flags_that_survive_one_bad_package(tmp_pa
         return CommandResult(command, 0, stdout="done")
 
     import_file = tmp_path / "winget-import.json"
-    import_file.write_text("{}")
+    import_file.write_text("{}", encoding="utf-8")
     result = reinstall.run_winget_import(import_file, runner=fake_runner)
     assert result.ok
     assert "--ignore-unavailable" in recorded["command"]
@@ -140,9 +140,9 @@ def test_office_setup_is_invoked_with_the_configure_switch(tmp_path: Path):
         return CommandResult(command, 0)
 
     setup = tmp_path / "setup.exe"
-    setup.write_text("")
+    setup.write_text("", encoding="utf-8")
     configuration = tmp_path / "configuration.xml"
-    configuration.write_text("<Configuration/>")
+    configuration.write_text("<Configuration/>", encoding="utf-8")
     reinstall.run_office_install(setup, configuration, runner=fake_runner)
     assert recorded["command"] == [str(setup), "/configure", str(configuration)]
 
@@ -153,7 +153,7 @@ def test_a_pipe_in_an_application_name_cannot_break_the_markdown_table(tmp_path:
     artifacts = reinstall.write_artifacts(manifest_with(("software", record)), tmp_path)
     line = [
         row
-        for row in artifacts.manual_list.read_text().splitlines()
+        for row in artifacts.manual_list.read_text(encoding="utf-8").splitlines()
         if "Weird" in row
     ][0]
     assert line.count("|") == 4 + 3  # four cell separators plus three escaped pipes
@@ -180,7 +180,7 @@ def test_runtimes_are_separated_from_things_that_need_a_person(tmp_path: Path):
     assert artifacts.manual_count == 1
     assert artifacts.component_count == 2
 
-    text = artifacts.manual_list.read_text()
+    text = artifacts.manual_list.read_text(encoding="utf-8")
     body, components = text.split("## Runtimes and drivers")
     assert "ACME Bespoke Suite" in body
     assert "Visual C++" not in body
@@ -191,7 +191,7 @@ def test_runtimes_are_separated_from_things_that_need_a_person(tmp_path: Path):
 def test_the_manual_list_says_how_many_winget_will_handle(tmp_path: Path):
     """Without the other half of the number, "N by hand" reads as the whole job."""
     artifacts = reinstall.write_artifacts(manifest_with(("software", COMPONENT_RECORD)), tmp_path)
-    text = artifacts.manual_list.read_text()
+    text = artifacts.manual_list.read_text(encoding="utf-8")
     assert "winget can reinstall 1 application(s) on its own" in text
     assert "These 1 it has no package for." in text
 
@@ -210,7 +210,7 @@ def test_launcher_games_get_their_own_section_not_the_by_hand_list(tmp_path: Pat
     artifacts = reinstall.write_artifacts(manifest_with(("software", record)), tmp_path)
     assert artifacts.manual_count == 1
     assert artifacts.launcher_count == 3
-    text = artifacts.manual_list.read_text()
+    text = artifacts.manual_list.read_text(encoding="utf-8")
     body, games = text.split("## Games (return through their launcher)")
     assert "ACME Bespoke Suite" in body
     assert "Counter-Strike 2" not in body
@@ -259,7 +259,7 @@ def test_a_manifest_entry_with_a_newline_cannot_break_the_manual_table(tmp_path)
     }
     artifacts = reinstall.write_artifacts(manifest, tmp_path)
     rows = [
-        line for line in artifacts.manual_list.read_text().splitlines() if line.startswith("|")
+        line for line in artifacts.manual_list.read_text(encoding="utf-8").splitlines() if line.startswith("|")
     ]
     assert len(rows) == 4  # header, rule, and one row per application
     assert "| Line1 Line2 \\| x | 1 | P |" in rows

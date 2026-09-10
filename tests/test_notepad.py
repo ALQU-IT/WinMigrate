@@ -31,7 +31,7 @@ def local_state(root: Path) -> Path:
 def build_session(root: Path, tabs: int = 2) -> Path:
     """A profile with Notepad holding `tabs` unsaved tabs."""
     (root / "Documents").mkdir(parents=True, exist_ok=True)
-    (root / "Documents" / "saved.txt").write_text("an ordinary file")
+    (root / "Documents" / "saved.txt").write_text("an ordinary file", encoding="utf-8")
     state = local_state(root)
     tab_state = state / "TabState"
     tab_state.mkdir(parents=True)
@@ -116,11 +116,11 @@ def test_round_trip_puts_the_session_back_where_notepad_looks(tmp_path: Path):
     )
 
     # The plaintext sidecar must describe it without naming or revealing it.
-    sidecar = json.loads((tmp_path / "b.manifest.json").read_text())
+    sidecar = json.loads((tmp_path / "b.manifest.json").read_text(encoding="utf-8"))
     entry = next(i for i in sidecar["items"] if i["id"] == "notepad:session")
     assert entry["redacted"] is True
     assert "source_path" not in entry and "archive_path" not in entry
-    assert "unsaved note" not in (tmp_path / "b.manifest.json").read_text()
+    assert "unsaved note" not in (tmp_path / "b.manifest.json").read_text(encoding="utf-8")
 
     destination = tmp_path / "restored"
     result = restore_mod.restore(
@@ -265,11 +265,11 @@ def notepadpp(root: Path, unsaved: int = 2) -> Path:
     for index in range(unsaved):
         (config / "backup" / f"new {index + 1}@2026-09-10_12000{index}").write_text(
             f"unsaved buffer {index}"
-        )
-    (config / "session.xml").write_text("<NotepadPlus><Session/></NotepadPlus>")
-    (config / "config.xml").write_text("<NotepadPlus/>")
+, encoding="utf-8")
+    (config / "session.xml").write_text("<NotepadPlus><Session/></NotepadPlus>", encoding="utf-8")
+    (config / "config.xml").write_text("<NotepadPlus/>", encoding="utf-8")
     (config / "themes").mkdir()
-    (config / "themes" / "Dark.xml").write_text("<x/>")
+    (config / "themes" / "Dark.xml").write_text("<x/>", encoding="utf-8")
     return config
 
 
@@ -297,7 +297,7 @@ def test_notepad_plus_plus_with_no_unsaved_buffers_still_carries_the_settings(
     root = tmp_path / "alice"
     (root / "Documents").mkdir(parents=True)
     config = notepadpp(root, unsaved=0)
-    (config / "backup" / "stale").write_text("")  # empty: not a buffer
+    (config / "backup" / "stale").write_text("", encoding="utf-8")  # empty: not a buffer
 
     items, _ = notepad.scan_notepad(Environment.fixture(root, {}))
     item = next(i for i in items if i.id == "notepadpp:session")

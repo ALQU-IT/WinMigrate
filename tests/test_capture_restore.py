@@ -50,7 +50,7 @@ def test_capture_writes_a_bundle_and_a_sidecar(captured):
 
 def test_the_sidecar_records_a_digest_that_matches_the_bundle(captured):
     report, _scan = captured
-    sidecar = json.loads(report.manifest_path.read_text())
+    sidecar = json.loads(report.manifest_path.read_text(encoding="utf-8"))
     expected = sidecar["bundle"]["ciphertext"]["sha256"]
     bundle_mod.verify_ciphertext(report.bundle_path, expected)  # must not raise
 
@@ -320,10 +320,13 @@ def test_the_dry_run_report_says_nothing_was_written(captured, tmp_path: Path):
     )
     console = Console(record=True, width=120)
     report_mod.render_restore_report(result, console)
-    text = console.export_text()
+    # Collapsed, because rich wraps to the console width and a long temp path
+    # pushes the sentence over a line break -- which is a fact about the
+    # terminal, not about what the report says.
+    text = " ".join(console.export_text().split())
     assert "Dry run" in text and "nothing was written" in text.lower()
     assert "Restore complete" not in text
-    assert "not created" in text
+    assert "was not created" in text
     assert str(destination) in text
 
 
@@ -419,9 +422,9 @@ def test_the_bundle_is_left_out_of_its_own_capture(tmp_path: Path):
     """
     profile = tmp_path / "alice"
     (profile / "Desktop").mkdir(parents=True)
-    (profile / "Desktop" / "note.txt").write_text("real user data")
+    (profile / "Desktop" / "note.txt").write_text("real user data", encoding="utf-8")
     # An unrelated file that merely shares the sidecar's suffix must still travel.
-    (profile / "Desktop" / "notes.manifest.json").write_text('{"mine": true}')
+    (profile / "Desktop" / "notes.manifest.json").write_text('{"mine": true}', encoding="utf-8")
 
     env = Environment.fixture(profile, {})
     config = ScanConfig(profile_root=profile, include_software=False)
@@ -450,10 +453,10 @@ def test_recapturing_over_last_weeks_bundle_does_not_swallow_it(tmp_path: Path):
     -- otherwise the restore reports corruption that is not there."""
     profile = tmp_path / "alice"
     (profile / "Desktop").mkdir(parents=True)
-    (profile / "Desktop" / "note.txt").write_text("real user data")
+    (profile / "Desktop" / "note.txt").write_text("real user data", encoding="utf-8")
     output = profile / "Desktop" / "backup.dat"
     output.write_bytes(b"LAST-WEEKS-BUNDLE" * 100)
-    (profile / "Desktop" / "backup.manifest.json").write_text('{"old": true}')
+    (profile / "Desktop" / "backup.manifest.json").write_text('{"old": true}', encoding="utf-8")
 
     env = Environment.fixture(profile, {})
     config = ScanConfig(profile_root=profile, include_software=False)
@@ -482,14 +485,14 @@ def test_a_file_the_snapshot_predates_is_read_from_the_live_volume(tmp_path: Pat
     """
     profile = tmp_path / "alice"
     (profile / "Documents").mkdir(parents=True)
-    (profile / "Documents" / "steady.txt").write_text("was there all along")
-    (profile / "Documents" / "new.txt").write_text("created after the snapshot")
+    (profile / "Documents" / "steady.txt").write_text("was there all along", encoding="utf-8")
+    (profile / "Documents" / "new.txt").write_text("created after the snapshot", encoding="utf-8")
 
     # A snapshot that has the profile but not the newer file, exactly as a
     # real one taken moments earlier would be.
     snapshot = tmp_path / "snap"
     (snapshot / "Documents").mkdir(parents=True)
-    (snapshot / "Documents" / "steady.txt").write_text("was there all along")
+    (snapshot / "Documents" / "steady.txt").write_text("was there all along", encoding="utf-8")
 
     class Snapshot:
         def map(self, path):
@@ -524,7 +527,7 @@ def test_a_file_that_is_in_neither_is_reported_as_vanished_not_as_a_failure(tmp_
     skim past the list that does matter."""
     profile = tmp_path / "alice"
     (profile / "Documents").mkdir(parents=True)
-    (profile / "Documents" / "022352.log").write_text("leveldb scratch")
+    (profile / "Documents" / "022352.log").write_text("leveldb scratch", encoding="utf-8")
 
     env = Environment.fixture(profile, {})
     config = ScanConfig(profile_root=profile, include_software=False)
