@@ -316,9 +316,21 @@ def _target_for(archive_name: str, destination: Path) -> Path | None:
 def _check_digests(report: RestoreReport, written: dict[str, str]) -> None:
     """Compare what we wrote against the digests the manifest recorded."""
     manifest = report.manifest or {}
+    from .util.hashing import tree_digest  # noqa: PLC0415
+
     for item in manifest.get("items", []):
         archive_path = item.get("archive_path")
-        if not archive_path or not item.get("digest"):
+        recorded = item.get("digest")
+        if not archive_path or not recorded:
+            continue
+        if item.get("kind") == "file":
+            # A single-file item's archive name is its path exactly; there is no
+            # trailing "/". Compare the plain file digest, not a tree digest --
+            # otherwise a corrupt single file passes verification unchecked.
+            actual = written.get(archive_path)
+            if actual is not None and actual != recorded:
+                report.digest_mismatches.append(item["id"])
+                log.error("digest mismatch for item %s", item["id"])
             continue
         pairs = [
             (name[len(archive_path) + 1 :], digest)
@@ -327,9 +339,7 @@ def _check_digests(report: RestoreReport, written: dict[str, str]) -> None:
         ]
         if not pairs:
             continue
-        from .util.hashing import tree_digest  # noqa: PLC0415
-
-        if tree_digest(pairs) != item["digest"]:
+        if tree_digest(pairs) != recorded:
             report.digest_mismatches.append(item["id"])
             log.error("digest mismatch for item %s", item["id"])
 

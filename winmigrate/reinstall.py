@@ -84,7 +84,12 @@ def write_artifacts(manifest: dict[str, Any], destination: Path) -> Artifacts:
             for app in applications
             if not app.get("winget_id") and app.get("component") and not app.get("managed_by")
         ]
-        launcher_games = [app for app in applications if app.get("managed_by")]
+        # Exclude anything winget can reinstall: a launcher app carries its own
+        # package and belongs in the import, not the "returns with the launcher"
+        # list, even if a heuristic also tagged it managed_by.
+        launcher_games = [
+            app for app in applications if app.get("managed_by") and not app.get("winget_id")
+        ]
         artifacts.manual_count = len(manual)
         artifacts.component_count = len(components)
         artifacts.launcher_count = len(launcher_games)

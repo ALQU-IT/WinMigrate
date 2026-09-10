@@ -53,30 +53,34 @@ UPDATE_NAME_PATTERN = re.compile(
     r"^(kb\d{6,}|update for |security update for |hotfix for |definition update)", re.IGNORECASE
 )
 
-#: Game launchers, identified by what their uninstall/install strings point at.
-#: A title installed through one of these re-downloads when the user signs in,
-#: so it belongs in its own list rather than among applications to reinstall.
-#: Ordered most- to least-specific; the first match wins.
+#: How a *game* installed through a launcher uninstalls itself. Deliberately
+#: keyed on the uninstall command a title carries -- ``steam://uninstall/<id>``,
+#: ``com.epicgames.launcher://...?action=uninstall``, ``--uninstall-product`` --
+#: and on game-only install folders (``\EA Games\``, ``\GOG Games\``), never
+#: on a launcher's own program folder. Matching ``\Epic Games\`` or
+#: ``\Riot Games\`` would tag the launcher application itself, which is exactly
+#: the thing that must stay in the reinstall list. Ordered most- to
+#: least-specific; the first match wins.
 LAUNCHER_SIGNATURES: tuple[tuple[str, "re.Pattern[str]"], ...] = (
-    ("Steam", re.compile(r"steam://|\\steamapps\\|\bsteam\.exe\b", re.IGNORECASE)),
-    ("Epic Games", re.compile(r"com\.epicgames\.launcher|\\epic games\\", re.IGNORECASE)),
-    ("EA app", re.compile(r"\bEA(Desktop| Desktop| app)\b|origin\.exe|\\EA Games\\", re.IGNORECASE)),
-    ("Ubisoft Connect", re.compile(r"uplay://|ubisoft connect|\\ubisoft\\", re.IGNORECASE)),
-    ("Battle.net", re.compile(r"battle\.net", re.IGNORECASE)),
-    ("GOG Galaxy", re.compile(r"goggalaxy|galaxyclient|\\GOG Galaxy\\|\\GOG Games\\", re.IGNORECASE)),
-    ("Rockstar Games", re.compile(r"rockstar games launcher|\\Rockstar Games\\", re.IGNORECASE)),
-    ("Riot Client", re.compile(r"riotclientservices|\\Riot Games\\", re.IGNORECASE)),
-    ("Xbox", re.compile(r"gamingservices|xboxgames", re.IGNORECASE)),
+    ("Steam", re.compile(r"steam://uninstall|\\steamapps\\", re.IGNORECASE)),
+    ("Epic Games", re.compile(r"com\.epicgames\.launcher://", re.IGNORECASE)),
+    ("Ubisoft Connect", re.compile(r"uplay://uninstall|uplay://", re.IGNORECASE)),
+    ("EA app", re.compile(r"\\EA Games\\", re.IGNORECASE)),
+    ("Battle.net", re.compile(r"blizzard uninstaller", re.IGNORECASE)),
+    ("Riot Games", re.compile(r"--uninstall-product[= ]", re.IGNORECASE)),
+    ("GOG Galaxy", re.compile(r"\\GOG Games\\|goggalaxy://", re.IGNORECASE)),
 )
 
 
 def launcher_from_strings(*strings: str) -> str | None:
-    """Return the launcher a title was installed through, or None.
+    """Return the launcher a *game* was installed through, or None.
 
-    Fed the uninstall string and install location: a Steam game's uninstall
-    string is ``"...\\Steam.exe" steam://uninstall/<id>``, an Epic game's is a
-    ``com.epicgames.launcher://`` URL, and so on. The launcher app itself is a
-    normal application and is not matched -- only titles that point back at it.
+    Fed a title's uninstall string and install location. It matches only the
+    signals a launcher-installed game carries -- the uninstall protocol the
+    launcher handles (``steam://uninstall/<id>``), or a game-only install folder
+    -- never a launcher's own program directory. So a Steam game matches while
+    Steam.exe, the Epic Games Launcher, the EA app and the Riot Client (which are
+    ordinary applications, several with their own winget packages) do not.
     """
     haystack = "  ".join(part for part in strings if part)
     if not haystack:
@@ -856,6 +860,16 @@ def merge(
             entry.winget_id = identifier
             entry.sources.append("winget")
             used.add(identifier)
+
+    # A launcher application (Steam, the Epic/Rockstar launchers, the EA app)
+    # has its own winget package, so if one is also tagged as launcher-managed
+    # by a folder heuristic, the package is the truth: it is reinstalled, not
+    # re-downloaded. Clearing managed_by keeps it out of the "returns with the
+    # launcher" list and in the reinstall list where it belongs.
+    for entry in entries:
+        if entry.winget_id and entry.managed_by:
+            entry.managed_by = None
+
     return sorted(entries, key=lambda item: item.name.lower()), stats
 
 

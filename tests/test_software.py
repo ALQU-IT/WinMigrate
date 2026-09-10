@@ -663,9 +663,10 @@ def test_a_resembling_identity_joins_and_is_counted_as_an_identity_join():
         (r'"C:\Program Files (x86)\Steam\steam.exe" steam://uninstall/1091500', "", "Steam"),
         ("com.epicgames.launcher://apps/Fortnite?action=uninstall", "", "Epic Games"),
         (r'"...\Ubisoft Game Launcher\Uninstaller\uninstall.exe" uplay://uninstall/720', "", "Ubisoft Connect"),
-        (r'"C:\ProgramData\Battle.net\Agent\Blizzard Uninstaller.exe"', "", "Battle.net"),
+        (r'"C:\ProgramData\Battle.net\Agent\Blizzard Uninstaller.exe" --uid=pro', "", "Battle.net"),
+        (r'"C:\Riot Games\Riot Client\RiotClientServices.exe" --uninstall-product=valorant', "", "Riot Games"),
         ("", r"C:\GOG Games\The Witcher 3", "GOG Galaxy"),
-        (r'"C:\Program Files\Rockstar Games\Launcher\uninstall.exe"', "", "Rockstar Games"),
+        ("", r"C:\Program Files\EA Games\Titanfall", "EA app"),
         # A normal desktop app is not launcher-managed.
         (r"MsiExec.exe /X{1234}", r"C:\Program Files\7-Zip", None),
         ("", "", None),
@@ -673,6 +674,25 @@ def test_a_resembling_identity_joins_and_is_counted_as_an_identity_join():
 )
 def test_a_title_is_traced_to_the_launcher_that_installed_it(uninstall, install_location, launcher):
     assert software.launcher_from_strings(uninstall, install_location) == launcher
+
+
+@pytest.mark.parametrize(
+    ("name", "install_location"),
+    [
+        ("Steam", r"C:\Program Files (x86)\Steam"),
+        ("Epic Games Launcher", r"C:\Program Files (x86)\Epic Games\Launcher"),
+        ("EA app", r"C:\Program Files\Electronic Arts\EA Desktop"),
+        ("Ubisoft Connect", r"C:\Program Files (x86)\Ubisoft\Ubisoft Game Launcher"),
+        ("GOG GALAXY", r"C:\Program Files (x86)\GOG Galaxy"),
+        ("Riot Client", r"C:\Riot Games\Riot Client"),
+    ],
+)
+def test_the_launcher_application_itself_is_never_mistaken_for_a_game(name, install_location):
+    """The launcher lives in its own program folder; only a game it installed,
+    which carries an uninstall protocol or sits in a game folder, is matched.
+    Tagging the launcher would pull the very thing that needs reinstalling out
+    of the reinstall list."""
+    assert software.launcher_from_strings("", install_location) is None
 
 
 def test_launcher_games_are_read_from_the_registry_uninstall_string():
@@ -713,3 +733,23 @@ def test_the_launcher_itself_remains_a_normal_reinstallable_application():
     entry = software.SoftwareEntry(name="Steam", winget_id="Valve.Steam")
     assert entry.managed_by is None
     assert entry.reinstallable
+
+
+def test_a_launcher_with_a_winget_package_stays_reinstallable_not_managed():
+    """If a folder heuristic ever tags a launcher that also has a winget id,
+    the package wins: it is reinstalled, not listed as re-downloading itself."""
+    entries = [
+        software.SoftwareEntry(name="EA app", managed_by="EA app", sources=["registry"]),
+        software.SoftwareEntry(name="Some EA Game", managed_by="EA app", sources=["registry"]),
+    ]
+    listing = (
+        "Name             Id                          Version Available Source\n"
+        "-----------------------------------------------------------------------\n"
+        "EA app           ElectronicArts.EADesktop    13.6              winget\n"
+    )
+    merged, _stats = software.merge(entries, [], [], software.parse_winget_list(listing))
+    ea = next(e for e in merged if e.name == "EA app")
+    game = next(e for e in merged if e.name == "Some EA Game")
+    assert ea.winget_id == "ElectronicArts.EADesktop"
+    assert ea.managed_by is None, "the launcher app must not be listed as launcher-managed"
+    assert game.managed_by == "EA app", "the game it installed still returns via the launcher"
