@@ -19,6 +19,7 @@ import tempfile
 from pathlib import Path
 
 from ..models import (
+    Action,
     Category,
     Followup,
     Item,
@@ -27,6 +28,7 @@ from ..models import (
     RestoreStrategy,
     Sensitivity,
     Severity,
+    SkipReason,
 )
 from ..models import Note
 from ..platform_win import Environment
@@ -60,11 +62,15 @@ def list_profiles(runner=process.run) -> tuple[list[str], str | None]:
     return parse_profile_names(result.stdout), None
 
 
-def scan_wifi(env: Environment, include_wifi: bool):
+def scan_wifi(env: Environment, include_wifi: bool, files_only: bool = False):
     """Return Wi-Fi items and follow-ups.
 
     Without ``--include-wifi`` this returns nothing at all -- not even a
     report -- so an un-opted migration makes no mention of network keys.
+
+    ``files_only`` still reports what was found but captures none of it: a
+    Wi-Fi profile carries the network password, and files-only mode promises no
+    credential material travels.
     """
     if not include_wifi:
         return [], []
@@ -99,6 +105,9 @@ def scan_wifi(env: Environment, include_wifi: bool):
         ),
         notes=[Note(Severity.WARNING, "Includes network passwords; encrypted-only.")],
     )
+    if files_only:
+        item.action = Action.SKIP
+        item.skip_reason = SkipReason.FILES_ONLY_MODE
     return [item], []
 
 

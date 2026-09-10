@@ -102,7 +102,9 @@ def capture(
         output = output.with_suffix(".dat")
     manifest_path = output.with_suffix(".manifest.json")
 
-    if config.include_wifi:
+    # files-only promises no credential material travels, and a Wi-Fi export
+    # carries the network passwords in the clear.
+    if config.include_wifi and not config.files_only:
         _add_wifi_profiles(scan, env)
 
     totals = scan.totals()

@@ -59,7 +59,8 @@ def test_printers_and_default_are_read():
     items, _ = syssettings.scan_system_settings(env)
     printers = item(items, "settings:printers").record
     assert printers["default"] == "HP-Laser"
-    assert printers["connections"] == [r"printserver\HP-Laser"]
+    # A full UNC path, so it can be pasted straight into Add Printer.
+    assert printers["connections"] == [r"\\printserver\HP-Laser"]
 
 
 def test_absent_settings_produce_no_items(tmp_path: Path):

@@ -58,3 +58,20 @@ def test_a_netsh_failure_becomes_a_followup_not_a_crash(monkeypatch):
     items, followups = wifi.scan_wifi(env, include_wifi=True)
     assert items == []
     assert followups and followups[0].id == "wifi:unavailable"
+
+
+def test_files_only_reports_wifi_but_captures_none_of_it(monkeypatch):
+    """files-only promises no credential material travels, and a Wi-Fi profile
+    carries the network password."""
+    from winmigrate.models import Action, SkipReason
+
+    env = Environment.fixture(Path("/tmp/p"), {})
+    monkeypatch.setattr(env, "is_windows", True)
+    monkeypatch.setattr(wifi, "list_profiles", lambda: (["HomeNet"], None))
+
+    items, _ = wifi.scan_wifi(env, include_wifi=True, files_only=True)
+    assert items[0].action is Action.SKIP
+    assert items[0].skip_reason is SkipReason.FILES_ONLY_MODE
+
+    items, _ = wifi.scan_wifi(env, include_wifi=True, files_only=False)
+    assert items[0].action is Action.CAPTURE

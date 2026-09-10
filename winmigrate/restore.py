@@ -24,6 +24,7 @@ import logging
 import os
 import time
 from collections.abc import Callable
+from typing import Any
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -248,28 +249,65 @@ def _restore_member(info, stream, destination: Path, options: RestoreOptions,
 
 
 def _selected_prefixes(options: RestoreOptions, bundle_path: Path) -> list[str] | None:
-    """Archive-path prefixes for ``--item``, or ``None`` to restore everything."""
+    """Archive-path prefixes for ``--item``, or ``None`` to restore everything.
+
+    The sidecar is the fast path, but it redacts secret items -- a stub carries
+    no ``archive_path`` -- so selecting one from the sidecar alone would find
+    nothing. When that happens the authoritative manifest is read first (one
+    extra decrypt pass, no files written) and the paths come from there, so any
+    item can be restored on its own without weakening the sidecar's redaction.
+    """
     if not options.items:
         return None
+
     sidecar = load_sidecar(bundle_path)
-    if sidecar is None:
-        raise RestoreError(
-            "selecting items needs the sidecar manifest (<bundle>.manifest.json) "
-            "beside the bundle, because the bundle's own manifest is only "
-            "readable at the end of the stream"
-        )
-    known = {item.get("id") for item in sidecar.get("items", [])}
+    entries: list[dict[str, Any]] = list(sidecar.get("items", [])) if sidecar else []
+    prefixes = _prefixes_from(entries, options.items)
+    known = {item.get("id") for item in entries}
+    unresolved = [i for i in options.items if i in known and i not in prefixes]
+
+    if sidecar is None or unresolved or not known:
+        # Either no sidecar at all, or a selected item is a redacted stub.
+        manifest = _read_manifest_only(bundle_path, options.passphrase)
+        entries = list(manifest.get("items", []))
+        prefixes = _prefixes_from(entries, options.items)
+        known = {item.get("id") for item in entries}
+
     unknown = sorted(set(options.items) - known)
     if unknown:
         raise RestoreError(f"no such item(s) in this bundle: {', '.join(unknown)}")
-    prefixes = [
-        item["archive_path"]
-        for item in sidecar.get("items", [])
-        if item.get("id") in options.items and item.get("archive_path")
-    ]
     if not prefixes:
-        raise RestoreError("the selected item(s) hold no files to restore")
-    return prefixes
+        raise RestoreError(
+            "the selected item(s) are records rather than files, so there is "
+            "nothing to restore from them"
+        )
+    return list(prefixes.values())
+
+
+def _prefixes_from(entries: list[dict[str, Any]], wanted: tuple[str, ...]) -> dict[str, str]:
+    """``{item id: archive path}`` for the wanted ids that actually have one."""
+    return {
+        item["id"]: item["archive_path"]
+        for item in entries
+        if item.get("id") in wanted and item.get("archive_path")
+    }
+
+
+def _read_manifest_only(bundle_path: Path, passphrase: str) -> dict[str, Any]:
+    """Stream a bundle just far enough to read its manifest, writing nothing.
+
+    The manifest is the last member of the tar, so this costs a full decrypt
+    pass. It is only used when the sidecar cannot answer -- selecting a secret
+    item by id -- rather than on every restore.
+    """
+    log.info("reading the bundle manifest to resolve the selected item(s)")
+    with bundle_mod.BundleReader(bundle_path, passphrase) as reader:
+        for info, stream in reader.members():
+            if info.name == manifest_mod.MANIFEST_ARCHIVE_NAME and stream is not None:
+                return _load_manifest(stream)
+    raise IntegrityError(
+        "the bundle contains no manifest: it is incomplete or not a WinMigrate bundle"
+    )
 
 
 def _existing_state(target: Path, size: int) -> str:

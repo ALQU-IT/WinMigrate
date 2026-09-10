@@ -560,7 +560,7 @@ def _scan_wifi(
     if not config.include_wifi:
         return
     _emit(progress, "Reading Wi-Fi profiles")
-    items, followups = wifi_mod.scan_wifi(env, config.include_wifi)
+    items, followups = wifi_mod.scan_wifi(env, config.include_wifi, config.files_only)
     result.items.extend(items)
     result.followups.extend(followups)
 

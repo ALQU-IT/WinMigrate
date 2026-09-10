@@ -152,3 +152,66 @@ def test_dev_targets_have_unique_slots_and_archive_paths():
     assert len(slots) == len(set(slots))
     relatives = [target.relative for target in devconfig.DEV_TARGETS]
     assert len(relatives) == len(set(relatives))
+
+
+def test_a_secret_item_can_be_restored_on_its_own(tmp_path: Path):
+    """The sidecar redacts secret items, so their archive path is only in the
+    encrypted manifest; selecting one by id must still work."""
+    root = make_profile(tmp_path)
+    env = Environment.fixture(root, {})
+    config = ScanConfig(profile_root=root, include_software=False)
+    scan = run_scan(config, env)
+    bundle = tmp_path / "b.dat"
+    capture_mod.capture(
+        scan, CaptureOptions(output=bundle, passphrase=PASSPHRASE, use_vss=False), config, env
+    )
+
+    destination = tmp_path / "only-ssh"
+    report = restore_mod.restore(
+        RestoreOptions(
+            bundle=bundle, passphrase=PASSPHRASE, destination=destination, items=("dev:ssh",)
+        )
+    )
+    assert report.restored_files == 2
+    assert (destination / ".ssh" / "id_rsa").read_bytes() == b"PRIVATE KEY"
+    assert not (destination / ".gitconfig").exists()
+
+
+def test_selecting_a_secret_item_works_without_a_sidecar(tmp_path: Path):
+    root = make_profile(tmp_path)
+    env = Environment.fixture(root, {})
+    config = ScanConfig(profile_root=root, include_software=False)
+    scan = run_scan(config, env)
+    bundle = tmp_path / "b.dat"
+    capture_mod.capture(
+        scan, CaptureOptions(output=bundle, passphrase=PASSPHRASE, use_vss=False), config, env
+    )
+    bundle.with_suffix(".manifest.json").unlink()
+
+    report = restore_mod.restore(
+        RestoreOptions(
+            bundle=bundle, passphrase=PASSPHRASE, destination=tmp_path / "d", items=("dev:ssh",)
+        )
+    )
+    assert report.restored_files == 2
+
+
+def test_an_unknown_item_id_is_still_rejected(tmp_path: Path):
+    import pytest
+
+    from winmigrate.restore import RestoreError
+
+    root = make_profile(tmp_path)
+    env = Environment.fixture(root, {})
+    config = ScanConfig(profile_root=root, include_software=False)
+    scan = run_scan(config, env)
+    bundle = tmp_path / "b.dat"
+    capture_mod.capture(
+        scan, CaptureOptions(output=bundle, passphrase=PASSPHRASE, use_vss=False), config, env
+    )
+    with pytest.raises(RestoreError, match="no such item"):
+        restore_mod.restore(
+            RestoreOptions(
+                bundle=bundle, passphrase=PASSPHRASE, destination=tmp_path / "d", items=("nope",)
+            )
+        )

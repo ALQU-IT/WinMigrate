@@ -116,8 +116,10 @@ def _mapped_drives(env: Environment) -> Item | None:
 def _printers(env: Environment) -> Item | None:
     connections: list[str] = []
     for name in env.registry_subkeys(HKCU, PRINTER_CONNECTIONS_KEY):
-        # Connection subkeys encode the UNC path as ",,server,printer".
-        connections.append(name.replace(",", "\\").lstrip("\\"))
+        # Connection subkeys encode the UNC path as ",,server,printer". Commas
+        # become separators, and the leading pair is the "\\\\" of the UNC path --
+        # stripping it would leave a path the user cannot paste into Add Printer.
+        connections.append(name.replace(",", "\\"))
     default = env.read_registry_value(HKCU, WINDOWS_DEVICE_KEY, "Device")
     default_name = default.split(",", 1)[0] if isinstance(default, str) else None
     if not connections and not default_name:
