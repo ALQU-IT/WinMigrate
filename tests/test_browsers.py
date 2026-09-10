@@ -346,3 +346,29 @@ def test_a_wide_include_pattern_cannot_pull_the_credential_stores_back_in(tmp_pa
 
     assert "places.sqlite" in names  # the include did work for everything else
     assert not names & {"logins.json", "logins-backup.json", "key4.db", "cookies.sqlite"}
+
+
+def test_extension_code_and_data_both_survive_a_round_trip(tmp_path: Path):
+    """The point of the inventory is that this already worked -- the extensions
+    live inside the profile, which is copied whole. This pins it, so a future
+    exclusion aimed at browser caches cannot quietly take the extensions or
+    their saved settings with it."""
+    root = tmp_path / "alice"
+    profile = root / "AppData" / "Local" / "Google" / "Chrome" / "User Data" / "Default"
+    profile.mkdir(parents=True)
+    (root / "Documents").mkdir(parents=True, exist_ok=True)
+    (profile / "Preferences").write_text(json.dumps({"profile": {"name": "P"}}))
+    ext_id = "a" * 32
+    code = profile / "Extensions" / ext_id / "1.60.0_0"
+    code.mkdir(parents=True)
+    (code / "manifest.json").write_text(json.dumps({"name": "uBlock Origin", "version": "1.60.0"}))
+    (code / "background.js").write_bytes(b"the extension itself")
+    settings = profile / "Local Extension Settings" / ext_id
+    settings.mkdir(parents=True)
+    (settings / "000003.log").write_bytes(b"MY CUSTOM FILTER RULES")
+    idb = profile / "IndexedDB" / f"chrome-extension_{ext_id}_0.indexeddb.leveldb"
+    idb.mkdir(parents=True)
+    (idb / "000005.ldb").write_bytes(b"EXTENSION INDEXEDDB DATA")
+
+    names = restored_names(root, tmp_path)
+    assert {"background.js", "manifest.json", "000003.log", "000005.ldb"} <= names

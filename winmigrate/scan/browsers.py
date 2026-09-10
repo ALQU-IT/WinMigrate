@@ -43,6 +43,7 @@ from ..models import (
 )
 from ..platform_win import Environment
 from ..util import paths as pathutil
+from . import extensions as extensions_mod
 
 log = logging.getLogger(__name__)
 
@@ -97,6 +98,10 @@ class BrowserProfile:
     profile_dir: Path
     display_name: str
     state: SignInState = field(default_factory=SignInState)
+    #: Read from the extensions' own manifests. Kept on the item's record, which
+    #: is redacted from the plaintext sidecar along with the rest of a SECRET
+    #: item -- an extension list says a lot about someone.
+    extensions: list = field(default_factory=list)
 
 
 # --- Chromium --------------------------------------------------------------
@@ -291,13 +296,74 @@ def scan_browsers(env: Environment, files_only: bool = False):
     notes: list[Note] = []
 
     for profile in profiles:
+        profile.extensions = extensions_mod.inventory(profile.profile_dir, profile.engine)
         items.append(_profile_item(profile, env, files_only))
 
     for followup in _password_followups(profiles):
         followups.append(followup)
     followups.extend(_relocation_followups(profiles, env))
+    followups.extend(_extension_followups(profiles))
 
     return items, followups, notes
+
+
+def _extension_followups(profiles: list[BrowserProfile]) -> list[Followup]:
+    """One follow-up per browser that has extensions, naming them.
+
+    This is the step people are most surprised by. The extension code and
+    everything each extension saved are both in the bundle and both restore, but
+    Chromium keeps its extension registry in ``Secure Preferences`` behind an
+    HMAC tied to the machine, so a profile opened on a different computer
+    generally comes up with those extensions disabled or absent. It looks like
+    the migration lost them. It did not -- installing each one again picks the
+    restored data straight back up, which is why the list is worth carrying:
+    without it there is nothing on the new machine that says what you had.
+    """
+    followups: list[Followup] = []
+    seen: set[str] = set()
+    for profile in profiles:
+        if profile.browser_key in seen or not profile.extensions:
+            continue
+        seen.add(profile.browser_key)
+        same = [p for p in profiles if p.browser_key == profile.browser_key]
+        by_id = {ext.ext_id: ext for p in same for ext in p.extensions}
+        listed = sorted(by_id.values(), key=lambda ext: ext.name.lower())
+        with_data = [ext for ext in listed if ext.has_data]
+        store = (
+            "addons.mozilla.org" if profile.engine == "firefox" else "the Chrome Web Store"
+        )
+        followups.append(
+            Followup(
+                id=f"browser:extensions:{profile.browser_key}",
+                title=f"{profile.browser_title}: reinstall {len(listed)} extension(s)",
+                why=(
+                    f"{len(listed)} extension(s) travelled with the profile, "
+                    f"{len(with_data)} of them carrying saved settings. "
+                    f"{profile.browser_title} ties its extension registry to the "
+                    "machine, so they usually need installing again on the new "
+                    "computer -- their data is already restored and comes back with "
+                    "them, so this is a reinstall, not a reconfigure."
+                ),
+                steps=[
+                    f"Open {profile.browser_title} and check which extensions are "
+                    "already active -- if sync was on, some will have returned by "
+                    "themselves.",
+                    f"Install the rest from {store}:",
+                    *[
+                        f"    {ext.name}" + (f" ({ext.version})" if ext.version else "")
+                        + ("  -- has saved data" if ext.has_data else "")
+                        for ext in listed
+                    ],
+                    "Open each one's options page and confirm your settings are "
+                    "there before changing anything.",
+                    "Anything installed from outside the store (a developer or "
+                    "sideloaded extension) has no store page: its files are under "
+                    "the profile's Extensions folder, to load unpacked if you need it.",
+                ],
+                category=Category.BROWSER_PROFILE,
+            )
+        )
+    return followups
 
 
 def _relocation_followups(profiles: list[BrowserProfile], env: Environment) -> list[Followup]:
@@ -382,7 +448,11 @@ def _profile_item(profile: BrowserProfile, env: Environment, files_only: bool) -
             strategy=RestoreStrategy.MERGE,
             notes=["Close the browser before restoring so files are not overwritten under it."],
         ),
-        record={"sign_in": profile.state.to_json(), "engine": profile.engine},
+        record={
+            "sign_in": profile.state.to_json(),
+            "engine": profile.engine,
+            "extensions": [ext.to_json() for ext in profile.extensions],
+        },
     )
     item.notes.append(
         Note(
@@ -400,6 +470,19 @@ def _profile_item(profile: BrowserProfile, env: Environment, files_only: bool) -
             "tabs you would rather not carry before capturing.",
         )
     )
+    if profile.extensions:
+        with_data = [ext for ext in profile.extensions if ext.has_data]
+        item.notes.append(
+            Note(
+                Severity.INFO,
+                f"{len(profile.extensions)} extension(s), "
+                f"{len(with_data)} with saved data (settings, rules, lists).",
+                "The code and the data both travel. Chromium ties its extension "
+                "registry to the machine, so expect to reinstall them on the new "
+                "computer -- the saved data is already there and comes back with "
+                "them.",
+            )
+        )
     if relocated:
         item.notes.append(
             Note(
