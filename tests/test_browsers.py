@@ -218,3 +218,58 @@ def test_two_profiles_with_the_same_display_name_get_distinct_ids(tmp_path):
     result = ScanResult(source=manifest_mod.detect_source_machine(str(root)))
     result.items = items
     manifest_mod.validate(manifest_mod.build(result))  # must not raise
+
+
+def test_a_firefox_profile_outside_the_user_folder_is_not_silently_relocated(tmp_path):
+    """profiles.ini can point anywhere -- D:\\FFProfiles\\work is an ordinary setup.
+
+    Archive names under ``secrets/`` are profile-relative by convention, so such
+    a path cannot be expressed in one. It used to go through the drive-stripping
+    fallback and restore to ``%USERPROFILE%\\FFProfiles\\work``: a nonsense path,
+    with nothing in the manifest, the report or the follow-ups saying the profile
+    had moved. Now the relocation is named, warned about, and has a follow-up
+    telling the user how to put it back.
+    """
+    root = tmp_path / "Users" / "a"
+    firefox = root / "AppData" / "Roaming" / "Mozilla" / "Firefox"
+    firefox.mkdir(parents=True)
+    outside = tmp_path / "D_drive" / "FFProfiles" / "work"
+    outside.mkdir(parents=True)
+    (outside / "prefs.js").write_text('user_pref("browser.startup.page", 3);')
+    (firefox / "profiles.ini").write_text(
+        f"[Profile0]\nName=work\nIsRelative=0\nPath={outside}\n"
+    )
+
+    env = Environment.fixture(root, {})
+    items, followups, _notes = browsers.scan_browsers(env)
+    item = next(i for i in items if i.category is Category.BROWSER_PROFILE)
+
+    assert item.archive_path == "secrets/WinMigrate-Relocated/firefox/work"
+    assert item.restore.target == "%USERPROFILE%\\WinMigrate-Relocated\\firefox\\work"
+    # Where it lands must be what the item promises, not an invented path.
+    assert restore_mod._target_for(item.archive_path, Path("/dest")) == Path(
+        "/dest/WinMigrate-Relocated/firefox/work"
+    )
+    # The move is stated, not buried: a warning naming the original location...
+    assert any(str(outside) in (note.message or "") for note in item.notes)
+    # ...and a follow-up, because the browser still looks at the old path.
+    relocation = next(f for f in followups if f.id.startswith("browser:relocated:"))
+    assert str(outside) in relocation.why
+
+
+def test_a_firefox_profile_inside_the_user_folder_is_untouched_by_the_relocation_path(
+    tmp_path,
+):
+    """The ordinary case must keep its real location, and raise no follow-up."""
+    root = tmp_path / "Users" / "a"
+    profiles = root / "AppData" / "Roaming" / "Mozilla" / "Firefox" / "Profiles" / "abc.default"
+    profiles.mkdir(parents=True)
+    (profiles / "prefs.js").write_text('user_pref("x", 1);')
+    (profiles.parent.parent / "profiles.ini").write_text(
+        "[Profile0]\nName=default\nIsRelative=1\nPath=Profiles/abc.default\n"
+    )
+
+    items, followups, _notes = browsers.scan_browsers(Environment.fixture(root, {}))
+    item = next(i for i in items if i.category is Category.BROWSER_PROFILE)
+    assert item.archive_path == "secrets/AppData/Roaming/Mozilla/Firefox/Profiles/abc.default"
+    assert not any(f.id.startswith("browser:relocated:") for f in followups)

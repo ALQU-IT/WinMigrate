@@ -110,6 +110,23 @@ def relative_posix(path: os.PathLike[str] | str, root: os.PathLike[str] | str) -
     return without_drive.lstrip("/") or child
 
 
+def relative_within(path: os.PathLike[str] | str, root: os.PathLike[str] | str) -> str | None:
+    """Relative path from ``root`` to ``path``, or ``None`` when it is outside.
+
+    :func:`relative_posix` never fails, because exclusion matching needs *some*
+    stable string for every path. Placement in the bundle is the opposite case:
+    an archive path below ``data/`` or ``secrets/`` means "profile-relative", and
+    restore joins it onto the destination profile. Handing it the drive-stripped
+    fallback for something that never lived in the profile -- a Firefox profile
+    on ``D:\\`` -- would silently move the data to a path that means nothing.
+    So callers that decide *where a thing goes* ask this instead and handle the
+    outside-the-profile case deliberately.
+    """
+    if not is_within(path, root):
+        return None
+    return relative_posix(path, root)
+
+
 def expand(text: str, environ: dict[str, str] | None = None) -> str:
     """Expand ``%VAR%`` (and ``$VAR``) using ``environ`` or the process env."""
     if environ is None:

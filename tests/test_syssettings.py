@@ -76,7 +76,7 @@ def test_per_user_fonts_are_captured_as_a_tree(tmp_path: Path):
     items, _ = syssettings.scan_system_settings(Environment.fixture(tmp_path, {}))
     fonts_item = item(items, "settings:fonts")
     assert fonts_item.kind is Kind.TREE
-    assert fonts_item.archive_path == "data/fonts"
+    assert fonts_item.archive_path == "data/AppData/Local/Microsoft/Windows/Fonts"
 
 
 def test_outlook_signatures_and_pst_are_captured_but_ost_is_not(tmp_path: Path):
@@ -94,10 +94,72 @@ def test_outlook_signatures_and_pst_are_captured_but_ost_is_not(tmp_path: Path):
     assert "settings:outlook_pst:archive" in ids
     assert not any("ost" in i.id or "account" in i.id for i in items)
     pst = item(items, "settings:outlook_pst:archive")
-    assert pst.archive_path == "data/outlook/archive.pst"
+    assert pst.archive_path == "data/AppData/Local/Microsoft/Outlook/archive.pst"
 
 
 def test_guided_settings_get_a_followup():
     env = env_with({r"HKCU\Network\Z": {"RemotePath": r"\\server\share"}})
     _items, followups = syssettings.scan_system_settings(env)
     assert any(f.id == "settings:mapped_drives:guided" for f in followups)
+
+
+def test_settings_land_where_their_restore_spec_says_they_will(tmp_path: Path):
+    """The archive path is placement, not a label.
+
+    Restore joins everything under ``data/`` onto the destination profile, so an
+    archive name has to be the real profile-relative location. Tidy invented
+    names (``data/fonts``, ``data/outlook/...``) read fine in the manifest and
+    then put the fonts in a folder Windows never looks at and the .pst in one
+    Outlook cannot see -- a restore that reports success and silently delivers
+    nothing usable. This pins each item's placement to the target it promises.
+    """
+    from winmigrate.restore import _target_for
+
+    fonts = tmp_path / "AppData" / "Local" / "Microsoft" / "Windows" / "Fonts"
+    fonts.mkdir(parents=True)
+    (fonts / "MyFont.ttf").write_bytes(b"font")
+    sig = tmp_path / "AppData" / "Roaming" / "Microsoft" / "Signatures"
+    sig.mkdir(parents=True)
+    (sig / "mine.htm").write_text("<p>Regards</p>")
+    outlook = tmp_path / "AppData" / "Local" / "Microsoft" / "Outlook"
+    outlook.mkdir(parents=True)
+    (outlook / "archive.pst").write_bytes(b"MAIL")
+
+    destination = Path("/dest")
+    expansions = {
+        "%LOCALAPPDATA%": "/dest/AppData/Local",
+        "%APPDATA%": "/dest/AppData/Roaming",
+        "%USERPROFILE%": "/dest",
+    }
+    items, _ = syssettings.scan_system_settings(Environment.fixture(tmp_path, {}))
+    checked = 0
+    for entry in items:
+        if not entry.archive_path or not entry.restore:
+            continue
+        promised = entry.restore.target.replace("\\", "/")
+        for name, value in expansions.items():
+            promised = promised.replace(name, value)
+        assert str(_target_for(entry.archive_path, destination)) == promised, entry.id
+        checked += 1
+    assert checked == 3  # fonts, signatures, the .pst
+
+
+def test_a_redirected_appdata_outside_the_profile_is_not_captured_at_a_made_up_path(
+    tmp_path: Path, monkeypatch
+):
+    """``data/`` names are profile-relative; a path outside it cannot be one.
+
+    Rather than run such a path through the drive-stripping fallback and restore
+    it somewhere arbitrary, the item is dropped and logged.
+    """
+    elsewhere = tmp_path / "redirected"
+    fonts = elsewhere / "Local" / "Microsoft" / "Windows" / "Fonts"
+    fonts.mkdir(parents=True)
+    (fonts / "MyFont.ttf").write_bytes(b"font")
+    profile = tmp_path / "profile"
+    profile.mkdir()
+
+    monkeypatch.setattr(Environment, "appdata_local", lambda self: elsewhere / "Local")
+    monkeypatch.setattr(Environment, "appdata_roaming", lambda self: elsewhere / "Roaming")
+    items, _ = syssettings.scan_system_settings(Environment.fixture(profile, {}))
+    assert not any(i.id == "settings:fonts" for i in items)

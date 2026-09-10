@@ -295,12 +295,75 @@ def scan_browsers(env: Environment, files_only: bool = False):
 
     for followup in _password_followups(profiles):
         followups.append(followup)
+    followups.extend(_relocation_followups(profiles, env))
 
     return items, followups, notes
 
 
+def _relocation_followups(profiles: list[BrowserProfile], env: Environment) -> list[Followup]:
+    """One follow-up per profile that could not be stored where it lives.
+
+    Restoring the data is only half the job for these: the browser looks for the
+    profile at the path it was configured with, so unless the user puts it back
+    (or repoints the browser), the restored copy sits there unused.
+    """
+    followups: list[Followup] = []
+    for profile in profiles:
+        relative, relocated = _placement(profile, env)
+        if not relocated:
+            continue
+        landing = "%USERPROFILE%\\" + relative.replace("/", "\\")
+        followups.append(
+            Followup(
+                id=f"browser:relocated:{profile.browser_key}:{_slug(profile.profile_dir.name)}",
+                title=f"{profile.browser_title}: put {profile.display_name} back where it lives",
+                why=(
+                    f"This profile was at {profile.profile_dir}, outside your user folder, so "
+                    f"the bundle could not record that location. It restores to {landing}; "
+                    f"{profile.browser_title} will not find it there."
+                ),
+                steps=[
+                    f"Close {profile.browser_title}.",
+                    f"Move the restored folder from {landing} to {profile.profile_dir} "
+                    "(create the parent folders, or the drive, if the new machine lacks them).",
+                    f"If you would rather keep it where it landed, point "
+                    f"{profile.browser_title} at the new path instead: Firefox uses "
+                    "profiles.ini in %APPDATA%\\Mozilla\\Firefox; Chromium browsers use "
+                    "the --user-data-dir switch on the shortcut.",
+                    f"Start {profile.browser_title} and confirm your bookmarks are there.",
+                ],
+                category=Category.BROWSER_PROFILE,
+            )
+        )
+    return followups
+
+
+#: Where a profile that lives outside the user profile is put on restore. Its
+#: real home is on another drive, which the bundle cannot address, so it is
+#: parked here in the open and the user is told to move it back.
+RELOCATED_DIR = "WinMigrate-Relocated"
+
+
+def _placement(profile: BrowserProfile, env: Environment) -> tuple[str, bool]:
+    """Return the profile-relative path to store the profile at, and whether it
+    had to be relocated to get there.
+
+    Firefox's ``profiles.ini`` may point anywhere -- ``D:\\FFProfiles\\work`` is a
+    perfectly ordinary setup for someone who keeps their profile off the system
+    drive. Archive names under ``secrets/`` are profile-relative by convention,
+    so such a profile cannot be expressed in it. It used to be run through the
+    drive-stripping fallback, which produced ``secrets/FFProfiles/work`` and
+    quietly restored the profile to ``%USERPROFILE%\\FFProfiles\\work`` -- a
+    path that means nothing to anyone, with no indication it had moved.
+    """
+    relative = pathutil.relative_within(profile.profile_dir, env.profile_root)
+    if relative is not None and relative != ".":
+        return relative, False
+    return f"{RELOCATED_DIR}/{profile.browser_key}/{profile.profile_dir.name}", True
+
+
 def _profile_item(profile: BrowserProfile, env: Environment, files_only: bool) -> Item:
-    relative = pathutil.relative_posix(profile.profile_dir, env.profile_root)
+    relative, relocated = _placement(profile, env)
     item = Item(
         # Keyed on the profile *directory* (Default, Profile 1, or Firefox's
         # random-suffixed dir), which is unique within a browser. The friendly
@@ -328,6 +391,15 @@ def _profile_item(profile: BrowserProfile, env: Environment, files_only: bool) -
             "and cookie stores are left out (they do not transfer between machines).",
         )
     )
+    if relocated:
+        item.notes.append(
+            Note(
+                Severity.WARNING,
+                f"This profile lives outside your user folder, at {profile.profile_dir}.",
+                f"It restores to %USERPROFILE%\\{RELOCATED_DIR}\\{profile.browser_key}"
+                f"\\{profile.profile_dir.name} instead; see the follow-up to put it back.",
+            )
+        )
     if files_only:
         from ..models import Action  # noqa: PLC0415
 

@@ -28,3 +28,20 @@ def test_needs_long_path_support_at_the_classic_limit():
 
 def test_expand_uses_supplied_environment():
     assert paths.expand("%USERPROFILE%\\x", {"USERPROFILE": "C:\\Users\\a"}) == "C:\\Users\\a\\x"
+
+
+def test_relative_within_refuses_what_relative_posix_guesses_at():
+    r"""The two callers of "make this relative" want opposite things.
+
+    Exclusion matching needs a string for every path and must not crash, so
+    ``relative_posix`` falls back to stripping the drive. Deciding *where a file
+    goes in the bundle* must not guess: ``D:\FFProfiles\work`` reduced to
+    ``FFProfiles/work`` restores under the profile root as if it had always
+    lived there.
+    """
+    assert paths.relative_posix(r"D:\FFProfiles\work", r"C:\Users\a") == "FFProfiles/work"
+    assert paths.relative_within(r"D:\FFProfiles\work", r"C:\Users\a") is None
+    assert paths.relative_within(r"C:\Users\a\Documents", r"C:\Users\a") == "Documents"
+    assert paths.relative_within(r"C:\Users\a", r"C:\Users\a") == "."
+    # A sibling whose name merely starts with the root's is outside it.
+    assert paths.relative_within(r"C:\Users\alice2\x", r"C:\Users\alice") is None

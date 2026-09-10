@@ -32,6 +32,7 @@ from ..models import (
     Severity,
 )
 from ..platform_win import HKCU, Environment
+from ..util import paths as pathutil
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +40,26 @@ ENVIRONMENT_KEY = r"Environment"
 NETWORK_KEY = r"Network"
 PRINTER_CONNECTIONS_KEY = r"Printers\Connections"
 WINDOWS_DEVICE_KEY = r"Software\Microsoft\Windows NT\CurrentVersion\Windows"
+
+
+def _archive_path(path, env: Environment) -> str | None:
+    """Where ``path`` goes inside the bundle, as a profile-relative archive name.
+
+    Restore treats everything under ``data/`` as a path relative to the
+    destination profile, so the archive name has to be the real profile-relative
+    location -- ``data/AppData/Local/Microsoft/Windows/Fonts``, not a tidy
+    ``data/fonts``. An invented name looks harmless in the manifest and then
+    restores the fonts to a folder Windows never reads.
+
+    ``None`` means the path is not below the profile at all (a redirected
+    AppData, say), which this convention cannot express; the caller drops the
+    item rather than putting it somewhere arbitrary.
+    """
+    relative = pathutil.relative_within(path, env.profile_root)
+    if relative is None or relative == ".":
+        log.warning("%s is outside the profile root; not captured", path)
+        return None
+    return f"data/{relative}"
 
 
 def scan_system_settings(env: Environment):
@@ -145,13 +166,16 @@ def _fonts(env: Environment) -> Item | None:
     fonts_dir = env.appdata_local() / "Microsoft" / "Windows" / "Fonts"
     if not fonts_dir.is_dir():
         return None
+    archive = _archive_path(fonts_dir, env)
+    if archive is None:
+        return None
     return Item(
         id="settings:fonts",
         category=Category.FONTS,
         kind=Kind.TREE,
         title="Per-user fonts",
         source_path=str(fonts_dir),
-        archive_path="data/fonts",
+        archive_path=archive,
         restore=RestoreSpec(
             target="%LOCALAPPDATA%\\Microsoft\\Windows\\Fonts",
             strategy=RestoreStrategy.MERGE,
@@ -165,7 +189,8 @@ def _fonts(env: Environment) -> Item | None:
 def _outlook(env: Environment) -> list[Item]:
     items: list[Item] = []
     signatures = env.appdata_roaming() / "Microsoft" / "Signatures"
-    if signatures.is_dir() and any(signatures.iterdir()):
+    archive = _archive_path(signatures, env)
+    if archive and signatures.is_dir() and any(signatures.iterdir()):
         items.append(
             Item(
                 id="settings:outlook_signatures",
@@ -173,7 +198,7 @@ def _outlook(env: Environment) -> list[Item]:
                 kind=Kind.TREE,
                 title="Outlook signatures",
                 source_path=str(signatures),
-                archive_path="data/outlook/signatures",
+                archive_path=archive,
                 restore=RestoreSpec(
                     target="%APPDATA%\\Microsoft\\Signatures",
                     strategy=RestoreStrategy.MERGE,
@@ -196,6 +221,9 @@ def _outlook_pst(env: Environment) -> list[Item]:
         return []
     for entry in entries:
         if entry.is_file() and entry.suffix.lower() == ".pst":
+            archive = _archive_path(entry, env)
+            if archive is None:
+                continue
             items.append(
                 Item(
                     id=f"settings:outlook_pst:{entry.stem.lower()}",
@@ -203,7 +231,7 @@ def _outlook_pst(env: Environment) -> list[Item]:
                     kind=Kind.FILE,
                     title=f"Outlook data file — {entry.name}",
                     source_path=str(entry),
-                    archive_path=f"data/outlook/{entry.name}",
+                    archive_path=archive,
                     restore=RestoreSpec(
                         target=f"%LOCALAPPDATA%\\Microsoft\\Outlook\\{entry.name}",
                         strategy=RestoreStrategy.REPLACE,
