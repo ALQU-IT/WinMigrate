@@ -113,6 +113,7 @@ def apply(style, family: str) -> None:
 
     style.configure("Wizard.TButton", font=(family, BODY_SIZE), padding=(18, 7))
     style.configure("Wizard.TCheckbutton", background=PAGE, font=(family, BODY_SIZE))
+    style.configure("Wizard.TRadiobutton", background=PAGE, font=(family, BODY_SIZE + 1))
     style.configure("Band.TCheckbutton", background=BAND, font=(family, SMALL_SIZE))
     style.configure("Wizard.Treeview", font=(family, BODY_SIZE), rowheight=26)
     style.configure("Wizard.Treeview.Heading", font=(family, SMALL_SIZE, "bold"))

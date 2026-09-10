@@ -14,6 +14,7 @@ import pytest
 from winmigrate.gui import theme
 from winmigrate.gui.wizard import (
     AUTOMATIC,
+    Mode,
     ORDER,
     Step,
     WizardData,
@@ -30,6 +31,7 @@ from winmigrate.gui.wizard import (
 
 def test_the_pages_run_in_the_order_an_installer_taught_everyone():
     assert ORDER == (
+        Step.CHOOSE,
         Step.WELCOME,
         Step.SCANNING,
         Step.SELECT,
@@ -44,8 +46,9 @@ def test_the_pages_run_in_the_order_an_installer_taught_everyone():
 def test_back_is_not_offered_where_it_would_mean_nothing():
     """Not while something is running -- there is no half-finished state to
     return to -- and not once it has finished, because the work is done."""
-    for step in (Step.WELCOME, Step.SCANNING, Step.WORKING, Step.DONE):
+    for step in (Step.CHOOSE, Step.SCANNING, Step.WORKING, Step.DONE):
         assert not can_go_back(step), step
+    assert previous_step(Step.WELCOME) is Step.CHOOSE
     assert previous_step(Step.SELECT) is Step.WELCOME
     assert previous_step(Step.DESTINATION) is Step.SELECT
     assert previous_step(Step.CONFIRM) is Step.DESTINATION
@@ -160,3 +163,122 @@ def test_the_font_falls_back_rather_than_failing():
         raise RuntimeError("no display")
 
     assert theme.font_family(explode) == theme.FAMILY[-1]
+
+
+
+# --- the two jobs ----------------------------------------------------------
+def test_the_first_page_is_the_choice_between_the_two_jobs():
+    """Someone opening this on a new machine wants to put a backup back, and
+    someone on the old one wants to make it. Guessing which would be wrong half
+    the time, and the wrong guess writes files."""
+    from winmigrate.gui.wizard import order
+
+    assert order(Mode.BACKUP)[0] is Step.CHOOSE
+    assert order(Mode.RESTORE)[0] is Step.CHOOSE
+    assert next_step(Step.CHOOSE, Mode.BACKUP) is Step.WELCOME
+    assert next_step(Step.CHOOSE, Mode.RESTORE) is Step.SOURCE
+
+
+def test_the_restore_branch_runs_in_its_own_order():
+    from winmigrate.gui.wizard import RESTORE_ORDER
+
+    assert RESTORE_ORDER == (
+        Step.CHOOSE,
+        Step.SOURCE,
+        Step.OPENING,
+        Step.RESTORE_SELECT,
+        Step.RESTORE_CONFIRM,
+        Step.RESTORING,
+        Step.RESTORE_DONE,
+    )
+    assert next_step(Step.RESTORE_DONE, Mode.RESTORE) is None
+
+
+def test_back_never_crosses_from_one_job_to_the_other():
+    """The two branches share only the first page. Back from a restore page must
+    land on a restore page, or the window shows a form whose data was never
+    gathered."""
+    from winmigrate.gui.wizard import RESTORE_ORDER, BACKUP_ORDER
+
+    for step in RESTORE_ORDER:
+        earlier = previous_step(step, Mode.RESTORE)
+        assert earlier is None or earlier in RESTORE_ORDER, step
+    for step in BACKUP_ORDER:
+        earlier = previous_step(step, Mode.BACKUP)
+        assert earlier is None or earlier in BACKUP_ORDER, step
+
+
+def test_back_is_refused_once_files_have_been_written():
+    """A restore that has written files is not something a button can undo."""
+    assert not can_go_back(Step.RESTORE_DONE, Mode.RESTORE)
+    assert not can_go_back(Step.RESTORING, Mode.RESTORE)
+
+
+def test_you_cannot_open_a_backup_without_naming_one(tmp_path: Path):
+    data = WizardData(mode=Mode.RESTORE)
+    assert check(Step.SOURCE, data).ok is False
+
+    data.bundle_path = str(tmp_path / "missing.dat")
+    verdict = check(Step.SOURCE, data)
+    assert verdict.ok is False and "not there" in verdict.message
+
+    bundle = tmp_path / "b.dat"
+    bundle.write_bytes(b"x")
+    data.bundle_path = str(bundle)
+    verdict = check(Step.SOURCE, data)
+    assert verdict.ok is False and "passphrase" in verdict.message.lower()
+
+    data.bundle_passphrase = "hunter2"
+    assert check(Step.SOURCE, data).ok is True
+
+
+def test_the_restore_passphrase_is_not_asked_for_twice(tmp_path: Path):
+    """Typing it twice guards against a typo becoming an unopenable backup. On
+    the way back in a typo just fails to open, immediately and harmlessly, so
+    asking twice would be ceremony."""
+    bundle = tmp_path / "b.dat"
+    bundle.write_bytes(b"x")
+    data = WizardData(
+        mode=Mode.RESTORE, bundle_path=str(bundle), bundle_passphrase="typed once"
+    )
+    assert check(Step.SOURCE, data).ok is True
+
+
+def test_you_cannot_restore_nothing():
+    data = WizardData(mode=Mode.RESTORE, restore_selected=set())
+    assert check(Step.RESTORE_SELECT, data).ok is False
+    data.restore_selected = {"files:documents"}
+    assert check(Step.RESTORE_SELECT, data).ok is True
+
+
+def test_the_destination_must_be_somewhere_that_could_exist(tmp_path: Path):
+    data = WizardData(mode=Mode.RESTORE, destination="")
+    assert check(Step.RESTORE_CONFIRM, data).ok is False
+
+    data.destination = str(tmp_path / "nowhere" / "deeper")
+    assert check(Step.RESTORE_CONFIRM, data).ok is False
+
+    # A folder that does not exist yet but whose parent does is fine: restore
+    # creates it, which is the normal case for an empty profile.
+    data.destination = str(tmp_path / "new-profile")
+    assert check(Step.RESTORE_CONFIRM, data).ok is True
+
+    data.destination = str(tmp_path)
+    assert check(Step.RESTORE_CONFIRM, data).ok is True
+
+
+def test_the_rail_describes_whichever_job_is_running():
+    from winmigrate.gui.wizard import progress_steps
+
+    assert progress_steps(Mode.BACKUP) != progress_steps(Mode.RESTORE)
+    assert rail_index(Step.OPENING, Mode.RESTORE) == rail_index(Step.SOURCE, Mode.RESTORE)
+    assert rail_index(Step.RESTORING, Mode.RESTORE) == rail_index(
+        Step.RESTORE_CONFIRM, Mode.RESTORE
+    )
+    assert rail_index(Step.RESTORE_DONE, Mode.RESTORE) == len(progress_steps(Mode.RESTORE)) - 1
+
+
+def test_every_page_of_both_branches_has_a_heading():
+    for step in Step:
+        heading, subtitle = title(step)
+        assert heading and subtitle, step

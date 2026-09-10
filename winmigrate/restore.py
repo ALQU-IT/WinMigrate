@@ -289,7 +289,7 @@ def _selected_prefixes(options: RestoreOptions, bundle_path: Path) -> list[str] 
 
     if sidecar is None or unresolved or not known:
         # Either no sidecar at all, or a selected item is a redacted stub.
-        manifest = _read_manifest_only(bundle_path, options.passphrase)
+        manifest = read_manifest(bundle_path, options.passphrase)
         entries = list(manifest.get("items", []))
         prefixes = _prefixes_from(entries, options.items)
         known = {item.get("id") for item in entries}
@@ -314,7 +314,7 @@ def _prefixes_from(entries: list[dict[str, Any]], wanted: tuple[str, ...]) -> di
     }
 
 
-def _read_manifest_only(bundle_path: Path, passphrase: str) -> dict[str, Any]:
+def read_manifest(bundle_path: Path, passphrase: str) -> dict[str, Any]:
     """Stream a bundle just far enough to read its manifest, writing nothing.
 
     The manifest is the last member of the tar, so this costs a full decrypt
@@ -329,6 +329,12 @@ def _read_manifest_only(bundle_path: Path, passphrase: str) -> dict[str, Any]:
     raise IntegrityError(
         "the bundle contains no manifest: it is incomplete or not a WinMigrate bundle"
     )
+
+
+#: The name this had while restore was its only caller. The GUI needs it too:
+#: opening a bundle is how a wrong passphrase is caught, before anything is
+#: written and before the user is asked what to put back.
+_read_manifest_only = read_manifest
 
 
 def _existing_state(target: Path, size: int) -> str:

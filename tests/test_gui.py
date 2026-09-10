@@ -189,10 +189,18 @@ def test_importing_the_gui_package_does_not_need_tkinter():
     import importlib
     import sys
 
-    for name in [n for n in sys.modules if n.startswith("winmigrate.gui")]:
-        del sys.modules[name]
-    importlib.import_module("winmigrate.gui")
-    assert "tkinter" not in sys.modules
+    # Put them back afterwards. Clearing them permanently re-imports the package
+    # for every later test, and a re-imported enum is a *different class*: the
+    # Step another module already holds stops being identical to the fresh one,
+    # and comparisons quietly start failing several files away.
+    saved = {n: m for n, m in sys.modules.items() if n.startswith("winmigrate.gui")}
+    try:
+        for name in saved:
+            del sys.modules[name]
+        importlib.import_module("winmigrate.gui")
+        assert "tkinter" not in sys.modules
+    finally:
+        sys.modules.update(saved)
 
 
 # --- the window itself -----------------------------------------------------
@@ -436,3 +444,169 @@ def test_the_frozen_entry_point_reports_anything_that_escapes():
     assert "MessageBoxW" in source
     assert "except BaseException" in source
     assert "extract" in source.lower()
+
+
+# --- putting a backup back -------------------------------------------------
+def test_the_restore_list_comes_from_the_manifest_not_the_sidecar(tmp_path: Path):
+    """The sidecar redacts every secret item to a stub, and browser profiles,
+    SSH keys and the Notepad session are exactly what someone might want to
+    leave off a shared machine. Choosing between them means seeing them, which
+    means the passphrase — which is why the backup is opened before the choosing
+    page is reached.
+    """
+    from winmigrate import capture as capture_mod
+    from winmigrate import restore as restore_mod
+    from winmigrate.capture import CaptureOptions
+    from winmigrate.config import ScanConfig
+    from winmigrate.gui import selection as sel
+    from winmigrate.platform_win import Environment
+    from winmigrate.scan import run_scan
+
+    profile = tmp_path / "alice"
+    (profile / "Documents").mkdir(parents=True)
+    (profile / "Documents" / "a.txt").write_text("doc", encoding="utf-8")
+    ssh = profile / ".ssh"
+    ssh.mkdir()
+    (ssh / "id_rsa").write_text("PRIVATE KEY", encoding="utf-8")
+
+    env = Environment.fixture(profile, {})
+    config = ScanConfig(profile_root=profile, include_software=False)
+    bundle = tmp_path / "b.dat"
+    capture_mod.capture(
+        run_scan(config, env),
+        CaptureOptions(output=bundle, passphrase="pw", use_vss=False),
+        config,
+        env,
+    )
+
+    sidecar = restore_mod.load_sidecar(bundle)
+    secret_in_sidecar = [
+        i for i in sidecar["items"] if i.get("id") == "dev:ssh" and not i.get("redacted")
+    ]
+    assert not secret_in_sidecar  # the sidecar cannot answer this
+
+    manifest = restore_mod.read_manifest(bundle, "pw")
+    rows = {row.item_id: row for row in sel.rows_from_manifest(manifest)}
+    assert "files:documents" in rows
+    assert rows["dev:ssh"].secret is True  # named, so it can be unticked
+
+
+def test_records_and_followups_are_not_offered_as_restore_choices():
+    """Printers, the software inventory and the follow-up list are how a restore
+    explains itself. They are not files, and they always come."""
+    from winmigrate.gui import selection as sel
+
+    manifest = {
+        "items": [
+            {"id": "files:documents", "kind": "tree", "action": "capture",
+             "title": "Documents", "category": "user_files"},
+            {"id": "settings:printers", "kind": "record", "action": "capture",
+             "title": "Printers", "category": "printers"},
+            {"id": "sync:onedrive:0", "kind": "report", "action": "skip",
+             "title": "OneDrive", "category": "user_files"},
+            {"id": "files:music", "kind": "tree", "action": "skip", "title": "Music",
+             "category": "user_files"},
+        ]
+    }
+    assert [r.item_id for r in sel.rows_from_manifest(manifest)] == ["files:documents"]
+
+
+def test_a_restore_selection_reaches_the_real_restore_unchanged(tmp_path: Path):
+    """The window builds RestoreOptions.items from the ticked rows and hands them
+    to the same restore() the command line calls. If the ids did not line up the
+    window would restore everything, or nothing, and look like it worked."""
+    from winmigrate import capture as capture_mod
+    from winmigrate import restore as restore_mod
+    from winmigrate.capture import CaptureOptions
+    from winmigrate.config import ScanConfig
+    from winmigrate.gui import selection as sel
+    from winmigrate.platform_win import Environment
+    from winmigrate.restore import RestoreOptions
+    from winmigrate.scan import run_scan
+
+    profile = tmp_path / "alice"
+    for folder in ("Documents", "Pictures", "Music"):
+        (profile / folder).mkdir(parents=True)
+        (profile / folder / "f.bin").write_bytes(folder.encode() * 50)
+
+    env = Environment.fixture(profile, {})
+    config = ScanConfig(profile_root=profile, include_software=False)
+    bundle = tmp_path / "b.dat"
+    capture_mod.capture(
+        run_scan(config, env),
+        CaptureOptions(output=bundle, passphrase="pw", use_vss=False),
+        config,
+        env,
+    )
+
+    manifest = restore_mod.read_manifest(bundle, "pw")
+    rows = sel.rows_from_manifest(manifest)
+    chosen = {r.item_id for r in rows if "music" not in r.item_id}
+
+    destination = tmp_path / "restored"
+    destination.mkdir()
+    report = restore_mod.restore(
+        RestoreOptions(
+            bundle=bundle, passphrase="pw", destination=destination,
+            items=tuple(sorted(chosen)),
+        )
+    )
+    assert report.ok
+    assert {p.parent.name for p in destination.rglob("*.bin")} == {"Documents", "Pictures"}
+
+
+def test_a_dry_run_from_the_window_writes_nothing(tmp_path: Path):
+    """The practice run is the one thing standing between someone and an
+    irreversible write onto a machine they have not backed up."""
+    from winmigrate import capture as capture_mod
+    from winmigrate import restore as restore_mod
+    from winmigrate.capture import CaptureOptions
+    from winmigrate.config import ScanConfig
+    from winmigrate.platform_win import Environment
+    from winmigrate.restore import RestoreOptions
+    from winmigrate.scan import run_scan
+
+    profile = tmp_path / "alice"
+    (profile / "Documents").mkdir(parents=True)
+    (profile / "Documents" / "a.txt").write_text("doc", encoding="utf-8")
+    env = Environment.fixture(profile, {})
+    config = ScanConfig(profile_root=profile, include_software=False)
+    bundle = tmp_path / "b.dat"
+    capture_mod.capture(
+        run_scan(config, env),
+        CaptureOptions(output=bundle, passphrase="pw", use_vss=False),
+        config,
+        env,
+    )
+
+    destination = tmp_path / "nowhere"
+    report = restore_mod.restore(
+        RestoreOptions(
+            bundle=bundle, passphrase="pw", destination=destination, dry_run=True
+        )
+    )
+    assert report.dry_run and report.restored_files > 0
+    assert not destination.exists()
+
+
+def test_the_window_recovers_onto_a_page_that_belongs_to_the_current_job(monkeypatch):
+    """After an error the window has to land somewhere the user can act. A page
+    from the other branch, or one whose data was never gathered, turns one
+    failure into a second."""
+    import importlib
+
+    from winmigrate.gui.wizard import BACKUP_ORDER, Mode, RESTORE_ORDER, Step, WizardData
+
+    stub_tkinter(monkeypatch)
+    app = importlib.import_module("winmigrate.gui.app")
+    wizard = object.__new__(app.WinMigrateWizard)
+
+    wizard.data = WizardData(mode=Mode.RESTORE)
+    assert app.WinMigrateWizard._recovery_step(wizard) is Step.SOURCE
+    wizard.data.bundle_open = True
+    assert app.WinMigrateWizard._recovery_step(wizard) in RESTORE_ORDER
+
+    wizard.data = WizardData(mode=Mode.BACKUP)
+    assert app.WinMigrateWizard._recovery_step(wizard) is Step.WELCOME
+    wizard.data.scan_done = True
+    assert app.WinMigrateWizard._recovery_step(wizard) in BACKUP_ORDER

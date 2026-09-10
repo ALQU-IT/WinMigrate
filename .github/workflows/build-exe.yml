@@ -148,25 +148,69 @@ jobs:
           & ".\dist\tkcheck\tkcheck.exe"
           if ($LASTEXITCODE -ne 0) { throw "tkinter did not survive freezing" }
 
-      - name: Package
+      # Laid out flat, and NOT zipped here.
+      #
+      # upload-artifact always zips whatever it is given, so handing it a .zip
+      # produces a zip inside a zip. Beyond being annoying, that is the exact
+      # trap this build layout exists to avoid: the inner zip opens in Explorer's
+      # viewer, WinMigrate.exe gets double-clicked from inside it, and Tcl is not
+      # there. Uploading the files raw means the one zip GitHub makes has
+      # WinMigrate.exe and _internal at its root, where extracting is the
+      # obvious thing to do.
+      - name: Lay out the package
         shell: pwsh
         run: |
-          $size = (Get-ChildItem .\dist\WinMigrate -Recurse | Measure-Object -Property Length -Sum).Sum
-          Write-Host "WinMigrate folder: $([math]::Round($size / 1MB, 1)) MB"
-          Compress-Archive -Path .\dist\WinMigrate\* -DestinationPath .\dist\WinMigrate-windows.zip -Force
-          Copy-Item .\dist\winmigrate-cli.exe .\dist\ -ErrorAction SilentlyContinue
-          Get-FileHash .\dist\WinMigrate-windows.zip, .\dist\winmigrate-cli.exe -Algorithm SHA256 |
+          $staging = ".\staging"
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          Copy-Item .\dist\WinMigrate\* -Destination $staging -Recurse -Force
+          Copy-Item .\dist\winmigrate-cli.exe -Destination $staging -Force
+
+          @"
+          WinMigrate
+          ==========
+
+          EXTRACT THIS FOLDER FIRST, then run WinMigrate.exe from the extracted
+          copy. Running it from inside the .zip appears to work and then fails:
+          the program needs the _internal folder sitting next to it.
+
+          A USB drive is a good place to extract to -- WinMigrate offers to save
+          the backup onto whichever drive it is running from.
+
+          WinMigrate.exe        the window. Start here.
+          winmigrate-cli.exe    the same thing on the command line, one file.
+          _internal\            everything the window needs. Do not move it.
+
+          Windows will ask for administrator rights. That is what allows a
+          shadow copy, which is the only way to copy files your browser and
+          Outlook are holding open. Saying no still makes a backup; those files
+          are listed at the end as skipped.
+          "@ | Set-Content -Encoding UTF8 "$staging\READ ME FIRST.txt"
+
+          Get-FileHash "$staging\WinMigrate.exe", "$staging\winmigrate-cli.exe" -Algorithm SHA256 |
             ForEach-Object { "$($_.Hash)  $(Split-Path $_.Path -Leaf)" } |
-            Set-Content .\dist\SHA256SUMS.txt
-          Get-Content .\dist\SHA256SUMS.txt
+            Set-Content "$staging\SHA256SUMS.txt"
+
+          $size = (Get-ChildItem $staging -Recurse | Measure-Object -Property Length -Sum).Sum
+          Write-Host "package: $([math]::Round($size / 1MB, 1)) MB"
+          Get-ChildItem $staging | Select-Object Name, Length | Format-Table
+
+      - name: Check the package is laid out the way it will be used
+        shell: pwsh
+        run: |
+          # What someone gets after extracting, checked here rather than
+          # discovered on their machine.
+          foreach ($required in @("WinMigrate.exe", "winmigrate-cli.exe", "_internal", "READ ME FIRST.txt")) {
+            if (-not (Test-Path ".\staging\$required")) { throw "$required is missing from the package" }
+          }
+          if (Get-ChildItem .\staging -Filter *.zip) { throw "a zip inside the package: it would nest when uploaded" }
+          if (-not (Get-ChildItem .\staging\_internal -Recurse -Filter init.tcl)) {
+            throw "init.tcl is not beside the executable; the window would not start"
+          }
 
       - uses: actions/upload-artifact@v4
         with:
           name: WinMigrate-${{ steps.version.outputs.version }}-windows
-          path: |
-            dist/WinMigrate-windows.zip
-            dist/winmigrate-cli.exe
-            dist/SHA256SUMS.txt
+          path: staging/*
           retention-days: 30
           if-no-files-found: error
 
@@ -182,21 +226,31 @@ jobs:
         with:
           pattern: WinMigrate-*-windows
           merge-multiple: true
-          path: dist
+          path: package
+      # Release assets are not zipped for you, so the zip is made here -- from
+      # the same flat layout the artifact holds, so both routes deliver an
+      # identical folder.
+      - name: Zip for the release
+        run: |
+          cd package
+          zip -r ../WinMigrate-windows.zip . -x 'winmigrate-cli.exe'
+          cd ..
+          cp package/winmigrate-cli.exe package/SHA256SUMS.txt .
+          unzip -l WinMigrate-windows.zip | head -20
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/WinMigrate-windows.zip
-            dist/winmigrate-cli.exe
-            dist/SHA256SUMS.txt
+            WinMigrate-windows.zip
+            winmigrate-cli.exe
+            SHA256SUMS.txt
           body: |
             Windows build of WinMigrate. Neither download needs Python installed.
 
-            - `WinMigrate-windows.zip` — the window. **Extract the whole folder**
-              somewhere first (a USB drive is a good place), then run
-              `WinMigrate.exe` from inside it. Running it from inside the zip
-              works by accident and will not keep working: the program needs the
-              files that sit next to it.
+            - `WinMigrate-windows.zip` — the window. **Extract it first**, then run
+              `WinMigrate.exe` from the extracted folder. Running it from inside
+              the zip appears to work and then fails: the program needs the
+              `_internal` folder sitting next to it. A USB drive is a good place
+              to extract to.
             - `winmigrate-cli.exe` — the command line, a single file, for
               scripted runs.
 

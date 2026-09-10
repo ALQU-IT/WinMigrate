@@ -115,3 +115,70 @@ def selected_totals(rows: list[Row], selected_ids: set[str]) -> tuple[int, int]:
             total_bytes += row.size_bytes
             total_files += row.file_count
     return total_bytes, total_files
+
+
+# --- the other direction ---------------------------------------------------
+#: Manifest actions that mean the item's files are actually in the bundle.
+CAPTURED = "capture"
+
+
+def rows_from_manifest(manifest: dict) -> list[Row]:
+    """The list shown when putting a backup back.
+
+    Built from the manifest inside the bundle rather than the plaintext sidecar,
+    because the sidecar redacts every secret item down to a stub -- and browser
+    profiles, SSH keys and the Notepad session are exactly the things someone
+    might want to leave off a shared machine. Choosing between them means seeing
+    them, which means the passphrase, which is why the backup is opened before
+    this page is reached.
+
+    Only items whose files are in the bundle appear. A record of the printers,
+    the software inventory and the follow-up list are not things to tick: they
+    are how the restore explains itself, and they always come.
+    """
+    rows: list[Row] = []
+    for item in manifest.get("items", []):
+        if not isinstance(item, dict):
+            continue
+        if item.get("kind") not in ("tree", "file"):
+            continue
+        if item.get("action") != CAPTURED:
+            continue
+        rows.append(
+            Row(
+                item_id=str(item.get("id", "")),
+                title=str(item.get("title", item.get("id", ""))),
+                category=str(item.get("category", "")).replace("_", " "),
+                size_bytes=int(item.get("size_bytes") or 0),
+                file_count=int(item.get("file_count") or 0),
+                secret=item.get("sensitivity") == "secret",
+                selectable=True,
+                selected=True,
+                reason="",
+            )
+        )
+    return sorted(rows, key=lambda row: (row.category, row.title.lower()))
+
+
+def restore_target_of(manifest: dict, item_id: str) -> str:
+    """Where the manifest says an item goes, for the confirmation page."""
+    for item in manifest.get("items", []):
+        if isinstance(item, dict) and item.get("id") == item_id:
+            spec = item.get("restore")
+            if isinstance(spec, dict):
+                return str(spec.get("target", ""))
+    return ""
+
+
+def followups_in(manifest: dict) -> list[tuple[str, str]]:
+    """``(title, why)`` for each thing the restore cannot finish itself.
+
+    The whole design stops at anything needing a person's identity -- account
+    sign-ins, licence activation -- so this list is the actual output of a
+    restore, not a footnote to it.
+    """
+    found: list[tuple[str, str]] = []
+    for raw in manifest.get("followups", []):
+        if isinstance(raw, dict):
+            found.append((str(raw.get("title", "")), str(raw.get("why", ""))))
+    return found

@@ -40,7 +40,7 @@ from ..platform_win import Environment
 from ..scan import run_scan
 from ..util import humanize
 from . import defaults, elevate, selection, theme
-from .wizard import Step, WizardData
+from .wizard import Mode, Step, WizardData
 
 log = logging.getLogger(__name__)
 
@@ -147,7 +147,9 @@ class WinMigrateWizard:
         self.options = options
 
         self.data = WizardData(profile_root=options.get("profile_root") or str(Path.home()))
-        self.step = Step.WELCOME
+        self.step = Step.CHOOSE
+        self.manifest: dict | None = None
+        self.restore_report: Any = None
         self.scan_result: ScanResult | None = None
         self.capture_report: Any = None
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
@@ -166,7 +168,7 @@ class WinMigrateWizard:
 
         self._build_chrome()
         self._build_pages()
-        self._show(Step.WELCOME)
+        self._show(Step.CHOOSE)
         self.root.after(80, self._drain_events)
 
     # --- the frame around every page ---------------------------------------
@@ -235,6 +237,13 @@ class WinMigrateWizard:
     def _build_pages(self) -> None:
         self.pages: dict[Step, Any] = {}
         for step, builder in (
+            (Step.CHOOSE, self._page_choose),
+            (Step.SOURCE, self._page_source),
+            (Step.OPENING, self._page_opening),
+            (Step.RESTORE_SELECT, self._page_restore_select),
+            (Step.RESTORE_CONFIRM, self._page_restore_confirm),
+            (Step.RESTORING, self._page_restoring),
+            (Step.RESTORE_DONE, self._page_restore_done),
             (Step.WELCOME, self._page_welcome),
             (Step.SCANNING, self._page_scanning),
             (Step.SELECT, self._page_select),
@@ -246,6 +255,179 @@ class WinMigrateWizard:
             frame = self.ttk.Frame(self.page_area, style="Page.TFrame")
             builder(frame)
             self.pages[step] = frame
+
+    def _page_choose(self, page: Any) -> None:
+        tk, ttk = self.tk, self.ttk
+        self.mode_var = tk.StringVar(value=Mode.BACKUP.value)
+        for value, heading, blurb in (
+            (
+                Mode.BACKUP.value,
+                "Back up this machine",
+                "Look through this profile and copy what you choose into one "
+                "encrypted file. Nothing on this machine is changed.",
+            ),
+            (
+                Mode.RESTORE.value,
+                "Restore a backup onto this machine",
+                "Open a backup made elsewhere and put its files here. Files "
+                "already here are kept unless you say otherwise.",
+            ),
+        ):
+            ttk.Radiobutton(
+                page,
+                text=heading,
+                value=value,
+                variable=self.mode_var,
+                style="Wizard.TRadiobutton",
+                command=self._refresh_buttons,
+            ).pack(anchor="w", pady=(14, 0))
+            ttk.Label(page, text="     " + blurb, style="Hint.TLabel", wraplength=600,
+                      justify="left").pack(anchor="w")
+
+    def _page_source(self, page: Any) -> None:
+        tk, ttk = self.tk, self.ttk
+        ttk.Label(page, text="Backup file", style="Body.TLabel").pack(anchor="w")
+        row = ttk.Frame(page, style="Page.TFrame")
+        row.pack(fill="x", pady=(4, 2))
+        self.bundle_var = tk.StringVar(value="")
+        ttk.Entry(row, textvariable=self.bundle_var).pack(side="left", fill="x", expand=True)
+        ttk.Button(row, text="Browse…", command=self._pick_bundle).pack(side="left", padx=(8, 0))
+        self.bundle_summary = ttk.Label(
+            page, text="", style="Hint.TLabel", wraplength=620, justify="left"
+        )
+        self.bundle_summary.pack(anchor="w", pady=(6, 18))
+
+        ttk.Label(page, text="Passphrase", style="Body.TLabel").pack(anchor="w")
+        self.bundle_passphrase = ttk.Entry(page, show="•")
+        self.bundle_passphrase.pack(fill="x", pady=(4, 6))
+        self.bundle_passphrase.bind("<KeyRelease>", lambda _e: self._refresh_buttons())
+        ttk.Label(
+            page,
+            text="Used only to open the backup and read what is in it. Nothing is "
+            "written to this machine until you have chosen what to put back.",
+            style="Hint.TLabel",
+            wraplength=620,
+            justify="left",
+        ).pack(anchor="w", pady=(4, 0))
+
+    def _page_opening(self, page: Any) -> None:
+        ttk = self.ttk
+        self.open_bar = ttk.Progressbar(page, mode="indeterminate")
+        self.open_bar.pack(fill="x", pady=(30, 14))
+        self.open_status = ttk.Label(page, text="Checking the file…", style="Body.TLabel")
+        self.open_status.pack(anchor="w")
+
+    def _page_restore_select(self, page: Any) -> None:
+        ttk = self.ttk
+        holder = ttk.Frame(page, style="Page.TFrame")
+        holder.pack(fill="both", expand=True)
+        columns = ("pick", "title", "kind", "size", "files", "note")
+        self.restore_tree = ttk.Treeview(
+            holder, columns=columns, show="headings", selectmode="none",
+            style="Wizard.Treeview",
+        )
+        for name, heading, width, anchor, stretch in (
+            ("pick", "", 36, "center", False),
+            ("title", "Item", 300, "w", True),
+            ("kind", "Kind", 120, "w", False),
+            ("size", "Size", 90, "e", False),
+            ("files", "Files", 80, "e", False),
+            ("note", "", 200, "w", True),
+        ):
+            self.restore_tree.heading(name, text=heading)
+            self.restore_tree.column(name, width=width, anchor=anchor, stretch=stretch)
+        bar = ttk.Scrollbar(holder, orient="vertical", command=self.restore_tree.yview)
+        self.restore_tree.configure(yscrollcommand=bar.set)
+        self.restore_tree.pack(side="left", fill="both", expand=True)
+        bar.pack(side="right", fill="y")
+        self.restore_tree.tag_configure("secret", foreground=theme.SECRET)
+        self.restore_tree.bind("<Button-1>", self._on_restore_tree_click)
+
+        row = ttk.Frame(page, style="Page.TFrame")
+        row.pack(fill="x", pady=(10, 4))
+        ttk.Button(row, text="Select all", command=lambda: self._set_all_restore(True)).pack(
+            side="left"
+        )
+        ttk.Button(row, text="Select none", command=lambda: self._set_all_restore(False)).pack(
+            side="left", padx=8
+        )
+        self.restore_total = self.ttk.Label(row, text="", style="Body.TLabel")
+        self.restore_total.pack(side="right")
+
+    def _page_restore_confirm(self, page: Any) -> None:
+        tk, ttk = self.tk, self.ttk
+        ttk.Label(page, text="Put the files into", style="Body.TLabel").pack(anchor="w")
+        row = ttk.Frame(page, style="Page.TFrame")
+        row.pack(fill="x", pady=(4, 2))
+        self.destination_var = tk.StringVar(value="")
+        ttk.Entry(row, textvariable=self.destination_var).pack(
+            side="left", fill="x", expand=True
+        )
+        ttk.Button(row, text="Change…", command=self._pick_destination).pack(
+            side="left", padx=(8, 0)
+        )
+        ttk.Label(
+            page,
+            text="Defaults to this machine's own profile, which is where a migration "
+            "goes. Point it somewhere else to unpack a backup without touching your "
+            "own files.",
+            style="Hint.TLabel",
+            wraplength=620,
+            justify="left",
+        ).pack(anchor="w", pady=(0, 16))
+
+        self.dry_run_var = tk.BooleanVar(value=False)
+        self.overwrite_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            page, text="Practice run — report what would happen, write nothing",
+            variable=self.dry_run_var, style="Wizard.TCheckbutton",
+            command=self._refresh_restore_summary,
+        ).pack(anchor="w")
+        ttk.Checkbutton(
+            page, text="Replace files that are already here and differ",
+            variable=self.overwrite_var, style="Wizard.TCheckbutton",
+            command=self._refresh_restore_summary,
+        ).pack(anchor="w", pady=(6, 0))
+        ttk.Label(
+            page,
+            text="     Off, your own version of a file is kept and the backup's copy "
+            "is left out. Identical files are skipped either way.",
+            style="Hint.TLabel",
+            wraplength=620,
+            justify="left",
+        ).pack(anchor="w")
+
+        self.restore_summary = ttk.Label(
+            page, text="", style="Body.TLabel", justify="left", wraplength=640
+        )
+        self.restore_summary.pack(anchor="w", pady=(18, 0))
+
+    def _page_restoring(self, page: Any) -> None:
+        ttk = self.ttk
+        self.restore_bar = ttk.Progressbar(page, mode="determinate", maximum=1000)
+        self.restore_bar.pack(fill="x", pady=(30, 14))
+        self.restore_status = ttk.Label(page, text="Starting…", style="Body.TLabel")
+        self.restore_status.pack(anchor="w")
+        self.restore_detail = ttk.Label(page, text="", style="Hint.TLabel", wraplength=640)
+        self.restore_detail.pack(anchor="w", pady=(6, 0))
+
+    def _page_restore_done(self, page: Any) -> None:
+        ttk = self.ttk
+        self.restore_done_text = ttk.Label(
+            page, text="", style="Body.TLabel", justify="left", wraplength=640
+        )
+        self.restore_done_text.pack(anchor="w", pady=(6, 8))
+        holder = ttk.Frame(page, style="Page.TFrame")
+        holder.pack(fill="both", expand=True)
+        self.followup_box = self.tk.Text(
+            holder, height=10, wrap="word", relief="flat", background=theme.PAGE,
+            foreground=theme.INK, borderwidth=0, highlightthickness=1,
+            highlightbackground=theme.RULE,
+        )
+        bar = ttk.Scrollbar(holder, orient="vertical", command=self.followup_box.yview)
+        self.followup_box.configure(yscrollcommand=bar.set)
+        self.followup_box.pack(side="left", fill="both", expand=True)
+        bar.pack(side="right", fill="y")
 
     def _page_welcome(self, page: Any) -> None:
         tk, ttk = self.tk, self.ttk
@@ -422,7 +604,8 @@ class WinMigrateWizard:
         self.subtitle_label.configure(text=subtitle)
         self.pages[step].pack(fill="both", expand=True)
 
-        current = wizard.rail_index(step)
+        current = wizard.rail_index(step, self.data.mode)
+        self._relabel_rail()
         for index, label in enumerate(self.rail_labels):
             marker = theme.rail_marker(index, current)
             text = label.cget("text").strip()
@@ -433,8 +616,42 @@ class WinMigrateWizard:
         self._on_enter(step)
         self._refresh_buttons()
 
+    def _relabel_rail(self) -> None:
+        """The rail says different things depending on the job.
+
+        Backing up and restoring have a different number of stages, so the
+        entries are rewritten when the mode is chosen rather than one rail being
+        made to describe both badly.
+        """
+        from .wizard import RAIL_LABELS, progress_steps
+
+        entries = progress_steps(self.data.mode)
+        for index, label in enumerate(self.rail_labels):
+            if index < len(entries):
+                label.configure(text=f"  {RAIL_LABELS[entries[index]]}")
+                label.pack(anchor="w", padx=16, pady=4)
+            else:
+                # Restoring has fewer stages; the spare entries are hidden
+                # rather than left showing a step that will never arrive.
+                label.pack_forget()
+
     def _on_enter(self, step: Step) -> None:
-        if step is Step.WELCOME:
+        if step is Step.SOURCE:
+            self._describe_bundle()
+        elif step is Step.OPENING:
+            self.open_bar.start(14)
+            self._start_open()
+        elif step is Step.RESTORE_SELECT:
+            self._render_restore_rows()
+        elif step is Step.RESTORE_CONFIRM:
+            if not self.destination_var.get():
+                self.destination_var.set(str(Path.home()))
+            self._refresh_restore_summary()
+        elif step is Step.RESTORING:
+            self._start_restore()
+        elif step is Step.RESTORE_DONE:
+            self._render_restore_done()
+        elif step is Step.WELCOME:
             self._update_elevation_note()
         elif step is Step.SCANNING:
             self.scan_bar.start(14)
@@ -454,10 +671,16 @@ class WinMigrateWizard:
 
     def _collect(self) -> None:
         """Pull the widgets' values into the data the rules are checked against."""
+        self.data.mode = Mode(self.mode_var.get())
         self.data.profile_root = self.profile_var.get()
         self.data.output_path = self.output_var.get()
         self.data.passphrase = self.passphrase.get()
         self.data.passphrase_confirm = self.passphrase2.get()
+        self.data.bundle_path = self.bundle_var.get()
+        self.data.bundle_passphrase = self.bundle_passphrase.get()
+        self.data.destination = self.destination_var.get()
+        self.data.dry_run = self.dry_run_var.get()
+        self.data.overwrite = self.overwrite_var.get()
 
     def _refresh_buttons(self) -> None:
         from . import wizard
@@ -470,9 +693,10 @@ class WinMigrateWizard:
             state="disabled" if (automatic or not verdict.ok) else "normal",
         )
         self.back_button.configure(
-            state="normal" if wizard.can_go_back(self.step) else "disabled"
+            state="normal" if wizard.can_go_back(self.step, self.data.mode) else "disabled"
         )
-        self.cancel_button.configure(text="Close" if self.step is Step.DONE else "Cancel")
+        finished = self.step in wizard.TERMINAL
+        self.cancel_button.configure(text="Close" if finished else "Cancel")
         self.hint.configure(text=verdict.message if not verdict.ok else "")
         if self.step is Step.WELCOME:
             self._update_elevation_note()
@@ -483,29 +707,31 @@ class WinMigrateWizard:
         self._collect()
         if not wizard.check(self.step, self.data).ok:
             return
-        if self.step is Step.DONE:
+        if self.step in wizard.TERMINAL:
             self.root.destroy()
             return
         if self.step is Step.WELCOME and self._maybe_elevate():
             return
-        following = wizard.next_step(self.step)
+        following = wizard.next_step(self.step, self.data.mode)
         if following is not None:
             self._show(following)
 
     def _go_back(self) -> None:
         from . import wizard
 
-        earlier = wizard.previous_step(self.step)
+        earlier = wizard.previous_step(self.step, self.data.mode)
         if earlier is not None:
             self._show(earlier)
 
     def _cancel(self) -> None:
         from tkinter import messagebox  # noqa: PLC0415
 
-        if self.step is Step.DONE:
+        from . import wizard
+
+        if self.step in wizard.TERMINAL:
             self.root.destroy()
             return
-        if self.step is Step.WORKING:
+        if self.step in (Step.WORKING, Step.RESTORING):
             if messagebox.askyesno(
                 "WinMigrate",
                 "Stop the backup?\n\nThe part written so far will not be a usable "
@@ -732,6 +958,228 @@ class WinMigrateWizard:
         except OSError as exc:
             log.warning("could not open %s: %s", target, exc)
 
+    # --- restoring ---------------------------------------------------------
+    def _pick_bundle(self) -> None:
+        from tkinter import filedialog  # noqa: PLC0415
+
+        chosen = filedialog.askopenfilename(
+            title="Choose the backup",
+            filetypes=[("WinMigrate backup", "*.dat"), ("All files", "*.*")],
+        )
+        if chosen:
+            self.bundle_var.set(chosen)
+            self._describe_bundle()
+            self._refresh_buttons()
+
+    def _describe_bundle(self) -> None:
+        """What can be said about the file without the passphrase.
+
+        The header and the sidecar are plaintext by design, so the machine it
+        came from and when it was made can be shown before anyone commits to
+        typing anything -- and the transfer check can run, which catches a
+        truncated copy without asking for a secret.
+        """
+        path = self.bundle_var.get().strip()
+        if not path or not Path(path).is_file():
+            self.bundle_summary.configure(text="")
+            return
+        from .. import restore as restore_mod  # noqa: PLC0415
+
+        try:
+            header = restore_mod.inspect(path)
+        except Exception as exc:  # noqa: BLE001 -- a bad file is a message, not a crash
+            self.bundle_summary.configure(text=f"This does not look like a backup: {exc}")
+            return
+        parts = [f"Made {header.get('created_utc', 'at an unknown time')}"]
+        sidecar = restore_mod.load_sidecar(Path(path))
+        if isinstance(sidecar, dict):
+            source = sidecar.get("source") or {}
+            if isinstance(source, dict) and source.get("hostname"):
+                parts.append(f"on {source['hostname']}")
+                if source.get("username"):
+                    parts[-1] += f" ({source['username']})"
+            items = sidecar.get("items")
+            if isinstance(items, list):
+                parts.append(f"{len(items)} item(s)")
+        checked, error = restore_mod.verify_sidecar(Path(path))
+        if error:
+            parts.append(f"⚠ {error} — do not trust this file")
+        elif checked:
+            parts.append("arrived intact")
+        self.bundle_summary.configure(text=" · ".join(parts))
+
+    def _start_open(self) -> None:
+        threading.Thread(
+            target=self._open_worker,
+            args=(Path(self.bundle_var.get()), self.bundle_passphrase.get()),
+            daemon=True,
+        ).start()
+
+    def _open_worker(self, bundle: Path, passphrase: str) -> None:
+        from .. import restore as restore_mod  # noqa: PLC0415
+
+        try:
+            self.events.put(("status", "Checking the file arrived intact…"))
+            manifest = restore_mod.read_manifest(bundle, passphrase)
+            self.events.put(("opened", manifest))
+        except Exception as exc:  # noqa: BLE001 -- surfaced on the page
+            self.events.put(("open-failed", str(exc)))
+
+    def _render_restore_rows(self) -> None:
+        self.restore_tree.delete(*self.restore_tree.get_children())
+        for row in self.data.restore_rows:
+            mark = TICKED if row.item_id in self.data.restore_selected else UNTICKED
+            self.restore_tree.insert(
+                "",
+                "end",
+                iid=row.item_id,
+                values=(
+                    mark,
+                    row.title,
+                    row.category,
+                    humanize.bytes_(row.size_bytes) if row.size_bytes else "",
+                    f"{row.file_count:,}" if row.file_count else "",
+                    "encrypted only" if row.secret else "",
+                ),
+                tags=("secret",) if row.secret else (),
+            )
+        total_bytes, total_files = selection.selected_totals(
+            self.data.restore_rows, self.data.restore_selected
+        )
+        self.restore_total.configure(
+            text=f"{humanize.bytes_(total_bytes)} in {total_files:,} files"
+        )
+        self._refresh_buttons()
+
+    def _on_restore_tree_click(self, event: Any) -> None:
+        if self.restore_tree.identify_region(event.x, event.y) != "cell":
+            return
+        item_id = self.restore_tree.identify_row(event.y)
+        if not any(r.item_id == item_id for r in self.data.restore_rows):
+            return
+        if item_id in self.data.restore_selected:
+            self.data.restore_selected.discard(item_id)
+        else:
+            self.data.restore_selected.add(item_id)
+        self._render_restore_rows()
+
+    def _set_all_restore(self, on: bool) -> None:
+        self.data.restore_selected = (
+            {r.item_id for r in self.data.restore_rows} if on else set()
+        )
+        self._render_restore_rows()
+
+    def _pick_destination(self) -> None:
+        from tkinter import filedialog  # noqa: PLC0415
+
+        chosen = filedialog.askdirectory(
+            title="Restore into", initialdir=self.destination_var.get() or str(Path.home())
+        )
+        if chosen:
+            self.destination_var.set(chosen)
+            self._refresh_restore_summary()
+            self._refresh_buttons()
+
+    def _refresh_restore_summary(self) -> None:
+        total_bytes, total_files = selection.selected_totals(
+            self.data.restore_rows, self.data.restore_selected
+        )
+        lines = [
+            f"From:   {self.bundle_var.get()}",
+            f"Into:   {self.destination_var.get()}",
+            "",
+            f"{len(self.data.restore_selected)} item(s), "
+            f"{humanize.bytes_(total_bytes)} in {total_files:,} files",
+        ]
+        if self.dry_run_var.get():
+            lines += ["", "Practice run: nothing will be written."]
+        elif self.overwrite_var.get():
+            lines += ["", "Files already here that differ will be replaced."]
+        else:
+            lines += ["", "Files already here that differ will be kept, not replaced."]
+        self.restore_summary.configure(text="\n".join(lines))
+        self._refresh_buttons()
+
+    def _start_restore(self) -> None:
+        from ..restore import RestoreOptions  # noqa: PLC0415
+
+        total_bytes, _files = selection.selected_totals(
+            self.data.restore_rows, self.data.restore_selected
+        )
+        self._restore_total = max(total_bytes, 1)
+        self._restore_done_bytes = 0
+        self.restore_bar.configure(value=0)
+        options = RestoreOptions(
+            bundle=Path(self.bundle_var.get()),
+            passphrase=self.bundle_passphrase.get(),
+            destination=Path(self.destination_var.get()),
+            dry_run=self.dry_run_var.get(),
+            overwrite=self.overwrite_var.get(),
+            items=tuple(sorted(self.data.restore_selected)),
+        )
+        # The passphrase is in the options object now and nowhere the window can
+        # leak it, the same as on the backup side.
+        self.bundle_passphrase.delete(0, "end")
+        threading.Thread(target=self._restore_worker, args=(options,), daemon=True).start()
+
+    def _restore_worker(self, options: Any) -> None:
+        from .. import restore as restore_mod  # noqa: PLC0415
+
+        try:
+            report = restore_mod.restore(
+                options,
+                lambda title, size: self.events.put(("restore-bytes", (title, size))),
+            )
+            self.events.put(("restored", report))
+        except Exception as exc:  # noqa: BLE001 -- surfaced in the window
+            self.events.put(("error", (str(exc), traceback.format_exc())))
+
+    def _render_restore_done(self) -> None:
+        report = self.restore_report
+        if report is None:
+            self.restore_done_text.configure(text="Nothing was restored.")
+            return
+        verb = "Would have restored" if report.dry_run else "Restored"
+        lines = [
+            f"{verb} {report.restored_files:,} file(s), "
+            f"{humanize.bytes_(report.restored_bytes)}",
+            f"Into: {report.destination}",
+        ]
+        if report.skipped_existing:
+            lines.append(f"Already there and identical: {report.skipped_existing:,}")
+        if report.kept_existing:
+            lines.append(f"Your own version kept: {report.kept_existing:,}")
+        if report.digest_mismatches:
+            lines.append(
+                f"⚠ {len(report.digest_mismatches)} item(s) did not match the backup."
+            )
+        if report.failures:
+            lines.append(f"⚠ {len(report.failures)} file(s) could not be written.")
+        if report.dry_run:
+            lines += ["", "This was a practice run. Nothing was written."]
+        self.restore_done_text.configure(text="\n".join(lines))
+
+        self.followup_box.configure(state="normal")
+        self.followup_box.delete("1.0", "end")
+        followups = report.followups or []
+        if followups:
+            self.followup_box.insert(
+                "end",
+                "These need you rather than the tool — signing in to accounts, "
+                "licences, anything the operating system deliberately puts a person "
+                "in front of:\n\n",
+            )
+            for number, followup in enumerate(followups, start=1):
+                self.followup_box.insert("end", f"{number}. {followup.title}\n")
+                if followup.why:
+                    self.followup_box.insert("end", f"   {followup.why}\n")
+                for line in followup.steps:
+                    self.followup_box.insert("end", f"     • {line}\n")
+                self.followup_box.insert("end", "\n")
+        else:
+            self.followup_box.insert("end", "Nothing else needs doing.")
+        self.followup_box.configure(state="disabled")
+
     # --- workers -----------------------------------------------------------
     def _config(self) -> ScanConfig:
         root = self.profile_var.get().strip()
@@ -799,6 +1247,22 @@ class WinMigrateWizard:
         except Exception as exc:  # noqa: BLE001 -- surfaced in the window
             self.events.put(("error", (str(exc), traceback.format_exc())))
 
+    def _recovery_step(self) -> Step:
+        """Where to land after an error: the last page the user could act on.
+
+        Sending them to a page from the other branch, or to one whose data was
+        never gathered, turns one failure into a second one.
+        """
+        from .wizard import as_mode  # noqa: PLC0415
+
+        if as_mode(self.data.mode) is Mode.RESTORE:
+            if self.data.bundle_open:
+                return Step.RESTORE_CONFIRM
+            return Step.SOURCE
+        if self.data.scan_done:
+            return Step.SELECT
+        return Step.WELCOME
+
     # --- events ------------------------------------------------------------
     def _drain_events(self) -> None:
         try:
@@ -815,6 +1279,41 @@ class WinMigrateWizard:
         if kind == "status":
             if self.step is Step.SCANNING:
                 self.scan_status.configure(text=str(payload))
+            elif self.step is Step.OPENING:
+                self.open_status.configure(text=str(payload))
+        elif kind == "opened":
+            self.open_bar.stop()
+            self.manifest = payload
+            self.data.restore_rows = selection.rows_from_manifest(payload)
+            self.data.restore_selected = {r.item_id for r in self.data.restore_rows}
+            self.data.bundle_open = True
+            self._show(Step.RESTORE_SELECT)
+        elif kind == "open-failed":
+            self.open_bar.stop()
+            # Almost always a mistyped passphrase, so it goes back to the field
+            # rather than to a dialog that has to be dismissed first.
+            messagebox.showerror(
+                "WinMigrate",
+                f"The backup could not be opened.\n\n{payload}\n\n"
+                "The most likely reason is the passphrase.",
+            )
+            self._show(Step.SOURCE)
+        elif kind == "restore-bytes":
+            title, size = payload
+            self._restore_done_bytes += size
+            self.restore_bar.configure(
+                value=min(1000, int(self._restore_done_bytes / self._restore_total * 1000))
+            )
+            self.restore_status.configure(
+                text=f"{humanize.bytes_(self._restore_done_bytes)} of "
+                f"{humanize.bytes_(self._restore_total)}"
+            )
+            self.restore_detail.configure(text=str(title))
+        elif kind == "restored":
+            self.restore_bar.configure(value=1000)
+            self.restore_report = payload
+            self.data.restore_done = True
+            self._show(Step.RESTORE_DONE)
         elif kind == "bytes":
             title, size = payload
             self._capture_done += size
@@ -841,6 +1340,7 @@ class WinMigrateWizard:
         elif kind == "error":
             message, detail = payload
             self.scan_bar.stop()
+            self.open_bar.stop()
             log.error("%s", detail)
             messagebox.showerror("WinMigrate", message)
-            self._show(Step.WELCOME if not self.data.scan_done else Step.SELECT)
+            self._show(self._recovery_step())
