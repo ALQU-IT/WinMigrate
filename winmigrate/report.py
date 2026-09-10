@@ -286,6 +286,21 @@ def render_capture_report(report, console: Console) -> None:
         if note.severity is not Severity.INFO:
             console.print(f"[yellow]![/yellow] {note.message}" + (f" [dim]({note.detail})[/dim]" if note.detail else ""))
 
+    changed = getattr(report, "changed_while_reading", [])
+    if changed:
+        console.print(
+            f"[yellow]{len(changed)} file(s) changed while being read[/yellow] — they are in "
+            "the bundle, but were caught mid-write, so their contents may be inconsistent."
+        )
+        for path in changed[:10]:
+            console.print(f"  [dim]{path}[/dim]")
+        if len(changed) > 10:
+            console.print(f"  [dim]…and {len(changed) - 10} more; see the log.[/dim]")
+        console.print(
+            "[dim]Running the capture from an elevated prompt allows a shadow copy, "
+            "which gives every file a still point in time.[/dim]"
+        )
+
     if report.failures:
         table = Table(title=f"Could not capture ({len(report.failures)})", title_justify="left")
         table.add_column("Path", overflow="ellipsis", max_width=60)

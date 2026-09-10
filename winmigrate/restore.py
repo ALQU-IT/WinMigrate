@@ -150,6 +150,8 @@ def restore(options: RestoreOptions, progress: ProgressCallback | None = None) -
     destination = Path(os.fspath(options.destination)) if options.destination else _default_profile()
     report.destination = destination
     written: dict[str, str] = {}
+    already_present: dict[str, Path] = {}
+    unverifiable: set[str] = set()
 
     # The authoritative manifest is the last member of the stream, so selecting
     # items by id has to be resolved from the sidecar before extraction starts.
@@ -166,14 +168,17 @@ def restore(options: RestoreOptions, progress: ProgressCallback | None = None) -
                 info.name.startswith(f"{prefix}/") for prefix in prefixes
             ):
                 continue
-            _restore_member(info, stream, destination, options, report, written, progress)
+            _restore_member(
+                info, stream, destination, options, report, written,
+                already_present, unverifiable, progress,
+            )
 
     if report.manifest is None:
         raise IntegrityError(
             "the bundle contains no manifest: it is incomplete or not a WinMigrate bundle"
         )
     manifest_mod.validate(report.manifest)
-    _check_digests(report, written)
+    _check_digests(report, written, already_present, unverifiable)
     _collect_followups(report)
     if not options.dry_run:
         _write_reinstall_artifacts(report, destination)
@@ -196,6 +201,7 @@ def _load_manifest(stream) -> dict:
 
 def _restore_member(info, stream, destination: Path, options: RestoreOptions,
                     report: RestoreReport, written: dict[str, str],
+                    already_present: dict[str, Path], unverifiable: set[str],
                     progress: ProgressCallback | None) -> None:
     target = _target_for(info.name, destination)
     if target is None:
@@ -208,10 +214,17 @@ def _restore_member(info, stream, destination: Path, options: RestoreOptions,
 
     existing = _existing_state(target, info.size)
     if existing == "same":
-        # Re-running an interrupted restore must not redo finished work.
+        # Re-running an interrupted restore must not redo finished work. The
+        # file still counts towards the item's digest, so it is recorded and
+        # hashed from disk during verification -- otherwise a resumed restore
+        # would compare a partial tree and report corruption that is not there.
         report.skipped_existing += 1
+        already_present[info.name] = target
         return
     if existing == "differs" and not options.overwrite:
+        # The user's own version was kept, so it deliberately differs from the
+        # bundle and cannot be verified against it.
+        unverifiable.add(info.name)
         report.kept_existing += 1
         report.notes.append(
             Note(
@@ -238,6 +251,7 @@ def _restore_member(info, stream, destination: Path, options: RestoreOptions,
         os.replace(pathutil.extended(temporary), pathutil.extended(target))
     except OSError as exc:
         report.failures.append((str(target), exc.strerror or str(exc)))
+        unverifiable.add(info.name)
         log.warning("could not restore %s: %s", target, exc)
         return
 
@@ -351,35 +365,93 @@ def _target_for(archive_name: str, destination: Path) -> Path | None:
     return destination.joinpath(*parts)
 
 
-def _check_digests(report: RestoreReport, written: dict[str, str]) -> None:
-    """Compare what we wrote against the digests the manifest recorded."""
+def _check_digests(
+    report: RestoreReport,
+    written: dict[str, str],
+    already_present: dict[str, Path] | None = None,
+    unverifiable: set[str] | None = None,
+) -> None:
+    """Compare what is now on disk against the digests the manifest recorded.
+
+    The check covers the item's whole file set, not just what this run wrote.
+    A resumed restore skips files that are already in place, and comparing a
+    partial set against a whole-tree digest would report corruption on a
+    perfectly good resume -- so skipped files are hashed from disk instead.
+
+    Files that deliberately differ (the user kept their own version) or that
+    failed to write cannot be checked against the bundle. Rather than call that
+    a mismatch, the item is reported as partially verified.
+    """
+    from .util.hashing import hash_file, tree_digest  # noqa: PLC0415
+
+    already_present = already_present or {}
+    unverifiable = unverifiable or set()
     manifest = report.manifest or {}
-    from .util.hashing import tree_digest  # noqa: PLC0415
 
     for item in manifest.get("items", []):
         archive_path = item.get("archive_path")
         recorded = item.get("digest")
         if not archive_path or not recorded:
             continue
+
         if item.get("kind") == "file":
             # A single-file item's archive name is its path exactly; there is no
-            # trailing "/". Compare the plain file digest, not a tree digest --
-            # otherwise a corrupt single file passes verification unchecked.
+            # trailing "/". Compare the plain file digest, not a tree digest.
+            if archive_path in unverifiable:
+                _note_partial(report, item)
+                continue
             actual = written.get(archive_path)
+            if actual is None and archive_path in already_present:
+                actual = _digest_on_disk(already_present[archive_path], hash_file)
             if actual is not None and actual != recorded:
                 report.digest_mismatches.append(item["id"])
                 log.error("digest mismatch for item %s", item["id"])
             continue
+
+        prefix = f"{archive_path}/"
+        if any(name.startswith(prefix) for name in unverifiable):
+            _note_partial(report, item)
+            continue
+
         pairs = [
             (name[len(archive_path) + 1 :], digest)
             for name, digest in written.items()
-            if name.startswith(f"{archive_path}/")
+            if name.startswith(prefix)
         ]
-        if not pairs:
-            continue
-        if tree_digest(pairs) != recorded:
-            report.digest_mismatches.append(item["id"])
-            log.error("digest mismatch for item %s", item["id"])
+        for name, target in already_present.items():
+            if not name.startswith(prefix):
+                continue
+            digest = _digest_on_disk(target, hash_file)
+            if digest is None:
+                _note_partial(report, item)
+                break
+            pairs.append((name[len(archive_path) + 1 :], digest))
+        else:
+            if not pairs:
+                continue
+            if tree_digest(pairs) != recorded:
+                report.digest_mismatches.append(item["id"])
+                log.error("digest mismatch for item %s", item["id"])
+
+
+def _digest_on_disk(target: Path, hash_file) -> str | None:
+    """Hash a file that was already in place, or None if it cannot be read."""
+    try:
+        return hash_file(target)
+    except OSError as exc:
+        log.warning("could not verify %s: %s", target, exc)
+        return None
+
+
+def _note_partial(report: RestoreReport, item: dict[str, Any]) -> None:
+    report.notes.append(
+        Note(
+            Severity.INFO,
+            f"{item.get('title', item.get('id'))} was only partially verified",
+            "some of its files were kept as yours or could not be written, so they "
+            "cannot be compared against the bundle",
+        )
+    )
 
 
 def _write_reinstall_artifacts(report: RestoreReport, destination: Path) -> None:

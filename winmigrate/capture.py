@@ -73,6 +73,9 @@ class CaptureReport:
     duration_seconds: float = 0.0
     used_shadow_copy: bool = False
     failures: list[tuple[str, str]] = field(default_factory=list)
+    #: Files that changed while being read. They are in the bundle at their
+    #: declared length, but their contents were caught mid-write.
+    changed_while_reading: list[str] = field(default_factory=list)
     notes: list[Note] = field(default_factory=list)
 
     @property
@@ -149,6 +152,7 @@ def capture(
             shadow.remove()
 
     result = writer.result
+    report.changed_while_reading = list(result.changed_while_reading)
     report.bundle_bytes = result.ciphertext_size
     report.duration_seconds = time.monotonic() - started
 

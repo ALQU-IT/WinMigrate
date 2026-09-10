@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import logging
 import io
 import json
 import os
@@ -37,6 +38,8 @@ from . import crypto
 from .errors import IntegrityError, WinMigrateError
 from .manifest import BUNDLE_MAGIC
 from .util import paths as pathutil
+
+log = logging.getLogger(__name__)
 
 HEADER_LENGTH_SIZE = 4
 MAX_HEADER_BYTES = 1024 * 1024
@@ -68,15 +71,38 @@ class _HashingWriter:
         return self._digest.hexdigest()
 
 
-class _HashingReader:
-    """Wraps a file being read into a tar so it is hashed in the same pass."""
+class _ExactSizeReader:
+    """Yields exactly ``size`` bytes, hashing them on the way past.
 
-    def __init__(self, stream: BinaryIO):
+    A tar member declares its length in its header, and ``tarfile`` then copies
+    exactly that many bytes. A live profile does not hold still: a log rotates,
+    a browser rewrites its database, and the file can shrink between the stat
+    that sized the header and the read that fills it. ``tarfile`` raises on the
+    short read *after* writing the header, which leaves the stream misaligned --
+    and every later member, including the manifest, becomes unreadable.
+
+    So the size in the header is treated as a contract: short reads are padded
+    with NULs and a file that grew is truncated, meaning the stream can never
+    desynchronise. ``padded`` records whether that happened, so the capture can
+    report the file as caught mid-change rather than pretend it is intact.
+    """
+
+    def __init__(self, stream: BinaryIO, size: int):
         self._stream = stream
+        self._remaining = size
         self._digest = hashlib.sha256()
+        self.padded = 0
 
     def read(self, size: int = -1) -> bytes:
-        data = self._stream.read(size)
+        if self._remaining <= 0:
+            return b""
+        wanted = self._remaining if size is None or size < 0 else min(size, self._remaining)
+        data = self._stream.read(wanted)
+        if len(data) < wanted:
+            padding = b"\x00" * (wanted - len(data))
+            self.padded += len(padding)
+            data += padding
+        self._remaining -= len(data)
         self._digest.update(data)
         return data
 
@@ -95,6 +121,8 @@ class WriteResult:
     payload_size: int = 0
     chunk_count: int = 0
     file_digests: dict[str, str] = field(default_factory=dict)
+    #: Files that shrank while being read; padded to keep the stream valid.
+    changed_while_reading: list[str] = field(default_factory=list)
 
 
 class BundleWriter:
@@ -147,9 +175,16 @@ class BundleWriter:
         info.size = stat_result.st_size
         info.mtime = int(stat_result.st_mtime)
         with open(pathutil.extended(source_path), "rb") as handle:
-            hashing = _HashingReader(handle)
-            self._tar.addfile(info, hashing)
-        digest = hashing.hexdigest()
+            reader = _ExactSizeReader(handle, info.size)
+            self._tar.addfile(info, reader)
+        if reader.padded:
+            # The file shrank while it was being read. The member is still the
+            # declared length, so the bundle stays readable, but this file's
+            # contents are not what was on disk when the scan sized it.
+            log.warning("%s changed while being captured; %d byte(s) padded",
+                        source_path, reader.padded)
+            self.result.changed_while_reading.append(str(source_path))
+        digest = reader.hexdigest()
         self.result.file_digests[archive_name] = digest
         return digest
 

@@ -344,3 +344,63 @@ def test_a_real_restore_still_reports_as_complete(captured, tmp_path: Path):
     text = console.export_text()
     assert "Restore complete" in text
     assert "nothing was written" not in text.lower()
+
+
+def test_a_resumed_restore_does_not_report_corruption_that_is_not_there(captured, tmp_path: Path):
+    """The digest check must cover the item's whole file set, not just this run.
+
+    A resume skips files already in place; comparing that partial set against a
+    whole-tree digest reported a mismatch -- and told the user not to delete the
+    source machine -- on a perfectly good restore.
+    """
+    report, _scan = captured
+    destination = tmp_path / "restored"
+    first = restore_mod.restore(
+        RestoreOptions(bundle=report.bundle_path, passphrase=PASSPHRASE, destination=destination)
+    )
+    assert first.ok and not first.digest_mismatches
+
+    # Interrupted: one file went missing, the rest are already in place.
+    (destination / "Documents" / "report.docx").unlink()
+    resumed = restore_mod.restore(
+        RestoreOptions(bundle=report.bundle_path, passphrase=PASSPHRASE, destination=destination)
+    )
+    assert resumed.restored_files == 1
+    assert resumed.skipped_existing > 0
+    assert resumed.digest_mismatches == []
+    assert resumed.ok
+
+
+def test_a_file_corrupted_on_disk_is_caught_even_when_it_is_skipped(captured, tmp_path: Path):
+    """Skipping by size alone used to mean a same-size corruption was invisible."""
+    report, _scan = captured
+    destination = tmp_path / "restored"
+    restore_mod.restore(
+        RestoreOptions(bundle=report.bundle_path, passphrase=PASSPHRASE, destination=destination)
+    )
+    target = destination / "Documents" / "notes.txt"
+    original = target.read_bytes()
+    target.write_bytes(b"X" * len(original))  # same size, different content
+
+    checked = restore_mod.restore(
+        RestoreOptions(bundle=report.bundle_path, passphrase=PASSPHRASE, destination=destination)
+    )
+    assert "files:documents" in checked.digest_mismatches
+    assert not checked.ok
+
+
+def test_a_file_the_user_kept_is_partially_verified_not_a_mismatch(captured, tmp_path: Path):
+    report, _scan = captured
+    destination = tmp_path / "restored"
+    restore_mod.restore(
+        RestoreOptions(bundle=report.bundle_path, passphrase=PASSPHRASE, destination=destination)
+    )
+    # A different size, so it is "differs" and kept rather than skipped.
+    (destination / "Documents" / "notes.txt").write_bytes(b"my own much longer edit here")
+
+    kept = restore_mod.restore(
+        RestoreOptions(bundle=report.bundle_path, passphrase=PASSPHRASE, destination=destination)
+    )
+    assert kept.kept_existing == 1
+    assert kept.digest_mismatches == []
+    assert any("partially verified" in note.message for note in kept.notes)
