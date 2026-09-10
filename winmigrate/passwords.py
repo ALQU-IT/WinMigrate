@@ -38,7 +38,7 @@ from .models import (
     Sensitivity,
     Severity,
 )
-from .platform_win import Environment
+from .platform_win import HKCU, HKLM, Environment
 from .util import hashing
 
 log = logging.getLogger(__name__)
@@ -207,20 +207,73 @@ def shred(path: Path) -> bool:
     return True
 
 
-def open_export_page(target: ExportTarget) -> bool:  # pragma: no cover - Windows/interactive
-    """Open the browser at its password page so the user can export.
+#: The executable to launch for each browser, as registered under
+#: ``App Paths``. Per-user installs (Chrome's default) register under HKCU and
+#: machine-wide ones under HKLM, so both hives are consulted.
+BROWSER_EXECUTABLES: dict[str, str] = {
+    "chrome": "chrome.exe",
+    "edge": "msedge.exe",
+    "brave": "brave.exe",
+    "vivaldi": "vivaldi.exe",
+    "chromium": "chrome.exe",
+    "firefox": "firefox.exe",
+}
 
-    Windows-only and interactive; not exercised by the test suite. Uses the
-    shell to launch the browser's own URL handler, so the right browser opens
-    the right internal page.
+APP_PATHS_KEY = r"Software\Microsoft\Windows\CurrentVersion\App Paths"
+
+
+def browser_executable(target: ExportTarget, env: Environment) -> Path | None:
+    """Where ``target``'s browser is installed, or None if it cannot be found.
+
+    Read from the ``App Paths`` registry key, which is what Windows itself uses
+    to resolve a bare ``chrome.exe``. Per-user installs land in HKCU and
+    machine-wide ones in HKLM; Chrome defaults to per-user, so both are tried.
+    """
+    executable = BROWSER_EXECUTABLES.get(target.browser_key)
+    if not executable:
+        return None
+    for hive in (HKCU, HKLM):
+        raw = env.read_registry_value(hive, f"{APP_PATHS_KEY}\\{executable}", "")
+        if isinstance(raw, str) and raw.strip():
+            candidate = Path(raw.strip().strip('"'))
+            if candidate.is_file():
+                return candidate
+    return None
+
+
+def open_export_page(target: ExportTarget, env: Environment | None = None) -> bool:
+    """Open the browser at its own password page. True when it was launched.
+
+    The page is an *internal* browser URL -- ``brave://password-manager``,
+    ``edge://wallet``, ``about:logins``. Those schemes are not registered with
+    Windows: they mean something only inside the browser that defines them.
+    Handing one to the shell (``start "" brave://...``) therefore does not open
+    Brave; it makes Windows hunt for an app that handles a "brave" protocol,
+    find none, and offer the Microsoft Store. That went for every browser here,
+    not just the one that happened to be tried first.
+
+    So the browser's own executable is launched with the URL as an argument,
+    which is the only thing that can resolve it. When the executable cannot be
+    found this returns False rather than opening anything, and the caller tells
+    the user the address to paste instead -- a wrong dialog is worse than none.
     """
     import subprocess  # noqa: PLC0415
     import sys  # noqa: PLC0415
 
     if sys.platform != "win32" or not target.export_page:
         return False
+    executable = browser_executable(target, env or Environment.live())
+    if executable is None:
+        log.info("no executable found for %s; not opening its password page", target.browser_key)
+        return False
     try:
-        subprocess.run(["cmd", "/c", "start", "", target.export_page], check=False, timeout=15)
+        # No shell, no "start": the browser resolves its own scheme, and the URL
+        # never passes through a command interpreter that could reinterpret it.
+        subprocess.Popen(  # noqa: S603 -- fixed executable from the registry
+            [str(executable), target.export_page],
+            close_fds=True,
+        )
         return True
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("could not launch %s: %s", executable, exc)
         return False

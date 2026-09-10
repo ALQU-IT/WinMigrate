@@ -27,7 +27,7 @@ from rich.progress import (
     TransferSpeedColumn,
 )
 
-from . import __version__, capture as capture_mod, logging_setup, presets, report, restore as restore_mod
+from . import __version__, capture as capture_mod, logging_setup, presets, report, restore as restore_mod, vss
 from .config import ScanConfig, config_from_dict, load_config_file
 from .util import humanize
 from .errors import ConfigError, WinMigrateError
@@ -409,6 +409,8 @@ def cmd_capture(args: argparse.Namespace, console: Console) -> int:
         + ("" if ok else " [red](not enough)[/red]")
     )
 
+    _warn_if_no_shadow_copy(args, console, totals)
+
     if not args.yes:
         console.print(
             "[dim]The bundle is encrypted with a passphrase only you hold. "
@@ -452,6 +454,29 @@ def cmd_capture(args: argparse.Namespace, console: Console) -> int:
     # plan, and a script that moves it to the NAS and wipes the source machine
     # has to be able to tell the difference.
     return 0 if not capture_report.failures else 3
+
+
+def _warn_if_no_shadow_copy(args, console: Console, totals) -> None:
+    """Say that a shadow copy is not available *before* the user commits.
+
+    The check itself lived inside the capture, so the warning arrived after the
+    passphrase prompt with the progress bar already running -- on a 217 GiB
+    profile, two hours after the only moment the user could have acted on it.
+    Restarting elevated is cheap before the capture and expensive during it, so
+    the question is asked here, with the size in front of the user.
+    """
+    if not args.use_vss or not vss.is_windows() or vss.is_elevated():
+        return
+    console.print(
+        f"\n[yellow]Not running as administrator, so there will be no shadow copy.[/yellow]\n"
+        f"[dim]Files that running programs hold open -- browser databases, Outlook, "
+        f"anything mid-write -- may be unreadable or copied in a torn state. They are "
+        f"reported at the end rather than silently missed.\n"
+        f"To include them, stop now and re-run this from an elevated prompt "
+        f"(right-click Terminal or PowerShell, Run as administrator). About "
+        f"{humanize.bytes_(totals.capture_bytes)} is planned, so this is the cheap "
+        f"moment to decide.[/dim]"
+    )
 
 
 def _collect_browser_passwords(args, result, env, console) -> list[Path]:
@@ -501,12 +526,22 @@ def _collect_browser_passwords(args, result, env, console) -> list[Path]:
                 f"Export them from {target.title} into the bundle now? [y/N] "
             ).strip().lower() not in {"y", "yes"}:
                 continue
-            passwords_mod.open_export_page(target)
-            console.print(
-                f"[dim]{target.title} should have opened at its password page. "
-                "Use Settings -> Passwords -> Export (it will ask for Windows Hello), "
-                "save the CSV, then paste its path below.[/dim]"
-            )
+            opened = passwords_mod.open_export_page(target, env)
+            if opened:
+                console.print(
+                    f"[dim]{target.title} should have opened at its password page. "
+                    "Use Export (it will ask for Windows Hello), save the CSV, then "
+                    "paste its path below.[/dim]"
+                )
+            else:
+                # Better to say where to go than to open the wrong thing: these
+                # are internal browser URLs and only that browser resolves them.
+                console.print(
+                    f"[dim]Could not launch {target.title} here. Open it yourself and "
+                    f"go to:[/dim]\n    [bold]{target.export_page}[/bold]\n"
+                    "[dim]then Export (it will ask for Windows Hello), save the CSV, "
+                    "and paste its path below.[/dim]"
+                )
             raw = console.input("Path to the exported CSV (blank to skip): ").strip().strip('"')
             if not raw:
                 continue
@@ -704,8 +739,10 @@ def _override_allowed() -> bool:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    logging_setup.configure(args.log_file, verbose=args.verbose, quiet=args.quiet)
     console = Console(stderr=False, quiet=args.quiet)
+    logging_setup.configure(
+        args.log_file, verbose=args.verbose, quiet=args.quiet, console=console
+    )
     try:
         return args.func(args, console)
     except WinMigrateError as exc:

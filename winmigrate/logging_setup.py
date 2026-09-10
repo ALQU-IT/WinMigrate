@@ -32,6 +32,28 @@ class SecretRedactingFilter(logging.Filter):
         return not getattr(record, "secret", False)
 
 
+def _console_handler(console: object | None) -> logging.Handler:
+    """A handler that cooperates with a live rich display, when there is one."""
+    if console is not None:
+        try:
+            from rich.logging import RichHandler  # noqa: PLC0415
+
+            return RichHandler(
+                console=console,
+                show_time=False,
+                show_path=False,
+                # Log text is not markup: a Windows path or an application name
+                # containing brackets must not be parsed as a rich tag.
+                markup=False,
+                rich_tracebacks=False,
+            )
+        except ImportError:  # pragma: no cover -- rich is a hard dependency
+            pass
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+    return handler
+
+
 def default_log_path(output_dir: os.PathLike[str] | str | None = None) -> Path:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     directory = Path(os.fspath(output_dir)) if output_dir else Path.cwd()
@@ -42,8 +64,17 @@ def configure(
     log_file: os.PathLike[str] | str | None = None,
     verbose: bool = False,
     quiet: bool = False,
+    console: object | None = None,
 ) -> Path | None:
-    """Configure root logging. Returns the log file path, if one is in use."""
+    """Configure root logging. Returns the log file path, if one is in use.
+
+    ``console`` is the rich Console the command prints through. A plain
+    StreamHandler writes straight to stderr, which during a capture means
+    writing *through* the live progress bar: the warning and the bar end up
+    interleaved on one line and neither is readable. Handing logging the same
+    Console lets rich place the message above the bar instead, which matters
+    most exactly when it matters at all -- a warning during a long capture.
+    """
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)
     for handler in list(root.handlers):
@@ -51,11 +82,11 @@ def configure(
 
     redactor = SecretRedactingFilter()
 
-    console = logging.StreamHandler()
-    console.setLevel(logging.ERROR if quiet else (logging.DEBUG if verbose else logging.WARNING))
-    console.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
-    console.addFilter(redactor)
-    root.addHandler(console)
+    level = logging.ERROR if quiet else (logging.DEBUG if verbose else logging.WARNING)
+    handler = _console_handler(console)
+    handler.setLevel(level)
+    handler.addFilter(redactor)
+    root.addHandler(handler)
 
     if log_file is None:
         return None

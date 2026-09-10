@@ -166,3 +166,53 @@ def test_the_exported_csv_does_not_also_travel_as_an_ordinary_file(tmp_path: Pat
     # Exactly one copy, in the one place the follow-up tells the user to clear.
     assert holding == {str(Path("WinMigrate-Passwords") / "chrome-passwords.csv")}
     assert (destination / "Downloads" / "installer.exe").is_file()  # the rest still travelled
+
+
+def test_the_export_page_is_opened_with_the_browser_not_the_windows_shell(tmp_path: Path):
+    r"""brave://, chrome://, edge:// and about: are internal browser schemes.
+
+    Windows has no handler registered for any of them -- they mean something
+    only inside the browser that defines them. Handing one to the shell
+    ("start \"\" brave://...") therefore does not open Brave: Windows hunts for
+    an app claiming a "brave" protocol, finds none, and offers the Microsoft
+    Store. That was true of every browser here, not just the first one tried.
+
+    The browser's own executable is resolved from App Paths -- HKCU as well as
+    HKLM, because Chrome installs per-user by default -- and launched with the
+    URL as an argument, which is the only thing that can resolve it.
+    """
+    from winmigrate import passwords as passwords_mod
+
+    exe = tmp_path / "Brave-Browser" / "Application" / "brave.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"MZ")
+    key = r"Software\Microsoft\Windows\CurrentVersion\App Paths\brave.exe"
+    target = passwords_mod.ExportTarget(
+        browser_key="brave",
+        title="Brave",
+        engine="chromium",
+        export_page="brave://password-manager/passwords",
+    )
+
+    # Machine-wide install.
+    env = Environment.fixture(tmp_path, {f"HKLM\\{key}": {"": str(exe)}})
+    assert passwords_mod.browser_executable(target, env) == exe
+
+    # Per-user install, quoted as the registry often holds it.
+    env = Environment.fixture(tmp_path, {f"HKCU\\{key}": {"": f'"{exe}"'}})
+    assert passwords_mod.browser_executable(target, env) == exe
+
+    # Registered but no longer installed: no path, so nothing is launched.
+    env = Environment.fixture(tmp_path, {f"HKLM\\{key}": {"": str(tmp_path / "gone.exe")}})
+    assert passwords_mod.browser_executable(target, env) is None
+
+    # Not registered at all.
+    assert passwords_mod.browser_executable(target, Environment.fixture(tmp_path, {})) is None
+
+
+def test_every_browser_offered_for_export_has_an_executable_to_launch(tmp_path: Path):
+    """A browser whose password page we advertise but cannot open would send the
+    user back to the Microsoft Store dialog this replaced."""
+    from winmigrate import passwords as passwords_mod
+
+    assert set(passwords_mod.EXPORT_PAGES) <= set(passwords_mod.BROWSER_EXECUTABLES)
