@@ -102,6 +102,9 @@ def capture(
         output = output.with_suffix(".dat")
     manifest_path = output.with_suffix(".manifest.json")
 
+    if config.include_wifi:
+        _add_wifi_profiles(scan, env)
+
     totals = scan.totals()
     if not options.skip_space_check:
         ok, free = check_free_space(output, totals.capture_bytes)
@@ -256,6 +259,68 @@ def _capture_item(
     # the profile changed between the scan and the capture.
     item.size_bytes = captured_bytes
     item.file_count = len(digests)
+
+
+def _add_wifi_profiles(scan: ScanResult, env) -> None:  # pragma: no cover - Windows only
+    """Export saved Wi-Fi profiles (with keys) and stage them as SECRET items.
+
+    Windows-only: it shells out to netsh. The XML holds the pre-shared keys, so
+    each profile is captured encrypted-only, and a single follow-up explains the
+    netsh re-import.
+    """
+    from .models import (  # noqa: PLC0415
+        Category,
+        Followup,
+        Item,
+        Kind,
+        Note,
+        RestoreSpec,
+        RestoreStrategy,
+        Sensitivity,
+        Severity,
+    )
+    from .scan import wifi as wifi_mod  # noqa: PLC0415
+
+    if not vss.is_windows():
+        return
+    out_dir = wifi_mod.temp_export_dir()
+    files, error = wifi_mod.export_profiles(out_dir)
+    if error or not files:
+        if error:
+            scan.add_note(Severity.WARNING, f"Wi-Fi export failed: {error}")
+        return
+    for xml in files:
+        slug = "".join(c if c.isalnum() or c in "-_" else "-" for c in xml.stem)
+        scan.items.append(
+            Item(
+                id=f"wifi:xml:{slug.lower()}",
+                category=Category.WIFI,
+                kind=Kind.FILE,
+                title=f"Wi-Fi profile — {xml.stem}",
+                source_path=str(xml),
+                archive_path=f"secrets/WinMigrate-WiFi/{xml.name}",
+                sensitivity=Sensitivity.SECRET,
+                restore=RestoreSpec(
+                    target=f"%USERPROFILE%\\WinMigrate-WiFi\\{xml.name}",
+                    strategy=RestoreStrategy.REPLACE,
+                    notes=["Import with: netsh wlan add profile filename=<file>"],
+                ),
+                notes=[Note(Severity.WARNING, "Contains the network password; encrypted-only.")],
+            )
+        )
+    scan.followups.append(
+        Followup(
+            id="wifi:restore",
+            title=f"Re-add your {len(files)} Wi-Fi network(s)",
+            why="Wi-Fi profiles restore as XML in WinMigrate-WiFi\\; add them with netsh.",
+            steps=[
+                "For each file in WinMigrate-WiFi\\: "
+                "netsh wlan add profile filename=<file> user=current",
+                "Delete the folder afterwards -- the files contain your network passwords.",
+            ],
+            category=Category.WIFI,
+        )
+    )
 
 
 def default_bundle_name(scan: ScanResult) -> str:

@@ -15,8 +15,8 @@ prepares for you and hands over, with instructions. It never impersonates you.
 > winget reinstall, and Office detection with a matching ODT configuration.
 > Developer credentials travel encrypted-only, games installed through a launcher
 > are recognised as such, and browser profiles plus a browser-driven password
-> handoff are in. Wi-Fi, printers and the remaining system settings are next;
-> see
+> handoff are in, along with Wi-Fi (opt-in), printers, mapped drives, environment
+> variables, fonts and Outlook. Polish and an optional GUI are what's left; see
 > [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Install

@@ -91,7 +91,11 @@ winmigrate/
     office.py        Click-to-Run detection and licence status (no key extraction)
     devconfig.py     developer/credential config (encrypted-only, secret items)
     browsers.py      browser profiles + sign-in/sync detection (config-read only)
+    syssettings.py   env vars, mapped drives, printers, fonts, Outlook
+    wifi.py          Wi-Fi profiles (opt-in; export holds the network keys)
     browsers.py      browser profiles + sign-in/sync detection (config-read only)
+    syssettings.py   env vars, mapped drives, printers, fonts, Outlook
+    wifi.py          Wi-Fi profiles (opt-in; export holds the network keys)
 schema/manifest.schema.json   machine-readable mirror of the manifest
 docs/manifest-schema.md       prose description of the same
 tests/                        pytest suite; runs on any OS via fixture profiles
@@ -259,7 +263,7 @@ Two rules keep the numbers honest:
 | 2 | VSS for locked files, resume, space pre-check, long-path handling, restore report | **shipped** (VSS untested on real Windows) |
 | 3 | App inventory + `winget import`; Office detect + ODT reinstall | **shipped** (untested against real winget/Office) |
 | 4 | Dev config, game launchers, and browser profiles + sign-in/sync detection **shipped**; the browser password-export handoff, Wi-Fi, printers, env vars, fonts, Outlook next | in progress |
-| 5 | Files-only mode polish, optional exclusion presets (device backups, VM images), config file, optional GUI | |
+| 5 | Files-only mode polish, optional exclusion presets (device backups, VM images), config file, optional GUI | next |
 
 ## Why the payload is encrypted in chunks
 

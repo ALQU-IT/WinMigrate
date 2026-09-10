@@ -147,6 +147,9 @@ class ScanConfig:
     #: call, so it can be switched off for a quick file-only scan.
     include_software: bool = True
 
+    #: Wi-Fi profiles include the network passwords, so they are opt-in.
+    include_wifi: bool = False
+
     #: Walk excluded/synced subtrees to report how many bytes they came to.
     #: Honest numbers cost one extra stat pass; ``--fast`` turns it off.
     measure_skipped: bool = True
@@ -222,6 +225,7 @@ def config_from_dict(data: dict[str, Any], base: ScanConfig | None = None) -> Sc
         "extra_includes",
         "measure_skipped",
         "include_software",
+        "include_wifi",
     }
     unknown = set(data) - known
     if unknown:

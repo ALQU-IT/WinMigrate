@@ -81,6 +81,8 @@ def run_scan(
         _scan_software(env, result, progress, installation)
         _record_office(result, installation)
     _scan_dev_config(env, result, config, progress)
+    _scan_system_settings(env, result, progress)
+    _scan_wifi(env, result, config, progress)
     _scan_browsers(env, result, config, progress)
     _note_long_paths(result, long_paths)
 
@@ -531,6 +533,30 @@ def _scan_dev_config(
                 category=Category.DEV_CONFIG,
             )
         )
+
+
+def _scan_system_settings(
+    env: Environment, result: ScanResult, progress: ProgressCallback | None
+) -> None:
+    from . import syssettings as syssettings_mod  # noqa: PLC0415 -- optional stage
+
+    _emit(progress, "Reading system settings")
+    items, followups = syssettings_mod.scan_system_settings(env)
+    result.items.extend(items)
+    result.followups.extend(followups)
+
+
+def _scan_wifi(
+    env: Environment, result: ScanResult, config: ScanConfig, progress: ProgressCallback | None
+) -> None:
+    from . import wifi as wifi_mod  # noqa: PLC0415 -- optional stage
+
+    if not config.include_wifi:
+        return
+    _emit(progress, "Reading Wi-Fi profiles")
+    items, followups = wifi_mod.scan_wifi(env, config.include_wifi)
+    result.items.extend(items)
+    result.followups.extend(followups)
 
 
 def _detect_office(env: Environment, progress: ProgressCallback | None):

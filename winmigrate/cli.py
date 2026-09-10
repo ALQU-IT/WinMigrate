@@ -227,6 +227,11 @@ def _add_scan_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_false",
         help="skip the installed-software and Office inventory (faster)",
     )
+    parser.add_argument(
+        "--include-wifi",
+        action="store_true",
+        help="include saved Wi-Fi profiles (their export contains the network passwords)",
+    )
     parser.add_argument("--json", action="store_true", help="print the plan as JSON instead of a table")
     parser.add_argument(
         "--save-plan",
@@ -271,6 +276,7 @@ def _config_from_args(args: argparse.Namespace) -> ScanConfig:
     config.files_only = args.files_only or config.files_only
     config.measure_skipped = args.measure_skipped and config.measure_skipped
     config.include_software = args.include_software and config.include_software
+    config.include_wifi = getattr(args, "include_wifi", False) or config.include_wifi
     if args.exclude:
         config.extra_excludes = tuple(config.extra_excludes) + tuple(args.exclude)
     if args.include:
