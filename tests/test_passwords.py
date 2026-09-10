@@ -109,3 +109,60 @@ def test_every_known_browser_has_an_export_page():
     for browser in browsers.CHROMIUM_BROWSERS:
         assert browser.key in passwords.EXPORT_PAGES
     assert "firefox" in passwords.EXPORT_PAGES
+
+
+def test_the_exported_csv_does_not_also_travel_as_an_ordinary_file(tmp_path: Path):
+    """Chrome's export dialog defaults to Downloads, which is captured.
+
+    The CSV was then in the bundle twice: once as the encrypted-only item, and
+    once as a plain user file under data/user_files/Downloads. The source copy
+    gets shredded and the follow-up says to delete the CSV -- meaning the one in
+    WinMigrate-Passwords -- so the second copy restored to Downloads on the new
+    machine and stayed there, plaintext, with nothing pointing at it.
+    """
+    from winmigrate import capture as capture_mod
+    from winmigrate import passwords as passwords_mod
+    from winmigrate import restore as restore_mod
+    from winmigrate.capture import CaptureOptions
+    from winmigrate.config import ScanConfig
+    from winmigrate.platform_win import Environment
+    from winmigrate.restore import RestoreOptions
+    from winmigrate.scan import run_scan
+
+    profile = tmp_path / "alice"
+    (profile / "Downloads").mkdir(parents=True)
+    (profile / "Downloads" / "installer.exe").write_bytes(b"x" * 100)
+    chrome = profile / "AppData" / "Local" / "Google" / "Chrome" / "User Data" / "Default"
+    chrome.mkdir(parents=True)
+    (chrome / "Preferences").write_text('{"profile": {"name": "P"}, "account_info": []}')
+
+    env = Environment.fixture(profile, {})
+    config = ScanConfig(profile_root=profile, include_software=False)
+    scan = run_scan(config, env)
+
+    # The user exports now, after the scan, into the folder the dialog offers.
+    csv = profile / "Downloads" / "Chrome Passwords.csv"
+    csv.write_text("name,url,username,password\nBank,https://bank.example,alice,hunter2\n")
+    target = next(iter(passwords_mod.export_targets(env)))
+    scan.items.append(passwords_mod.build_password_item(target, csv))
+
+    bundle = tmp_path / "b.dat"
+    capture_mod.capture(
+        scan, CaptureOptions(output=bundle, passphrase="pw", use_vss=False), config, env
+    )
+    csv.unlink()  # shredded on the source machine, as the flow does
+
+    destination = tmp_path / "dest"
+    destination.mkdir()
+    result = restore_mod.restore(
+        RestoreOptions(bundle=bundle, passphrase="pw", destination=destination)
+    )
+    assert result.ok
+    holding = {
+        str(f.relative_to(destination))
+        for f in destination.rglob("*")
+        if f.is_file() and "hunter2" in f.read_text(errors="replace")
+    }
+    # Exactly one copy, in the one place the follow-up tells the user to clear.
+    assert holding == {str(Path("WinMigrate-Passwords") / "chrome-passwords.csv")}
+    assert (destination / "Downloads" / "installer.exe").is_file()  # the rest still travelled

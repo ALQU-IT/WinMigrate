@@ -483,9 +483,20 @@ def _write_reinstall_artifacts(report: RestoreReport, destination: Path) -> None
 
     try:
         artifacts = reinstall_mod.write_artifacts(report.manifest or {}, destination)
-    except OSError as exc:
+    except Exception as exc:  # noqa: BLE001 -- see below
+        # Deliberately broad. By this point every file has been written and
+        # verified; the reinstall inputs are a convenience on top. Letting
+        # anything thrown here escape would replace the restore report -- and
+        # with it the follow-up list, which is the whole point of a restore that
+        # stops at what needs a person -- with a traceback.
+        log.warning("could not write the reinstall files", exc_info=True)
         report.notes.append(
-            Note(Severity.WARNING, "could not write the reinstall files", str(exc))
+            Note(
+                Severity.WARNING,
+                "could not write the reinstall files",
+                f"{type(exc).__name__}: {exc}. Everything else was restored; "
+                f"run 'winmigrate inspect' to read the software list from the bundle.",
+            )
         )
         return
     if artifacts.anything_to_do:

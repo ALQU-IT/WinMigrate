@@ -67,7 +67,13 @@ def write_artifacts(manifest: dict[str, Any], destination: Path) -> Artifacts:
 
     if software:
         export = software.get("winget_export")
-        applications = software.get("applications", [])
+        # A manifest is data. It has been authenticated, so it is not arbitrary,
+        # but it may come from a different version of this tool -- or from
+        # someone who wrote their own -- and one odd field here must not cost
+        # the user the restore report, which is where the follow-up list lives.
+        applications = [
+            app for app in _as_list(software.get("applications")) if isinstance(app, dict)
+        ]
         artifacts.reinstallable_count = sum(1 for app in applications if app.get("winget_id"))
         # Runtimes and drivers arrive with whatever needs them; listing them as
         # chores would bury the handful that genuinely need a person.
@@ -120,8 +126,15 @@ def write_artifacts(manifest: dict[str, Any], destination: Path) -> Artifacts:
     return artifacts
 
 
+def _as_list(value: Any) -> list[Any]:
+    """``value`` if it is a list, else nothing. A string is not a list of apps."""
+    return value if isinstance(value, list) else []
+
+
 def _record_for(manifest: dict[str, Any], category: str) -> dict[str, Any] | None:
-    for item in manifest.get("items", []):
+    for item in _as_list(manifest.get("items")):
+        if not isinstance(item, dict):
+            continue
         if item.get("category") == category and isinstance(item.get("record"), dict):
             return item["record"]
     return None
@@ -130,7 +143,9 @@ def _record_for(manifest: dict[str, Any], category: str) -> dict[str, Any] | Non
 def _installation_from_record(record: dict[str, Any]) -> OfficeInstallation:
     installation = read_configuration(
         {
-            "ProductReleaseIds": ",".join(record.get("product_ids", [])),
+            "ProductReleaseIds": ",".join(
+                str(pid) for pid in _as_list(record.get("product_ids"))
+            ),
             "Platform": record.get("platform", ""),
             "ClientCulture": record.get("client_culture", ""),
         }
@@ -194,13 +209,23 @@ def _manual_markdown(
     return "\n".join(lines) + "\n"
 
 
+def _cell(value: Any) -> str:
+    r"""One table cell: ``|`` escaped, and no newline left to break the row.
+
+    A registry DisplayName is whatever the installer wrote there, newlines
+    included, and one of those turns the rest of the table into loose text.
+    """
+    text = str(value if value is not None else "")
+    return " ".join(text.split()).replace("|", "\|")
+
+
 def _table_rows(applications: list[dict[str, Any]]) -> list[str]:
     rows = []
     for app in sorted(applications, key=lambda item: str(item.get("name", "")).lower()):
-        name = str(app.get("name", "")).replace("|", "\\|")
-        version = str(app.get("version", "")).replace("|", "\\|")
-        publisher = str(app.get("publisher", "")).replace("|", "\\|")
-        rows.append(f"| {name} | {version} | {publisher} |")
+        rows.append(
+            f"| {_cell(app.get('name'))} | {_cell(app.get('version'))} "
+            f"| {_cell(app.get('publisher'))} |"
+        )
     return rows
 
 

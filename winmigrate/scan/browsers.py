@@ -391,6 +391,15 @@ def _profile_item(profile: BrowserProfile, env: Environment, files_only: bool) -
             "and cookie stores are left out (they do not transfer between machines).",
         )
     )
+    item.notes.append(
+        Note(
+            Severity.INFO,
+            "Your open tabs travel with the profile, and the saved session holds "
+            "the cookies for them.",
+            "So you may arrive still signed in to sites that were open. Close the "
+            "tabs you would rather not carry before capturing.",
+        )
+    )
     if relocated:
         item.notes.append(
             Note(

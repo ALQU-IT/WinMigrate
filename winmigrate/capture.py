@@ -43,6 +43,9 @@ from .util import humanize
 
 log = logging.getLogger(__name__)
 
+#: Archive-path prefix for material that exists only inside the ciphertext.
+SECRETS_PREFIX = "secrets/"
+
 #: Leave the target volume some room rather than filling it exactly.
 FREE_SPACE_MARGIN = 512 * 1024 * 1024
 
@@ -143,6 +146,22 @@ def capture(
             )
         )
 
+    # Anything staged as encrypted-only must not also be swept up as ordinary
+    # user data. The case that matters is the password CSV: the browser's export
+    # dialog defaults to Downloads or the Desktop, both of which are captured,
+    # so the plaintext file would travel a second time as a plain user file --
+    # restoring to Downloads on the new machine, outside the WinMigrate-Passwords
+    # folder the follow-up tells the user to clear out, and staying there.
+    # A whole directory can collide the same way -- a browser profile the user
+    # keeps in Documents -- so trees count too, matched by prefix.
+    secret_sources = tuple(
+        pathutil.normalize_key(item.source_path)
+        for item in scan.items
+        if item.source_path
+        and item.action is Action.CAPTURE
+        and (item.archive_path or "").startswith(SECRETS_PREFIX)
+    )
+
     shadow = _open_shadow_copy(scan, options, report)
 
     kdf = crypto.default_kdf_params()
@@ -162,7 +181,8 @@ def capture(
                 if item.action is not Action.CAPTURE or item.kind not in {Kind.TREE, Kind.FILE}:
                     continue
                 _capture_item(
-                    item, writer, scan, config, env, shadow, report, progress, own_files
+                    item, writer, scan, config, env, shadow, report, progress,
+                    own_files, secret_sources,
                 )
             manifest = manifest_mod.build(scan)
             writer.add_bytes(
@@ -218,6 +238,11 @@ def _open_shadow_copy(scan: ScanResult, options: CaptureOptions, report: Capture
         return None
 
 
+def _under_any(key: str, roots: tuple[str, ...]) -> bool:
+    """True when a normalized path is, or is inside, one of ``roots``."""
+    return any(key == root or key.startswith(root + "/") for root in roots)
+
+
 def _capture_item(
     item: Item,
     writer: bundle_mod.BundleWriter,
@@ -228,9 +253,14 @@ def _capture_item(
     report: CaptureReport,
     progress: ProgressCallback | None,
     own_files: frozenset[str] | set[str] = frozenset(),
+    secret_sources: tuple[str, ...] = (),
 ) -> None:
     if not item.source_path or not item.archive_path:
         return
+    # The secret item is the one place these files are meant to be, so it does
+    # not exclude itself; every other item does.
+    if item.archive_path.startswith(SECRETS_PREFIX):
+        secret_sources = ()
     root = Path(item.source_path)
     digests: list[tuple[str, str]] = []
     captured_bytes = 0
@@ -267,7 +297,8 @@ def _capture_item(
     for event in walk_tree(root, config, env, scan.sync_roots, relative_base=env.profile_root):
         if not isinstance(event, CaptureFile):
             continue
-        if pathutil.normalize_key(event.path) in own_files:
+        key = pathutil.normalize_key(event.path)
+        if key in own_files or _under_any(key, secret_sources):
             continue
         archive_name = f"{item.archive_path}/{event.relative}"
         source = shadow.map(event.path) if shadow is not None else event.path

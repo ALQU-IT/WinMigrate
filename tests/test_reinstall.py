@@ -217,3 +217,49 @@ def test_launcher_games_get_their_own_section_not_the_by_hand_list(tmp_path: Pat
     assert "### Steam (2)" in games
     assert "### Epic Games (1)" in games
     assert "Portal 2" in games
+
+
+def test_a_malformed_manifest_does_not_cost_the_user_the_restore_report(tmp_path):
+    """The reinstall inputs are a convenience written after every file is
+    restored and verified. A record from a different version of this tool -- or
+    one field that is a string where a list was expected -- used to raise
+    AttributeError out of write_artifacts, past the OSError-only guard at the
+    call site and past main()'s WinMigrateError handler, replacing the whole
+    restore report with a traceback. The report is where the follow-up list
+    lives, which is the point of a restore that stops at what needs a person.
+    """
+    cases = [
+        {"items": "not a list"},
+        {"items": ["not a dict"]},
+        {"items": [{"category": "software", "record": {"applications": "not a list"}}]},
+        {"items": [{"category": "software", "record": {"applications": ["not a dict"]}}]},
+        {"items": [{"category": "office", "record": {"product_ids": [None, 5]}}]},
+    ]
+    for index, manifest in enumerate(cases):
+        destination = tmp_path / f"case{index}"
+        destination.mkdir()
+        reinstall.write_artifacts(manifest, destination)  # must not raise
+
+
+def test_a_manifest_entry_with_a_newline_cannot_break_the_manual_table(tmp_path):
+    """A registry DisplayName is whatever the installer wrote there. A newline in
+    one turned the rest of the markdown table into loose text."""
+    manifest = {
+        "items": [
+            {
+                "category": "software",
+                "record": {
+                    "applications": [
+                        {"name": "Line1\nLine2 | x", "version": "1", "publisher": "P"},
+                        {"name": "Ordinary App", "version": "2", "publisher": "Q"},
+                    ]
+                },
+            }
+        ]
+    }
+    artifacts = reinstall.write_artifacts(manifest, tmp_path)
+    rows = [
+        line for line in artifacts.manual_list.read_text().splitlines() if line.startswith("|")
+    ]
+    assert len(rows) == 4  # header, rule, and one row per application
+    assert "| Line1 Line2 \\| x | 1 | P |" in rows
