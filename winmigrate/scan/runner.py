@@ -119,6 +119,18 @@ def _scan_known_folders(
     for folder_id in config.known_folders:
         title = env.known_folder_title(folder_id)
         path = env.known_folder(folder_id)
+
+        # A known folder is reached by id rather than by walking the profile
+        # root, so the exclusion patterns that filter every other directory
+        # never got a chance to see it: "--exclude Downloads" was accepted and
+        # then quietly ignored, and the 50 GB it was meant to leave out went
+        # into the bundle anyway. Both spellings are honoured -- the folder's
+        # real name, which is what the user sees, and the internal id.
+        excluded = _excluded_known_folder(config, env, folder_id, path)
+        if excluded is not None:
+            result.items.append(excluded)
+            continue
+
         _emit(progress, f"Scanning {title}")
         measurement = measure_tree(path, config, env, result.sync_roots)
         item = _item_from_measurement(
@@ -136,6 +148,44 @@ def _scan_known_folders(
         long_paths += measurement.long_path_count
         result.items.append(item)
     return long_paths
+
+
+def _excluded_known_folder(
+    config: ScanConfig, env: Environment, folder_id: str, path: Path
+) -> Item | None:
+    """A SKIP item when an exclusion names this known folder, else ``None``.
+
+    Reported rather than silently dropped: seeing "Downloads -- excluded, 51 GB"
+    is how the user confirms the flag did what they meant. The size is measured
+    only when the scan is measuring skipped things anyway, so ``--fast`` does
+    not pay to walk a folder it is leaving out.
+    """
+    from .userfiles import _measure_raw  # noqa: PLC0415
+
+    relative = pathutil.relative_posix(path, env.profile_root)
+    name = path.name or folder_id
+    if not (
+        config.is_excluded(relative, name) or config.is_excluded(relative, folder_id)
+    ):
+        return None
+
+    size, files = _measure_raw(path, config) if path.is_dir() else (0, 0)
+    item = Item(
+        id=f"files:{folder_id}",
+        category=Category.USER_FILES,
+        kind=Kind.TREE,
+        title=env.known_folder_title(folder_id),
+        source_path=str(path),
+        action=Action.SKIP,
+        skip_reason=SkipReason.EXCLUDED,
+        size_bytes=size,
+        file_count=files,
+    )
+    item.notes.append(
+        Note(Severity.INFO, "Left out by an exclusion you asked for.")
+    )
+    log.info("known folder %s excluded by a pattern", name)
+    return item
 
 
 def _restore_target(folder_id: str, path: Path, env: Environment) -> str:

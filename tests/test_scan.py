@@ -257,3 +257,80 @@ def test_launcher_games_produce_a_sign_in_followup_per_launcher(
     assert "2 game(s)" in launcher_followups["software:launcher:steam"].title
     manual = next(f for f in result.followups if f.id == "software:manual")
     assert "come back through a game launcher" in manual.why
+
+
+def test_excluding_a_known_folder_by_name_actually_excludes_it(tmp_path: Path):
+    """A known folder is reached by id, not by walking the profile root, so the
+    exclusion patterns that filter every other directory never saw it.
+
+    "--exclude Downloads" was accepted without complaint and then ignored: the
+    scan reported the folder as captured and the bytes it was meant to leave out
+    went into the bundle. Silently doing nothing is the worst answer available
+    -- the user has no reason to check, and finds out when the capture takes an
+    extra hour.
+    """
+    profile = tmp_path / "alice"
+    for folder in ("Documents", "Downloads", "Pictures"):
+        (profile / folder).mkdir(parents=True)
+        (profile / folder / "f.bin").write_bytes(b"x" * 1000)
+    (profile / "Downloads" / "big.iso").write_bytes(b"y" * 50_000)
+    env = Environment.fixture(profile, {})
+
+    def downloads(**kwargs):
+        result = run_scan(
+            ScanConfig(profile_root=profile, include_software=False, **kwargs), env
+        )
+        item = next(i for i in result.items if i.id == "files:downloads")
+        return item, result.totals().capture_bytes
+
+    item, captured = downloads()
+    assert item.action is Action.CAPTURE and captured == 53_000
+
+    # Both spellings the user might reasonably reach for: the folder's real
+    # name, and the internal lowercase id.
+    for pattern in ("Downloads", "downloads"):
+        item, captured = downloads(extra_excludes=(pattern,))
+        assert item.action is Action.SKIP, pattern
+        assert item.skip_reason is SkipReason.EXCLUDED, pattern
+        assert captured == 2_000, pattern
+        # Reported, not vanished: seeing the size is how the user confirms the
+        # flag did what they meant.
+        assert item.size_bytes == 51_000
+
+
+def test_an_excluded_known_folder_is_not_walked_under_fast(tmp_path: Path):
+    """--fast means "do not pay to measure what is being left out", and that
+    has to include a folder excluded outright."""
+    profile = tmp_path / "alice"
+    (profile / "Downloads").mkdir(parents=True)
+    (profile / "Downloads" / "big.iso").write_bytes(b"y" * 50_000)
+    (profile / "Documents").mkdir()
+
+    result = run_scan(
+        ScanConfig(
+            profile_root=profile,
+            include_software=False,
+            extra_excludes=("Downloads",),
+            measure_skipped=False,
+        ),
+        Environment.fixture(profile, {}),
+    )
+    item = next(i for i in result.items if i.id == "files:downloads")
+    assert item.action is Action.SKIP and item.skip_reason is SkipReason.EXCLUDED
+    assert item.size_bytes == 0  # not measured, because it was not walked
+
+
+def test_an_exclusion_that_matches_nothing_leaves_the_folders_alone(tmp_path: Path):
+    profile = tmp_path / "alice"
+    (profile / "Downloads").mkdir(parents=True)
+    (profile / "Downloads" / "f.bin").write_bytes(b"x" * 1000)
+    (profile / "Documents").mkdir()
+
+    result = run_scan(
+        ScanConfig(
+            profile_root=profile, include_software=False, extra_excludes=("Downloadz",)
+        ),
+        Environment.fixture(profile, {}),
+    )
+    item = next(i for i in result.items if i.id == "files:downloads")
+    assert item.action is Action.CAPTURE
