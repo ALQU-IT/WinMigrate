@@ -74,6 +74,7 @@ winmigrate/
   capture.py         plan → bundle, with space pre-check, hashing and VSS
   restore.py         verify → decrypt → write → report
   vss.py             Volume Shadow Copy lifecycle and path translation
+  passwords.py       the browser password handoff (browser exports, we encrypt)
   odt.py             Office Deployment Tool configuration generation
   reinstall.py       the reinstall artifacts, and running winget/Office setup
   report.py          rich rendering of the preview, capture and restore reports
@@ -89,6 +90,7 @@ winmigrate/
     software.py      installed-software inventory (registry + winget + Appx)
     office.py        Click-to-Run detection and licence status (no key extraction)
     devconfig.py     developer/credential config (encrypted-only, secret items)
+    browsers.py      browser profiles + sign-in/sync detection (config-read only)
     browsers.py      browser profiles + sign-in/sync detection (config-read only)
 schema/manifest.schema.json   machine-readable mirror of the manifest
 docs/manifest-schema.md       prose description of the same
@@ -215,6 +217,20 @@ Sign-in and sync state is read from configuration files only -- Chromium's
 means "sign in and they come back"; sync off means "use the browser's own
 export, behind its own Windows Hello prompt" -- the browser does the
 decryption, never WinMigrate.
+
+## The browser password handoff
+
+WinMigrate never reads a browser's saved-password store and never calls DPAPI --
+that routine is out of scope by design. The one legitimate way to move saved
+passwords is the browser's *own* export, which prompts for OS re-authentication
+(Windows Hello, where present) and writes a CSV itself. WinMigrate only brackets
+that: it works out which installed browsers have local (un-synced) passwords,
+opens the browser at its password page on request, and ingests the CSV the user
+produced -- sanity-checking it is a password export by its header, never reading
+the rows. The CSV is captured as encrypted-only material, restored into a named
+`WinMigrate-Passwords\` folder with an import-then-delete instruction, and the
+plaintext source is shredded (best effort) once it is in the bundle. A browser
+with sync on is not offered at all: its passwords return on sign-in.
 
 ## Skip accounting
 

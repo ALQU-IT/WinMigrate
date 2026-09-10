@@ -141,6 +141,19 @@ def _add_capture_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--yes", action="store_true", help="do not ask for confirmation before writing"
     )
+    parser.add_argument(
+        "--passwords",
+        action="append",
+        default=[],
+        metavar="BROWSER=CSV",
+        help="include a password CSV you exported yourself, e.g. chrome=C:\\path\\pw.csv "
+        "(repeatable; skips the interactive prompt for that browser)",
+    )
+    parser.add_argument(
+        "--no-passwords",
+        action="store_true",
+        help="do not offer to include browser password exports",
+    )
 
 
 def _add_restore_arguments(parser: argparse.ArgumentParser) -> None:
@@ -357,6 +370,8 @@ def cmd_capture(args: argparse.Namespace, console: Console) -> int:
             console.print("Nothing was written.")
             return 1
 
+    shred_after = _collect_browser_passwords(args, result, env, console)
+
     passphrase = _read_passphrase(args, confirm=True)
     options = CaptureOptions(
         output=output,
@@ -382,8 +397,112 @@ def cmd_capture(args: argparse.Namespace, console: Console) -> int:
 
         capture_report = capture_mod.capture(result, options, config, env, on_progress)
 
+    _shred_password_csvs(shred_after, console)
     report.render_capture_report(capture_report, console)
     return 0 if not capture_report.failures else 0
+
+
+def _collect_browser_passwords(args, result, env, console) -> list[Path]:
+    """Add browser password CSVs to the capture, per the agreed handoff.
+
+    WinMigrate never reads a password store: the browser exports the CSV behind
+    its own Windows Hello prompt, and this only ingests what the user produced.
+    Returns the CSV paths to shred once the bundle is written.
+
+    Two ways in: --passwords BROWSER=CSV for an unattended run, or an
+    interactive prompt per browser whose passwords are not already synced.
+    """
+    from . import passwords as passwords_mod
+
+    if getattr(args, "no_passwords", False) or result.files_only:
+        return []
+
+    targets = {t.browser_key: t for t in passwords_mod.export_targets(env)}
+    to_shred: list[Path] = []
+
+    # Non-interactive: explicit --passwords BROWSER=CSV pairs.
+    explicit: dict[str, str] = {}
+    for pair in getattr(args, "passwords", []) or []:
+        key, _, path = pair.partition("=")
+        if not path:
+            raise ConfigError(f"--passwords expects BROWSER=CSV, got {pair!r}")
+        explicit[key.strip().lower()] = path.strip()
+
+    for key, path in explicit.items():
+        target = targets.get(key)
+        if target is None:
+            console.print(f"[yellow]No browser {key!r} with local passwords; skipping.[/yellow]")
+            continue
+        # A file the user pointed us at is theirs to manage; we do not shred it.
+        _ingest_password_csv(target, Path(path), result, console, passwords_mod)
+
+    # Interactive: offer each remaining target, unless this is an unattended run.
+    interactive = not args.yes and not getattr(args, "passphrase_file", None)
+    if interactive:
+        for key, target in targets.items():
+            if key in explicit:
+                continue
+            console.print(
+                f"\n[bold]{target.title}[/bold] has passwords saved locally (sync is off)."
+            )
+            if console.input(
+                f"Export them from {target.title} into the bundle now? [y/N] "
+            ).strip().lower() not in {"y", "yes"}:
+                continue
+            passwords_mod.open_export_page(target)
+            console.print(
+                f"[dim]{target.title} should have opened at its password page. "
+                "Use Settings -> Passwords -> Export (it will ask for Windows Hello), "
+                "save the CSV, then paste its path below.[/dim]"
+            )
+            raw = console.input("Path to the exported CSV (blank to skip): ").strip().strip('"')
+            if not raw:
+                continue
+            item = _ingest_password_csv(target, Path(raw), result, console, passwords_mod)
+            if item is not None:
+                to_shred.append(Path(raw))
+
+    return to_shred
+
+
+def _ingest_password_csv(target, csv_path: Path, result, console, passwords_mod):
+    """Validate a CSV and add it to the scan as an encrypted-only item."""
+    if not csv_path.is_file():
+        console.print(f"[yellow]No file at {csv_path}; skipping {target.title}.[/yellow]")
+        return None
+    try:
+        head = csv_path.read_text(encoding="utf-8", errors="replace")[:4096]
+    except OSError as exc:
+        console.print(f"[yellow]Could not read {csv_path}: {exc}; skipping.[/yellow]")
+        return None
+    if not passwords_mod.looks_like_password_csv(head):
+        console.print(
+            f"[yellow]{csv_path} does not look like a password export "
+            "(no url/username/password header); skipping.[/yellow]"
+        )
+        return None
+    item = passwords_mod.build_password_item(target, csv_path)
+    # Replace the scan-time "export yourself" note with the restore-side import
+    # instruction for this browser (same follow-up id).
+    result.followups = [f for f in result.followups if f.id != f"browser:passwords:{target.browser_key}"]
+    result.followups.append(passwords_mod.import_followup(target))
+    result.items.append(item)
+    console.print(f"[green]{target.title} passwords added (encrypted-only).[/green]")
+    return item
+
+
+def _shred_password_csvs(paths: list[Path], console: Console) -> None:
+    from . import passwords as passwords_mod
+
+    if not paths:
+        return
+    if console.input(
+        "\nShred the plaintext CSV(s) you exported now that they are in the bundle? [Y/n] "
+    ).strip().lower() in {"n", "no"}:
+        console.print("[dim]Left in place. Delete them yourself once you have verified the bundle.[/dim]")
+        return
+    for path in paths:
+        console.print(("[green]shredded[/green] " if passwords_mod.shred(path) else "[yellow]could not shred[/yellow] ") + str(path))
 
 
 def cmd_inspect(args: argparse.Namespace, console: Console) -> int:
