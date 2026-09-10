@@ -67,3 +67,50 @@ def test_elevation_is_reported_as_false_off_windows():
     if vss.is_windows():
         pytest.skip("this asserts the non-Windows guard")
     assert vss.is_elevated() is False
+
+
+def test_the_device_wmi_actually_returns_is_not_prefixed_twice():
+    r"""Win32_ShadowCopy.DeviceObject comes back already prefixed.
+
+    It is the same string vssadmin prints:
+    \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy3. Prepending the prefix
+    unconditionally produced \\?\GLOBALROOT\\?\GLOBALROOT\Device\..., and
+    every open under it failed with "the system cannot find the path specified"
+    -- on a 217 GiB profile, once per file.
+
+    The old test passed because it fed the bare \Device\... form the code
+    assumed, so the test and the bug shared an assumption and neither was
+    checked against Windows. Both forms are pinned here now.
+    """
+    expected = r"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy3\Users\a\f.txt"
+    for device in (
+        r"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy3",   # what WMI returns
+        r"\Device\HarddiskVolumeShadowCopy3",                 # what the docs show
+        r"\\?\globalroot\Device\HarddiskVolumeShadowCopy3",   # case varies
+        r"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy3\\", # trailing separator
+    ):
+        mapped = vss.map_into_snapshot(r"C:\Users\a\f.txt", "C:\\", device)
+        assert mapped == expected, device
+        assert mapped.count("GLOBALROOT") == 1
+
+
+def test_an_unreadable_snapshot_is_rejected_before_the_capture_uses_it(tmp_path):
+    """A snapshot whose paths do not resolve is worse than none: every open
+    fails and the capture writes almost nothing while reporting it one warning
+    per file. One stat against a path known to exist catches that up front."""
+    shadow = vss.ShadowCopy(
+        volume="C:\\", shadow_id="{x}", device=r"\Device\HarddiskVolumeShadowCopyNope"
+    )
+    assert vss.usable_for(shadow, r"C:\Users\alice") is False
+
+    # And a mapping that does resolve is accepted. usable_for only asks whether
+    # the mapped path can be stat'ed, so a stand-in that maps onto a real
+    # directory exercises the accepting branch without needing Windows.
+    real = tmp_path / "profile"
+    real.mkdir()
+
+    class Workable:
+        def map(self, path):
+            return str(real)
+
+    assert vss.usable_for(Workable(), real) is True

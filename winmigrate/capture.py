@@ -223,6 +223,22 @@ def _open_shadow_copy(scan: ScanResult, options: CaptureOptions, report: Capture
     try:
         volume = vss.volume_of(scan.source.profile_path)
         shadow = vss.create(volume)
+        if not vss.usable_for(shadow, scan.source.profile_path):
+            # Reading through a snapshot that does not resolve fails every file.
+            # Direct reads are what happens without administrator rights anyway,
+            # so falling back costs the locked files and nothing else.
+            shadow.remove()
+            report.notes.append(
+                Note(
+                    Severity.WARNING,
+                    "the shadow copy could not be read, so files are being read "
+                    "directly instead",
+                    "Files held open by running programs may be unreadable or "
+                    "copied in a torn state; they are listed at the end.",
+                )
+            )
+            log.warning("shadow copy created but unusable; falling back to direct reads")
+            return None
         report.used_shadow_copy = True
         return shadow
     except vss.ShadowCopyError as exc:
