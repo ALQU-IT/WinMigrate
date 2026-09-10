@@ -193,3 +193,28 @@ def test_the_full_manifest_holds_the_account_but_the_sidecar_does_not(browser_pr
     assert "me@example.com" in json.dumps(full)  # authoritative copy keeps it
     public = manifest_mod.public_view(full)
     assert "me@example.com" not in json.dumps(public)  # redacted stub in the sidecar
+
+
+def test_two_profiles_with_the_same_display_name_get_distinct_ids(tmp_path):
+    """Chromium names every new profile "Person 1" by default, so keying an item
+    on the friendly name collides -- and a duplicate id fails manifest
+    validation, making the bundle un-restorable. The directory name is unique."""
+    from winmigrate import manifest as manifest_mod
+    from winmigrate.models import ScanResult
+
+    root = tmp_path / "Users" / "a"
+    user_data = root / "AppData" / "Local" / "Google" / "Chrome" / "User Data"
+    for sub in ("Default", "Profile 1"):
+        d = user_data / sub
+        d.mkdir(parents=True)
+        (d / "Preferences").write_text(json.dumps({"profile": {"name": "Person 1"}}))
+    env = Environment.fixture(root, {})
+
+    items, _followups, _notes = browsers.scan_browsers(env)
+    ids = [item.id for item in items]
+    assert ids == ["browser:chrome:default", "browser:chrome:profile-1"]
+    assert len(ids) == len(set(ids))
+
+    result = ScanResult(source=manifest_mod.detect_source_machine(str(root)))
+    result.items = items
+    manifest_mod.validate(manifest_mod.build(result))  # must not raise

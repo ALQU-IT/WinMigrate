@@ -302,7 +302,12 @@ def scan_browsers(env: Environment, files_only: bool = False):
 def _profile_item(profile: BrowserProfile, env: Environment, files_only: bool) -> Item:
     relative = pathutil.relative_posix(profile.profile_dir, env.profile_root)
     item = Item(
-        id=f"browser:{profile.browser_key}:{_slug(profile.display_name)}",
+        # Keyed on the profile *directory* (Default, Profile 1, or Firefox's
+        # random-suffixed dir), which is unique within a browser. The friendly
+        # name is not: Chromium names every new profile "Person 1" by default,
+        # so two profiles would otherwise collide on one id and the manifest
+        # would fail validation on restore.
+        id=f"browser:{profile.browser_key}:{_slug(profile.profile_dir.name)}",
         category=Category.BROWSER_PROFILE,
         kind=Kind.TREE,
         title=f"{profile.browser_title} — {profile.display_name}",
