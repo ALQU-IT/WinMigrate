@@ -79,6 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
         "inspect", parents=[common], help="describe a bundle without decrypting it"
     )
     inspect_parser.add_argument("bundle", type=Path)
+    inspect_parser.add_argument("--json", action="store_true", help="raw header and sidecar as JSON")
     inspect_parser.set_defaults(func=cmd_inspect)
 
     restore_parser = subparsers.add_parser(
@@ -549,15 +550,18 @@ def _shred_password_csvs(paths: list[Path], console: Console) -> None:
 def cmd_inspect(args: argparse.Namespace, console: Console) -> int:
     header = restore_mod.inspect(args.bundle)
     sidecar = restore_mod.load_sidecar(Path(args.bundle))
-    emit_json({"header": header, "sidecar": sidecar})
+    if args.json:
+        emit_json({"header": header, "sidecar": sidecar})
+    else:
+        report.render_bundle_summary(header, sidecar, console)
     checked, error = restore_mod.verify_sidecar(Path(args.bundle))
     if error:
-        console.print(f"[bold red]integrity:[/bold red] {error}")
+        console.print(f"[bold red]integrity:[/bold red] {error} — do not trust this bundle.[/bold red]")
         return 2
     console.print(
-        "[green]integrity: matches the sidecar digest[/green]"
+        "[green]integrity: matches the sidecar digest (transfer intact)[/green]"
         if checked
-        else "[dim]integrity: no sidecar manifest to check against[/dim]"
+        else "[dim]integrity: no sidecar manifest beside the bundle to check against[/dim]"
     )
     return 0
 

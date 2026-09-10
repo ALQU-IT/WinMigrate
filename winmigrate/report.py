@@ -408,3 +408,65 @@ def render_restore_report(report, console: Console, *, dry_run: bool | None = No
                 console.print(f"     [dim]{followup.why}[/dim]")
             for step in followup.steps:
                 console.print(f"       • {step}")
+
+
+# --- bundle inspection (no passphrase) -------------------------------------
+def render_bundle_summary(header: dict, sidecar: dict | None, console: Console) -> None:
+    """A readable description of a bundle from its plaintext header and sidecar.
+
+    Everything here comes from data that needs no passphrase: the header's KDF
+    and cipher, and the redacted public sidecar. Secret items appear only as a
+    count, never by name.
+    """
+    from .util import humanize as _h
+
+    kdf = header.get("kdf", {})
+    created = header.get("created_utc", "?")
+    lines = [
+        f"created: {created}",
+        f"cipher: {header.get('cipher', '?')}   key: {kdf.get('name', '?')}",
+    ]
+    if sidecar:
+        source = sidecar.get("source", {})
+        totals = sidecar.get("totals", {})
+        mode = sidecar.get("mode", "full")
+        lines.insert(0, f"from: [bold]{source.get('hostname', '?')}[/bold] / user "
+                        f"[bold]{source.get('username', '?')}[/bold]  ({mode})")
+        lines.append(
+            f"contents: {_h.bytes_(totals.get('capture_bytes', 0))} in "
+            f"{_h.count(totals.get('capture_files', 0), 'file')}"
+        )
+        secret = totals.get("secret_item_count", 0)
+        if secret:
+            lines.append(f"secret items: {secret} (encrypted-only; not described here)")
+    console.print(Panel("\n".join(lines), title="WinMigrate bundle", border_style="cyan"))
+
+    if not sidecar:
+        console.print(
+            "[dim]No sidecar manifest beside the bundle; only the header could be read.[/dim]"
+        )
+        return
+
+    items = sidecar.get("items", [])
+    by_category: dict[str, list[dict]] = {}
+    for item in items:
+        by_category.setdefault(item.get("category", "?"), []).append(item)
+    if by_category:
+        table = Table(title="What it holds", title_justify="left", expand=False)
+        table.add_column("Category")
+        table.add_column("Items", justify="right")
+        table.add_column("Size", justify="right")
+        for category in sorted(by_category):
+            group = by_category[category]
+            size = sum(i.get("size_bytes", 0) for i in group)
+            label = category.replace("_", " ")
+            redacted = sum(1 for i in group if i.get("redacted"))
+            suffix = f"  [dim]({redacted} encrypted-only)[/dim]" if redacted else ""
+            table.add_row(label + suffix, str(len(group)), _h.bytes_(size))
+        console.print(table)
+
+    followups = sidecar.get("followups", [])
+    if followups:
+        console.print(f"\n[bold]{len(followups)} follow-up(s) after restoring:[/bold]")
+        for followup in followups:
+            console.print(f"  • {followup.get('title', '')}")
