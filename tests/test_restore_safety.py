@@ -27,14 +27,60 @@ PASSPHRASE = "pw"
         "data/user_files/../../../evil.txt",
         "../evil.txt",
         "data/../../evil.txt",
-        "/etc/passwd",
         "C:/Windows/System32/evil.dll",
         "data/user_files/C:/evil.txt",
+        # A drive letter that is not the first component. The check used to look
+        # only at parts[0], saw an innocent "foo", and let this through.
+        "data/foo/D:/evil.exe",
+        "data/user_files/Documents/C:/evil.txt",
+        "secrets/.ssh/D:/authorized_keys",
     ],
 )
 def test_paths_that_escape_the_destination_are_refused(archive_name, tmp_path: Path):
-    target = _target_for(archive_name, tmp_path / "dest")
-    assert target is None or (tmp_path / "dest") in target.parents or target.parent == (tmp_path / "dest")
+    assert _target_for(archive_name, tmp_path / "dest") is None
+
+
+@pytest.mark.parametrize(
+    "archive_name, expected",
+    [
+        ("/etc/passwd", "etc/passwd"),
+        ("//server/share/x", "server/share/x"),
+        ("data/./Documents/x", "Documents/x"),
+    ],
+)
+def test_absolute_looking_members_are_neutralised_rather_than_refused(
+    archive_name, expected, tmp_path: Path
+):
+    """A leading separator is meaningless once the member is treated as
+    profile-relative, so it is dropped and the file lands inside the
+    destination. Nothing escapes, and nothing is needlessly discarded."""
+    destination = tmp_path / "dest"
+    assert _target_for(archive_name, destination) == destination.joinpath(*expected.split("/"))
+
+
+def test_a_drive_letter_after_the_first_component_really_does_escape_on_windows():
+    r"""Why the test above cannot be satisfied by "it stayed under dest".
+
+    Restore runs on Windows; the tests run on POSIX, where joining
+    ``/dest`` with ``foo``, ``D:``, ``evil.exe`` gives the harmless
+    ``/dest/foo/D:/evil.exe``. Windows joining treats a drive anywhere in the
+    sequence as a fresh start, so the same member lands on another disk
+    entirely -- which is exactly the case a POSIX assertion of "is it under the
+    destination?" cannot see. Pinning the Windows semantics here means the
+    escape is caught on the host the suite actually runs on.
+    """
+    from pathlib import PureWindowsPath
+
+    assert str(PureWindowsPath(r"C:\dest").joinpath("foo", "D:", "evil.exe")) == r"D:evil.exe"
+
+
+@pytest.mark.parametrize("archive_name", ["data/NUL", "data/foo/nul.txt", "data/x/COM1", "data/con"])
+def test_members_named_after_windows_devices_are_refused(archive_name, tmp_path: Path):
+    """Windows resolves CON, NUL, COM1 and friends to devices in every
+    directory. A member named NUL would "restore" into the bit bucket: the write
+    succeeds, the file is not there, and the report says everything is fine.
+    No real capture can produce these names, so refusing them costs nothing."""
+    assert _target_for(archive_name, tmp_path / "dest") is None
 
 
 def test_a_normal_member_maps_under_the_destination(tmp_path: Path):

@@ -40,6 +40,13 @@ ProgressCallback = Callable[[str, int], None]
 
 COPY_CHUNK = 1024 * 1024
 
+#: Win32 device names. Reserved in every directory, with or without a suffix.
+RESERVED_DEVICE_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{n}" for n in range(1, 10)}
+    | {f"LPT{n}" for n in range(1, 10)}
+)
+
 
 class RestoreError(WinMigrateError):
     """Restore could not proceed safely."""
@@ -359,10 +366,26 @@ def _target_for(archive_name: str, destination: Path) -> Path | None:
         parts = parts[1:]
     if not parts:
         return None
-    if ":" in parts[0]:
+    # Every part, not just the first. Windows path joining treats a drive
+    # anywhere in the sequence as a fresh start, so "data/foo/D:/evil.exe"
+    # joins to "D:evil.exe" -- outside the destination, on another disk --
+    # while a check of parts[0] alone sees an innocent "foo".
+    if any(":" in part for part in parts):
         log.warning("refusing bundle member with a drive letter: %s", archive_name)
         return None
-    return destination.joinpath(*parts)
+    # Windows resolves these to devices wherever they appear, so a member named
+    # NUL would "restore" into the bit bucket and report success.
+    if any(part.split(".", 1)[0].upper() in RESERVED_DEVICE_NAMES for part in parts):
+        log.warning("refusing bundle member named after a device: %s", archive_name)
+        return None
+    target = destination.joinpath(*parts)
+    # The checks above enumerate what is known to escape; this one asks the
+    # question that actually matters, so a form nobody thought of still fails
+    # closed rather than writing somewhere it was never meant to.
+    if not pathutil.is_within(target, destination):
+        log.warning("refusing bundle member that escapes the destination: %s", archive_name)
+        return None
+    return target
 
 
 def _check_digests(
