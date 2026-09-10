@@ -32,6 +32,11 @@ dev = ["pytest>=8.0"]
 [project.scripts]
 winmigrate = "winmigrate.cli:main"
 
+[project.gui-scripts]
+# A windowed entry point: launched from Explorer it opens the window without
+# a console flashing up behind it.
+winmigrate-gui = "winmigrate.gui:run"
+
 [project.urls]
 Homepage = "https://github.com/ALQU-IT/WinMigrate"
 

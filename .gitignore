@@ -11,3 +11,8 @@ venv/
 *.manifest.json
 winmigrate-*.log
 plan.json
+
+# PyInstaller
+build/
+dist/
+*.spec

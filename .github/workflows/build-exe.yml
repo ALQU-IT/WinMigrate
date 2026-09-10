@@ -1,0 +1,168 @@
+name: Build the Windows executable
+
+# The whole point of this tool is that someone can put it on a USB stick and run
+# it on a machine that has no Python. That means a real .exe, built on Windows,
+# with the same tests behind it as everything else -- so the build runs the
+# suite first and refuses to package a version that does not pass.
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows is where it runs; Linux is where most of the development
+        # happens. Several bugs in this project only appeared on one of them,
+        # so both are checked on every push.
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . pytest pyflakes
+      - name: Lint
+        run: python -m pyflakes winmigrate tests
+      - name: Tests
+        run: python -m pytest -q
+        env:
+          WINMIGRATE_ALLOW_NON_WINDOWS: "1"
+
+  build:
+    name: WinMigrate.exe
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . pyinstaller
+
+      - name: Read the version
+        id: version
+        shell: pwsh
+        run: |
+          $v = python -c "import winmigrate; print(winmigrate.__version__)"
+          "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "winmigrate $v"
+
+      # Two executables from one codebase. The windowed build is what someone
+      # double-clicks; the console build is what they run when they want the
+      # command line, because a windowed exe has no stdout to print to.
+      - name: Build the window
+        run: >
+          pyinstaller --noconfirm --clean --onefile --windowed
+          --name WinMigrate
+          --collect-submodules winmigrate
+          --hidden-import tkinter
+          --hidden-import tkinter.ttk
+          --hidden-import tkinter.filedialog
+          --hidden-import tkinter.messagebox
+          gui_entry.py
+
+      - name: Build the console tool
+        run: >
+          pyinstaller --noconfirm --clean --onefile --console
+          --name winmigrate-cli
+          --collect-submodules winmigrate
+          cli_entry.py
+
+      - name: Check the executables actually start
+        shell: pwsh
+        run: |
+          # A build that imports cleanly on the runner but dies on a missing
+          # hidden import is the classic PyInstaller failure, and it only shows
+          # up when the thing is run. So run it.
+          & ".\dist\winmigrate-cli.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw "the console build does not start" }
+          & ".\dist\winmigrate-cli.exe" presets
+          if ($LASTEXITCODE -ne 0) { throw "presets failed" }
+          # The windowed build cannot be opened headlessly, so this checks the
+          # one thing that can be checked: that it is a real PE that Windows
+          # will load, and that its tkinter came along.
+          $exe = Get-Item ".\dist\WinMigrate.exe"
+          if ($exe.Length -lt 5MB) { throw "WinMigrate.exe is suspiciously small: $($exe.Length) bytes" }
+          Write-Host "WinMigrate.exe $([math]::Round($exe.Length / 1MB, 1)) MB"
+          Write-Host "winmigrate-cli.exe $([math]::Round((Get-Item '.\dist\winmigrate-cli.exe').Length / 1MB, 1)) MB"
+
+      - name: Verify tkinter was bundled
+        shell: pwsh
+        run: |
+          # --windowed swallows import errors into a message box nobody sees on
+          # a runner, so tkinter is verified through a console build of the same
+          # entry point instead.
+          pyinstaller --noconfirm --clean --onefile --console --name tkcheck `
+            --collect-submodules winmigrate --hidden-import tkinter tkcheck_entry.py
+          & ".\dist\tkcheck.exe"
+          if ($LASTEXITCODE -ne 0) { throw "tkinter did not survive freezing" }
+
+      - name: Checksums
+        shell: pwsh
+        run: |
+          Get-FileHash .\dist\WinMigrate.exe -Algorithm SHA256 | Format-List
+          Get-FileHash .\dist\winmigrate-cli.exe -Algorithm SHA256 | Format-List
+          Get-FileHash .\dist\*.exe -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash)  $(Split-Path $_.Path -Leaf)" } |
+            Set-Content .\dist\SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WinMigrate-${{ steps.version.outputs.version }}-windows
+          path: |
+            dist/WinMigrate.exe
+            dist/winmigrate-cli.exe
+            dist/SHA256SUMS.txt
+          retention-days: 30
+          if-no-files-found: error
+
+  release:
+    name: Attach to the release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: WinMigrate-*-windows
+          merge-multiple: true
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/WinMigrate.exe
+            dist/winmigrate-cli.exe
+            dist/SHA256SUMS.txt
+          body: |
+            Windows build of WinMigrate.
+
+            - `WinMigrate.exe` — the window. Double-click it.
+            - `winmigrate-cli.exe` — the command line, for scripted runs.
+
+            Neither needs Python installed. Check `SHA256SUMS.txt` against your
+            download before running either.
+
+            Run from an elevated prompt to allow a shadow copy, which is what
+            lets files held open by running programs be captured cleanly.

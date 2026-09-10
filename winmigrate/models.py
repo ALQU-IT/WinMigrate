@@ -84,6 +84,7 @@ class SkipReason(str, Enum):
     UNREADABLE = "unreadable"
     NOT_PRESENT = "not_present"
     FILES_ONLY_MODE = "files_only_mode"  # secret excluded by --files-only
+    DESELECTED = "deselected"            # the user unticked it in the GUI
 
 
 class Severity(str, Enum):

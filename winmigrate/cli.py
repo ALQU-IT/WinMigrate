@@ -100,7 +100,18 @@ def build_parser() -> argparse.ArgumentParser:
         "presets", parents=[common], help="list the exclusion presets you can apply"
     )
     presets_parser.set_defaults(func=cmd_presets)
+
+    gui_parser = subparsers.add_parser(
+        "gui", parents=[common], help="open the desktop window"
+    )
+    gui_parser.set_defaults(func=cmd_gui)
     return parser
+
+
+def cmd_gui(_args: argparse.Namespace, _console: Console) -> int:
+    from . import gui  # noqa: PLC0415 -- keeps tkinter out of every other command
+
+    return gui.run()
 
 
 def _add_reinstall_arguments(parser: argparse.ArgumentParser) -> None:

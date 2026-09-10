@@ -269,7 +269,8 @@
             "unreadable",
             "not_present",
             "reparse_point",
-            "files_only_mode"
+            "files_only_mode",
+            "deselected"
           ]
         },
         "source_path": {
