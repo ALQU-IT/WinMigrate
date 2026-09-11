@@ -108,6 +108,7 @@ def run_scan(
     _scan_wifi(env, result, config, progress)
     _scan_browsers(env, result, config, progress)
     _scan_notepad(env, result, config, progress)
+    _scan_displays(env, result, progress)
     _note_long_paths(result, long_paths)
 
     result.duration_seconds = time.monotonic() - started
@@ -606,6 +607,18 @@ def _scan_notepad(
     _emit(progress, "Checking Notepad session")
     items, followups = notepad_mod.scan_notepad(env, files_only=config.files_only)
     _measure_capture_items(items, config, env)
+    result.items.extend(items)
+    result.followups.extend(followups)
+
+
+def _scan_displays(
+    env: Environment, result: ScanResult, progress: ProgressCallback | None
+) -> None:
+    """Record how the screens are arranged, per set of screens."""
+    from . import displays as displays_mod  # noqa: PLC0415 -- optional stage
+
+    _emit(progress, "Reading monitor arrangements")
+    items, followups = displays_mod.scan_displays(env)
     result.items.extend(items)
     result.followups.extend(followups)
 

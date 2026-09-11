@@ -96,7 +96,7 @@ can refer back to a preview.
 
 | Field | Meaning |
 | --- | --- |
-| `category` | `user_files`, `browser_profile`, `browser_passwords`, `wifi`, `printers`, `mapped_drives`, `env_vars`, `scheduled_tasks`, `fonts`, `outlook`, `notepad`, `dev_config`, `file_associations`, `software`, `office`. |
+| `category` | `user_files`, `browser_profile`, `browser_passwords`, `wifi`, `printers`, `mapped_drives`, `env_vars`, `scheduled_tasks`, `fonts`, `outlook`, `notepad`, `displays`, `dev_config`, `file_associations`, `software`, `office`. |
 | `kind` | `tree` (directory), `file`, `record` (structured data living in the manifest itself, e.g. an app inventory), `report` (captured for reporting only; restores nothing). |
 | `action` | `capture`, `skip`, or `manual` (only the user can do it). |
 | `sensitivity` | `normal` or `secret`. Secret items exist only in the encrypted payload. |

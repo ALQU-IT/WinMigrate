@@ -29,6 +29,7 @@ class Category(str, Enum):
     FONTS = "fonts"
     OUTLOOK = "outlook"
     NOTEPAD = "notepad"
+    DISPLAYS = "displays"
     DEV_CONFIG = "dev_config"
     FILE_ASSOCIATIONS = "file_associations"
     SOFTWARE = "software"
