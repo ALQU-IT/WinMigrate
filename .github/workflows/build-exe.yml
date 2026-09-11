@@ -67,24 +67,24 @@ jobs:
           "version=$v" >> $env:GITHUB_OUTPUT
           Write-Host "winmigrate $v"
 
-      # The window ships as a folder, not a single file, and that is deliberate.
+      # One file, with everything inside it.
       #
-      # --onefile unpacks the whole application into %TEMP%\_MEIxxxxxx on every
-      # launch and loads Tcl from there. Elevating changes %TEMP% to
-      # C:\Windows\Temp, which is shared between accounts, more tightly
-      # ACL'd, and cleaned aggressively -- so the same executable that works
-      # when double-clicked dies with "Can't find a usable init.tcl" when it
-      # relaunches itself as administrator, which is exactly what this tool does
-      # to get a shadow copy. Antivirus scanning the extraction as it happens is
-      # the other way it fails, and both are intermittent, which is the worst
-      # kind of broken to hand someone backing up a machine.
+      # --onefile unpacks into a temporary directory at every launch and loads
+      # Tcl from there, and the default temporary directory is the problem: when
+      # this program relaunches itself as administrator to get a shadow copy,
+      # the elevated copy is handed C:\Windows\Temp instead of the user's own.
+      # That directory is shared, more tightly ACL'd and aggressively cleaned,
+      # and the result was "Can't find a usable init.tcl" from an executable
+      # that had just worked.
       #
-      # --onedir has no extraction step at all: Tcl sits next to the exe and is
-      # found the same way every time, elevated or not. The cost is a folder
-      # instead of a file, which is why it is zipped.
+      # --runtime-tmpdir pins the unpacking somewhere the user always owns, so
+      # elevating does not move it. The documentation only implies that Windows
+      # expands environment variables here -- it states the opposite for POSIX
+      # and says nothing for Windows -- so the step after this proves it rather
+      # than trusting it.
       - name: Build the window
         run: >
-          pyinstaller --noconfirm --clean --onedir --windowed
+          pyinstaller --noconfirm --clean --onefile --windowed
           --name WinMigrate
           --collect-submodules winmigrate
           --collect-all tkinter
@@ -92,10 +92,9 @@ jobs:
           --hidden-import tkinter.ttk
           --hidden-import tkinter.filedialog
           --hidden-import tkinter.messagebox
+          --runtime-tmpdir "%LOCALAPPDATA%\WinMigrate"
           gui_entry.py
 
-      # The command-line build has no tkinter in it, so none of the above
-      # applies and a single file is genuinely nicer for a tool you type.
       - name: Build the console tool
         run: >
           pyinstaller --noconfirm --clean --onefile --console
@@ -114,98 +113,90 @@ jobs:
           & ".\dist\winmigrate-cli.exe" presets
           if ($LASTEXITCODE -ne 0) { throw "presets failed" }
 
-      - name: Verify Tcl shipped beside the window
+      - name: Prove tkinter survives, and that it unpacks where we said
         shell: pwsh
         run: |
-          # The exact failure this build layout exists to prevent: init.tcl not
-          # being where Tcl looks for it. With --onedir that is a path on disk
-          # which can simply be checked, rather than a temp directory that only
-          # exists while the program is running.
-          $root = ".\dist\WinMigrate"
-          $found = Get-ChildItem $root -Recurse -Filter init.tcl -ErrorAction SilentlyContinue
-          if (-not $found) {
-            Write-Host "--- contents of $root ---"
-            Get-ChildItem $root | Select-Object -ExpandProperty Name
-            throw "init.tcl is not in the build; the window would fail with 'Tcl wasn''t installed properly'"
-          }
-          Write-Host "init.tcl: $($found[0].FullName.Replace((Resolve-Path $root).Path, ''))"
-          foreach ($name in @("tk.tcl")) {
-            if (-not (Get-ChildItem $root -Recurse -Filter $name -ErrorAction SilentlyContinue)) {
-              throw "$name is missing from the build"
-            }
-          }
+          # Two things are being established here, and the second is the one
+          # that broke on a real machine.
+          #
+          # 1. tkinter and its Tcl data are inside the executable. --windowed
+          #    turns an import failure into a message box no runner will see,
+          #    so the same imports are exercised through a console build.
+          # 2. --runtime-tmpdir actually redirects the unpacking, environment
+          #    variable and all. If Windows does not expand it, the folder that
+          #    appears is named literally "%LOCALAPPDATA%" and the check fails
+          #    here rather than on someone's machine when they click Yes on a
+          #    UAC prompt.
+          $probe = "$env:LOCALAPPDATA\WinMigrateProbe"
+          if (Test-Path $probe) { Remove-Item $probe -Recurse -Force }
 
-      - name: Verify tkinter survives freezing, in the shipped layout
-        shell: pwsh
-        run: |
-          # --windowed swallows import errors into a message box no runner will
-          # ever see, so the same imports are exercised through a console build.
-          # Built --onedir too, so it proves the layout that actually ships
-          # rather than a different one that happens to work.
-          pyinstaller --noconfirm --clean --onedir --console --name tkcheck `
+          pyinstaller --noconfirm --clean --onefile --console --name tkcheck `
             --collect-submodules winmigrate --collect-all tkinter `
-            --hidden-import tkinter tkcheck_entry.py
-          & ".\dist\tkcheck\tkcheck.exe"
+            --hidden-import tkinter `
+            --runtime-tmpdir "%LOCALAPPDATA%\WinMigrateProbe" tkcheck_entry.py
+
+          & ".\dist\tkcheck.exe"
           if ($LASTEXITCODE -ne 0) { throw "tkinter did not survive freezing" }
 
-      # Laid out flat, and NOT zipped here.
-      #
-      # upload-artifact always zips whatever it is given, so handing it a .zip
-      # produces a zip inside a zip. Beyond being annoying, that is the exact
-      # trap this build layout exists to avoid: the inner zip opens in Explorer's
-      # viewer, WinMigrate.exe gets double-clicked from inside it, and Tcl is not
-      # there. Uploading the files raw means the one zip GitHub makes has
-      # WinMigrate.exe and _internal at its root, where extracting is the
-      # obvious thing to do.
+          if (Test-Path ".\%LOCALAPPDATA%") {
+            throw "--runtime-tmpdir was taken literally: Windows did not expand the variable, so an elevated run would unpack somewhere unintended"
+          }
+          if (-not (Test-Path $probe)) {
+            throw "--runtime-tmpdir did not redirect the unpacking; $probe was never created"
+          }
+          Write-Host "unpacked into $probe as intended"
+          Remove-Item $probe -Recurse -Force -ErrorAction SilentlyContinue
+
       - name: Lay out the package
         shell: pwsh
         run: |
+          # Flat, and NOT zipped here: upload-artifact always zips what it is
+          # given, so handing it a .zip produces a zip inside a zip -- which is
+          # how someone ends up running the program from inside Explorer's zip
+          # viewer.
           $staging = ".\staging"
           New-Item -ItemType Directory -Force -Path $staging | Out-Null
-          Copy-Item .\dist\WinMigrate\* -Destination $staging -Recurse -Force
+          Copy-Item .\dist\WinMigrate.exe -Destination $staging -Force
           Copy-Item .\dist\winmigrate-cli.exe -Destination $staging -Force
 
           @"
           WinMigrate
           ==========
 
-          EXTRACT THIS FOLDER FIRST, then run WinMigrate.exe from the extracted
-          copy. Running it from inside the .zip appears to work and then fails:
-          the program needs the _internal folder sitting next to it.
-
-          A USB drive is a good place to extract to -- WinMigrate offers to save
-          the backup onto whichever drive it is running from.
-
           WinMigrate.exe        the window. Start here.
-          winmigrate-cli.exe    the same thing on the command line, one file.
-          _internal\            everything the window needs. Do not move it.
+          winmigrate-cli.exe    the same thing on the command line.
+
+          Each is a single self-contained file. Copy either one anywhere and it
+          will run; nothing needs to sit beside it.
 
           Windows will ask for administrator rights. That is what allows a
           shadow copy, which is the only way to copy files your browser and
           Outlook are holding open. Saying no still makes a backup; those files
           are listed at the end as skipped.
+
+          IF WINDOWS BLOCKS IT FROM A USB DRIVE
+          These files are not code-signed, and some machines run a Defender rule
+          called "Block untrusted and unsigned processes that run from USB".
+          Copy the file to the computer's own disk and run it from there, or ask
+          whoever administers the machine to allow it.
           "@ | Set-Content -Encoding UTF8 "$staging\READ ME FIRST.txt"
 
           Get-FileHash "$staging\WinMigrate.exe", "$staging\winmigrate-cli.exe" -Algorithm SHA256 |
             ForEach-Object { "$($_.Hash)  $(Split-Path $_.Path -Leaf)" } |
             Set-Content "$staging\SHA256SUMS.txt"
 
-          $size = (Get-ChildItem $staging -Recurse | Measure-Object -Property Length -Sum).Sum
-          Write-Host "package: $([math]::Round($size / 1MB, 1)) MB"
-          Get-ChildItem $staging | Select-Object Name, Length | Format-Table
+          Get-ChildItem $staging | Select-Object Name, @{n="MB";e={[math]::Round($_.Length/1MB,1)}} | Format-Table
 
-      - name: Check the package is laid out the way it will be used
+      - name: Check the package is what it claims to be
         shell: pwsh
         run: |
-          # What someone gets after extracting, checked here rather than
-          # discovered on their machine.
-          foreach ($required in @("WinMigrate.exe", "winmigrate-cli.exe", "_internal", "READ ME FIRST.txt")) {
+          foreach ($required in @("WinMigrate.exe", "winmigrate-cli.exe", "READ ME FIRST.txt", "SHA256SUMS.txt")) {
             if (-not (Test-Path ".\staging\$required")) { throw "$required is missing from the package" }
           }
           if (Get-ChildItem .\staging -Filter *.zip) { throw "a zip inside the package: it would nest when uploaded" }
-          if (-not (Get-ChildItem .\staging\_internal -Recurse -Filter init.tcl)) {
-            throw "init.tcl is not beside the executable; the window would not start"
-          }
+          # Self-contained means self-contained: anything else next to the exe
+          # is something a user can copy without, and then it is broken.
+          if (Test-Path ".\staging\_internal") { throw "_internal is present; this build is not self-contained" }
 
       - uses: actions/upload-artifact@v7
         with:
@@ -227,31 +218,24 @@ jobs:
           pattern: WinMigrate-*-windows
           merge-multiple: true
           path: package
-      # Release assets are not zipped for you, so the zip is made here -- from
-      # the same flat layout the artifact holds, so both routes deliver an
-      # identical folder.
-      - name: Zip for the release
+      - name: Collect the assets
         run: |
-          cd package
-          zip -r ../WinMigrate-windows.zip . -x 'winmigrate-cli.exe'
-          cd ..
-          cp package/winmigrate-cli.exe package/SHA256SUMS.txt .
-          unzip -l WinMigrate-windows.zip | head -20
+          # Two self-contained executables, attached as themselves. No archive:
+          # a zip is one more thing for someone to run the program from inside.
+          cp package/WinMigrate.exe package/winmigrate-cli.exe package/SHA256SUMS.txt .
+          ls -lh WinMigrate.exe winmigrate-cli.exe
       - uses: softprops/action-gh-release@v3
         with:
           files: |
-            WinMigrate-windows.zip
+            WinMigrate.exe
             winmigrate-cli.exe
             SHA256SUMS.txt
           body: |
             Windows build of WinMigrate. Neither download needs Python installed.
 
-            - `WinMigrate-windows.zip` — the window. **Extract it first**, then run
-              `WinMigrate.exe` from the extracted folder. Running it from inside
-              the zip appears to work and then fails: the program needs the
-              `_internal` folder sitting next to it. A USB drive is a good place
-              to extract to.
-            - `winmigrate-cli.exe` — the command line, a single file, for
+            - `WinMigrate.exe` — the window. One self-contained file; copy it
+              anywhere and run it.
+            - `winmigrate-cli.exe` — the same thing on the command line, for
               scripted runs.
 
             Check `SHA256SUMS.txt` against your download before running either.
@@ -260,3 +244,9 @@ jobs:
             what allows a shadow copy — the only way to copy files your browser
             and Outlook are holding open. Saying no still produces a backup;
             those files are listed at the end as skipped.
+
+            These builds are not code-signed. Some machines run a Defender rule
+            called "Block untrusted and unsigned processes that run from USB",
+            which will stop the file running from a removable drive; copy it to
+            the computer's own disk first, or have the machine's administrator
+            allow it.
