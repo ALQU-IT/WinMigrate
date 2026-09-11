@@ -13,24 +13,97 @@ can be checked without a display.
 
 from __future__ import annotations
 
-#: Windows' own accent blue, near enough. Used for the active rail entry, the
-#: heading rule and the default button.
-ACCENT = "#0067c0"
-ACCENT_DARK = "#005499"
+from dataclasses import dataclass
 
-INK = "#1b1b1b"          # body text
-INK_SOFT = "#5d5d5d"     # subtitles, secondary lines
-INK_FAINT = "#8a8a8a"    # disabled rows, hints
+@dataclass(frozen=True, slots=True)
+class Palette:
+    """Every colour the window uses, so light and dark are the same shape.
 
-PAGE = "#ffffff"         # the content area
-BAND = "#f3f3f3"         # header and footer bands
-RULE = "#e0e0e0"         # separators
-RAIL = "#fafafa"         # the step rail down the left
+    A dataclass rather than module constants because there are two of them and
+    they have to stay in step: a colour added to one and forgotten in the other
+    is a widget that renders black on black, which is the sort of thing nobody
+    notices until it is in front of a user.
+    """
 
-SECRET = "#7a3fb8"       # encrypted-only items
-WARN = "#9a6700"
-GOOD = "#0f7b32"
-BAD = "#b42318"
+    accent: str
+    ink: str          # body text
+    ink_soft: str     # subtitles, secondary lines
+    ink_faint: str    # disabled rows, hints
+    page: str         # the content area
+    band: str         # header and footer bands
+    rule: str         # separators
+    rail: str         # the step rail down the left
+    secret: str       # encrypted-only items
+    warn: str
+    good: str
+    bad: str
+
+
+LIGHT = Palette(
+    accent="#0067c0",
+    ink="#1b1b1b",
+    ink_soft="#5d5d5d",
+    ink_faint="#8a8a8a",
+    page="#ffffff",
+    band="#f3f3f3",
+    rule="#e0e0e0",
+    rail="#fafafa",
+    secret="#7a3fb8",
+    warn="#9a6700",
+    good="#0f7b32",
+    bad="#b42318",
+)
+
+#: Windows' own dark surfaces are near-black rather than mid-grey, and its
+#: accent lightens rather than darkens -- a dark theme that simply inverts the
+#: light one looks like a different operating system sitting on the desktop.
+DARK = Palette(
+    accent="#4cc2ff",
+    ink="#f0f0f0",
+    ink_soft="#b8b8b8",
+    ink_faint="#7c7c7c",
+    page="#202020",
+    band="#272727",
+    rule="#3d3d3d",
+    rail="#1a1a1a",
+    secret="#c9a0ff",
+    warn="#e8b339",
+    good="#4ad07a",
+    bad="#ff6b5e",
+)
+
+#: Where Windows records the choice. 0 is dark, 1 is light -- the value is named
+#: for the light theme, so the sense reads backwards.
+PERSONALIZE_KEY = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+APPS_USE_LIGHT_THEME = "AppsUseLightTheme"
+
+
+def detect_dark_mode(env=None) -> bool:
+    """Is Windows set to a dark theme for applications?
+
+    ``AppsUseLightTheme`` is the one that governs app windows;
+    ``SystemUsesLightTheme`` is the taskbar and Start menu and can differ, which
+    is why it is not the one read here.
+
+    Anything unreadable -- the value absent, a non-Windows host, an older build
+    that predates the setting -- means light, because that is what Windows
+    itself falls back to when the value is missing.
+    """
+    if env is None:  # pragma: no cover -- the live path
+        from ..platform_win import Environment  # noqa: PLC0415
+
+        env = Environment.live()
+    from ..platform_win import HKCU  # noqa: PLC0415
+
+    value = env.read_registry_value(HKCU, PERSONALIZE_KEY, APPS_USE_LIGHT_THEME)
+    if isinstance(value, int):
+        return value == 0
+    return False
+
+
+def palette_for(dark: bool) -> Palette:
+    return DARK if dark else LIGHT
+
 
 #: Segoe UI is on every supported Windows; the fallbacks are for a development
 #: host that has neither.
@@ -67,56 +140,79 @@ def font_family(probe=None) -> str:
     return FAMILY[-1]
 
 
-def apply(style, family: str) -> None:
-    """Configure the ttk styles the window uses.
+def apply(style, family: str, palette: Palette = LIGHT) -> None:
+    """Configure the ttk styles the window uses, in one palette or the other.
 
     ``style`` is a ``ttk.Style``. Only named styles are touched, never the
     defaults, so anything not explicitly styled still looks like the platform.
+
+    On a dark palette the underlying ttk theme is switched away from "vista":
+    vista draws its widgets from Windows' own light bitmaps, which cannot be
+    recoloured, so a dark page would end up framed in white chrome. "clam" is
+    drawn from the colours it is given and so can actually go dark.
     """
-    try:
-        style.theme_use("vista")
-    except Exception:  # noqa: BLE001 -- not on Windows, or no such theme
+    wanted = ("clam",) if palette is DARK else ("vista", "clam")
+    for name in wanted:
         try:
-            style.theme_use("clam")
-        except Exception:  # noqa: BLE001
-            pass
+            style.theme_use(name)
+            break
+        except Exception:  # noqa: BLE001 -- not on Windows, or no such theme
+            continue
 
-    style.configure("Page.TFrame", background=PAGE)
-    style.configure("Band.TFrame", background=BAND)
-    style.configure("Rail.TFrame", background=RAIL)
+    style.configure("Page.TFrame", background=palette.page)
+    style.configure("Band.TFrame", background=palette.band)
+    style.configure("Rail.TFrame", background=palette.rail)
 
-    style.configure("Title.TLabel", background=PAGE, foreground=INK,
+    style.configure("Title.TLabel", background=palette.page, foreground=palette.ink,
                     font=(family, TITLE_SIZE))
-    style.configure("Subtitle.TLabel", background=PAGE, foreground=INK_SOFT,
+    style.configure("Subtitle.TLabel", background=palette.page, foreground=palette.ink_soft,
                     font=(family, SUBTITLE_SIZE))
-    style.configure("Body.TLabel", background=PAGE, foreground=INK,
+    style.configure("Body.TLabel", background=palette.page, foreground=palette.ink,
                     font=(family, BODY_SIZE))
-    style.configure("Hint.TLabel", background=PAGE, foreground=INK_SOFT,
+    style.configure("Hint.TLabel", background=palette.page, foreground=palette.ink_soft,
                     font=(family, SMALL_SIZE))
-    style.configure("Warn.TLabel", background=PAGE, foreground=WARN,
+    style.configure("Warn.TLabel", background=palette.page, foreground=palette.warn,
                     font=(family, SMALL_SIZE))
-    style.configure("Bad.TLabel", background=PAGE, foreground=BAD,
+    style.configure("Bad.TLabel", background=palette.page, foreground=palette.bad,
                     font=(family, SMALL_SIZE))
-    style.configure("Good.TLabel", background=PAGE, foreground=GOOD,
+    style.configure("Good.TLabel", background=palette.page, foreground=palette.good,
                     font=(family, BODY_SIZE))
-    style.configure("BandHint.TLabel", background=BAND, foreground=INK_SOFT,
+    style.configure("BandHint.TLabel", background=palette.band, foreground=palette.ink_soft,
                     font=(family, SMALL_SIZE))
 
-    style.configure("RailOn.TLabel", background=RAIL, foreground=ACCENT,
+    style.configure("RailOn.TLabel", background=palette.rail, foreground=palette.accent,
                     font=(family, BODY_SIZE, "bold"))
-    style.configure("RailDone.TLabel", background=RAIL, foreground=INK_SOFT,
+    style.configure("RailDone.TLabel", background=palette.rail, foreground=palette.ink_soft,
                     font=(family, BODY_SIZE))
-    style.configure("RailOff.TLabel", background=RAIL, foreground=INK_FAINT,
+    style.configure("RailOff.TLabel", background=palette.rail, foreground=palette.ink_faint,
                     font=(family, BODY_SIZE))
-    style.configure("RailTitle.TLabel", background=RAIL, foreground=INK,
+    style.configure("RailTitle.TLabel", background=palette.rail, foreground=palette.ink,
                     font=(family, BODY_SIZE, "bold"))
 
     style.configure("Wizard.TButton", font=(family, BODY_SIZE), padding=(18, 7))
-    style.configure("Wizard.TCheckbutton", background=PAGE, font=(family, BODY_SIZE))
-    style.configure("Wizard.TRadiobutton", background=PAGE, font=(family, BODY_SIZE + 1))
-    style.configure("Band.TCheckbutton", background=BAND, font=(family, SMALL_SIZE))
-    style.configure("Wizard.Treeview", font=(family, BODY_SIZE), rowheight=26)
-    style.configure("Wizard.Treeview.Heading", font=(family, SMALL_SIZE, "bold"))
+    style.configure("Wizard.TCheckbutton", background=palette.page, foreground=palette.ink,
+                    font=(family, BODY_SIZE))
+    style.configure("Wizard.TRadiobutton", background=palette.page, foreground=palette.ink,
+                    font=(family, BODY_SIZE + 1))
+    style.configure("Band.TCheckbutton", background=palette.band, foreground=palette.ink,
+                    font=(family, SMALL_SIZE))
+    style.configure(
+        "Wizard.Treeview",
+        background=palette.page,
+        fieldbackground=palette.page,
+        foreground=palette.ink,
+        font=(family, BODY_SIZE),
+        rowheight=26,
+    )
+    style.configure("Wizard.Treeview.Heading", background=palette.band,
+                    foreground=palette.ink, font=(family, SMALL_SIZE, "bold"))
+    # Without this the selection keeps clam's default blue, which on the dark
+    # page is the one thing louder than the accent.
+    style.map(
+        "Wizard.Treeview",
+        background=[("selected", palette.accent)],
+        foreground=[("selected", palette.page)],
+    )
 
 
 #: Rail entries are drawn with one of these, depending on where the user is.

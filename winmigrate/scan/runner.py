@@ -13,7 +13,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from ..config import PROFILE_DIRS_NOT_USER_DATA, ScanConfig
+from ..config import PROFILE_DIRS_NOT_USER_DATA, ScanConfig, looks_like_cloud_folder
 from ..manifest import detect_source_machine
 from ..models import (
     Action,
@@ -255,21 +255,42 @@ def _scan_other_profile_dirs(
             continue
         if key in known_paths or key in sync_paths:
             continue
+        # Named like a cloud folder, but no sync client claims it. Capturing it
+        # is the safe half of the answer -- the alternative is dropping what may
+        # be the only copy of something -- but saying nothing would leave the
+        # user looking at one OneDrive folder being copied in full and another
+        # beside it skipped, with no way to tell why.
+        unclaimed_cloud = looks_like_cloud_folder(name)
         if config.is_excluded(pathutil.relative_posix(entry_path, env.profile_root), name):
             continue
         _emit(progress, f"Scanning {name}")
         measurement = measure_tree(entry_path, config, env, result.sync_roots)
         long_paths += measurement.long_path_count
-        result.items.append(
-            _item_from_measurement(
-                item_id=f"files:other:{name.lower()}",
-                title=name,
-                path=entry_path,
-                measurement=measurement,
-                archive_path=f"data/user_files/_other/{name}",
-                restore_target=f"%USERPROFILE%\\{name}",
-            )
+        item = _item_from_measurement(
+            item_id=f"files:other:{name.lower()}",
+            title=name,
+            path=entry_path,
+            measurement=measurement,
+            archive_path=f"data/user_files/_other/{name}",
+            restore_target=f"%USERPROFILE%\\{name}",
         )
+        if unclaimed_cloud and item.action is Action.CAPTURE:
+            item.notes.append(
+                Note(
+                    Severity.WARNING,
+                    f"{name} is named like a cloud folder, but no sync client on "
+                    f"this machine claims it.",
+                    "It is being copied in full. If it is still syncing, signing in "
+                    "on the new machine would bring it back and you can leave it "
+                    "out; if the client is gone, this may be the only copy.",
+                )
+            )
+            result.add_note(
+                Severity.WARNING,
+                f"{name} looks like a cloud folder but is not registered as one",
+                "Captured in full rather than skipped. See the item's note.",
+            )
+        result.items.append(item)
     return long_paths
 
 

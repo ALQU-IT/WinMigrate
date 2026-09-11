@@ -162,9 +162,15 @@ class WinMigrateWizard:
         root.minsize(820, 560)
 
         self.family = theme.font_family()
+        # Windows keeps the light/dark choice in the registry; matching it is
+        # the difference between a tool that belongs on the desktop and one that
+        # flashes white at someone working in the dark.
+        self.dark = theme.detect_dark_mode()
+        self.palette = theme.palette_for(self.dark)
         self.style = ttk.Style(root)
-        theme.apply(self.style, self.family)
-        root.configure(background=theme.PAGE)
+        theme.apply(self.style, self.family, self.palette)
+        root.configure(background=self.palette.page)
+        log.info("theme: %s", "dark" if self.dark else "light")
 
         self._build_chrome()
         self._build_pages()
@@ -340,7 +346,7 @@ class WinMigrateWizard:
         self.restore_tree.configure(yscrollcommand=bar.set)
         self.restore_tree.pack(side="left", fill="both", expand=True)
         bar.pack(side="right", fill="y")
-        self.restore_tree.tag_configure("secret", foreground=theme.SECRET)
+        self.restore_tree.tag_configure("secret", foreground=self.palette.secret)
         self.restore_tree.bind("<Button-1>", self._on_restore_tree_click)
 
         row = ttk.Frame(page, style="Page.TFrame")
@@ -420,9 +426,9 @@ class WinMigrateWizard:
         holder = ttk.Frame(page, style="Page.TFrame")
         holder.pack(fill="both", expand=True)
         self.followup_box = self.tk.Text(
-            holder, height=10, wrap="word", relief="flat", background=theme.PAGE,
-            foreground=theme.INK, borderwidth=0, highlightthickness=1,
-            highlightbackground=theme.RULE,
+            holder, height=10, wrap="word", relief="flat", background=self.palette.page,
+            foreground=self.palette.ink, borderwidth=0, highlightthickness=1,
+            highlightbackground=self.palette.rule,
         )
         bar = ttk.Scrollbar(holder, orient="vertical", command=self.followup_box.yview)
         self.followup_box.configure(yscrollcommand=bar.set)
@@ -523,8 +529,8 @@ class WinMigrateWizard:
         self.tree.configure(yscrollcommand=bar.set)
         self.tree.pack(side="left", fill="both", expand=True)
         bar.pack(side="right", fill="y")
-        self.tree.tag_configure("secret", foreground=theme.SECRET)
-        self.tree.tag_configure("blocked", foreground=theme.INK_FAINT)
+        self.tree.tag_configure("secret", foreground=self.palette.secret)
+        self.tree.tag_configure("blocked", foreground=self.palette.ink_faint)
         self.tree.bind("<Button-1>", self._on_tree_click)
 
         row = ttk.Frame(page, style="Page.TFrame")

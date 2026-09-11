@@ -154,9 +154,30 @@ PROFILE_DIRS_NOT_USER_DATA: frozenset[str] = frozenset(
         "templates",
         "my documents",
         "intelgraphicsprofiles",
-        "onedrive",  # handled as a sync root, not as a plain directory
     }
 )
+
+#: Profile-root folders that a cloud client owns. Matched as a prefix, because
+#: a work account's folder is "OneDrive - Contoso" and a personal one is plain
+#: "OneDrive" -- an exact-match list catches only the second, which is how a
+#: work folder ends up captured in full while the SharePoint library beside it
+#: is left out.
+#:
+#: Matching the name is not on its own a reason to skip anything. It decides
+#: whether a folder that no sync client claims is worth remarking on: a
+#: "OneDrive - Contoso" that OneDrive has never heard of is either a signed-out
+#: client or an abandoned folder full of the only copy of something, and the
+#: two want opposite handling. So it is captured and said out loud.
+CLOUD_FOLDER_PREFIXES: tuple[str, ...] = ("onedrive",)
+
+
+def looks_like_cloud_folder(name: str) -> bool:
+    """True when a profile-root folder is named the way a sync client names one."""
+    lowered = name.strip().lower()
+    return any(
+        lowered == prefix or lowered.startswith(prefix + " ")
+        for prefix in CLOUD_FOLDER_PREFIXES
+    )
 
 
 @dataclass(slots=True)

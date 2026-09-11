@@ -3,7 +3,7 @@ from pathlib import Path
 from conftest import snapshot
 
 from winmigrate.config import ScanConfig
-from winmigrate.models import Action, Category, Kind, SkipReason
+from winmigrate.models import Action, Category, Kind, Severity, SkipReason
 from winmigrate.platform_win import USER_SHELL_FOLDERS_KEY, Environment
 from winmigrate.scan import run_scan
 
@@ -334,3 +334,83 @@ def test_an_exclusion_that_matches_nothing_leaves_the_folders_alone(tmp_path: Pa
     )
     item = next(i for i in result.items if i.id == "files:downloads")
     assert item.action is Action.CAPTURE
+
+
+def test_a_work_onedrive_folder_is_recognised_the_same_as_a_personal_one(tmp_path: Path):
+    """A personal folder is "OneDrive"; a work one is "OneDrive - Contoso".
+
+    The list that marks these as the sync client's business matched exactly, so
+    it caught only the first. The registry is the real detector and usually
+    covers both — but when it does not, the result was one OneDrive folder being
+    copied in full while another beside it was skipped, with nothing on screen
+    explaining the difference.
+    """
+    from winmigrate.config import looks_like_cloud_folder
+
+    assert looks_like_cloud_folder("OneDrive")
+    assert looks_like_cloud_folder("OneDrive - Contoso")
+    assert looks_like_cloud_folder("onedrive - contoso ltd")
+    # Not a cloud folder just because the word appears somewhere in the name.
+    assert not looks_like_cloud_folder("OneDriveBackups")
+    assert not looks_like_cloud_folder("My OneDrive Notes")
+    assert not looks_like_cloud_folder("Projects")
+
+
+def test_a_registered_work_onedrive_folder_is_skipped(tmp_path: Path):
+    profile = tmp_path / "alice"
+    (profile / "Documents").mkdir(parents=True)
+    work = profile / "OneDrive - Contoso"
+    work.mkdir()
+    (work / "report.docx").write_bytes(b"x" * 5000)
+
+    registry = {
+        r"HKCU\Software\Microsoft\OneDrive\Accounts\Business1": {
+            "UserFolder": str(work),
+            "UserEmail": "alice@contoso.com",
+        }
+    }
+    result = run_scan(
+        ScanConfig(profile_root=profile, include_software=False),
+        Environment.fixture(profile, registry),
+    )
+    assert not any(i.id == "files:other:onedrive - contoso" for i in result.items)
+    # It is reported rather than vanishing, with the account to sign into.
+    synced = [i for i in result.items if i.skip_reason is SkipReason.SYNCED]
+    assert any("contoso" in (i.record or {}).get("account_hint", "").lower() for i in synced)
+
+
+def test_an_unclaimed_cloud_folder_is_captured_and_said_out_loud(tmp_path: Path):
+    """No sync client claims it. Capturing is the safe half — the alternative is
+    dropping what may be the only copy — but silence would leave the user
+    looking at an inconsistency with no way to understand it."""
+    profile = tmp_path / "alice"
+    (profile / "Documents").mkdir(parents=True)
+    orphan = profile / "OneDrive - Contoso"
+    orphan.mkdir()
+    (orphan / "report.docx").write_bytes(b"x" * 5000)
+
+    result = run_scan(
+        ScanConfig(profile_root=profile, include_software=False),
+        Environment.fixture(profile, {}),
+    )
+    item = next(i for i in result.items if i.id == "files:other:onedrive - contoso")
+    assert item.action is Action.CAPTURE
+    assert item.size_bytes == 5000  # nothing dropped
+    warnings = [n for n in item.notes if n.severity is Severity.WARNING]
+    assert warnings and "no sync client" in warnings[0].message
+    assert any("looks like a cloud folder" in n.message for n in result.notes)
+
+
+def test_an_ordinary_folder_gets_no_cloud_warning(tmp_path: Path):
+    profile = tmp_path / "alice"
+    (profile / "Documents").mkdir(parents=True)
+    projects = profile / "Projects"
+    projects.mkdir()
+    (projects / "main.py").write_bytes(b"x" * 100)
+
+    result = run_scan(
+        ScanConfig(profile_root=profile, include_software=False),
+        Environment.fixture(profile, {}),
+    )
+    item = next(i for i in result.items if i.id == "files:other:projects")
+    assert not [n for n in item.notes if n.severity is Severity.WARNING]

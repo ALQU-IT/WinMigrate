@@ -282,3 +282,97 @@ def test_every_page_of_both_branches_has_a_heading():
     for step in Step:
         heading, subtitle = title(step)
         assert heading and subtitle, step
+
+
+# --- light and dark --------------------------------------------------------
+def test_windows_dark_mode_is_read_from_the_registry():
+    """AppsUseLightTheme is the value that governs application windows.
+    SystemUsesLightTheme is the taskbar and Start menu and can differ, so it is
+    deliberately not the one consulted.
+
+    The name reads backwards -- it names the *light* theme -- so 0 means dark.
+    """
+    from winmigrate.platform_win import Environment
+
+    def env_with(values):
+        return Environment.fixture(Path("/tmp/p"), {f"HKCU\\{theme.PERSONALIZE_KEY}": values})
+
+    assert theme.detect_dark_mode(env_with({"AppsUseLightTheme": 0})) is True
+    assert theme.detect_dark_mode(env_with({"AppsUseLightTheme": 1})) is False
+
+    # The taskbar setting must not be mistaken for the application one.
+    assert theme.detect_dark_mode(env_with({"SystemUsesLightTheme": 0})) is False
+
+
+def test_anything_unreadable_means_light():
+    """The value is absent on older builds and on every non-Windows host, and
+    light is what Windows itself falls back to. Guessing dark would put white
+    text on a white page for anyone whose registry could not be read."""
+    from winmigrate.platform_win import Environment
+
+    assert theme.detect_dark_mode(Environment.fixture(Path("/tmp/p"), {})) is False
+    assert theme.detect_dark_mode(
+        Environment.fixture(Path("/tmp/p"), {f"HKCU\\{theme.PERSONALIZE_KEY}": {}})
+    ) is False
+    # A string where a number belongs is not a vote for dark.
+    assert theme.detect_dark_mode(
+        Environment.fixture(Path("/tmp/p"), {f"HKCU\\{theme.PERSONALIZE_KEY}": {"AppsUseLightTheme": "0"}})
+    ) is False
+
+
+def test_both_palettes_define_every_colour():
+    """A colour added to one palette and forgotten in the other is a widget
+    that renders black on black -- the sort of thing nobody notices until it is
+    in front of someone."""
+    import dataclasses
+
+    fields = {f.name for f in dataclasses.fields(theme.Palette)}
+    for palette in (theme.LIGHT, theme.DARK):
+        for name in fields:
+            value = getattr(palette, name)
+            assert isinstance(value, str) and value.startswith("#"), (palette, name)
+            assert len(value) == 7, (palette, name, value)
+
+
+def test_the_two_palettes_are_actually_different_and_the_right_way_round():
+    def brightness(colour: str) -> int:
+        r, g, b = (int(colour[i : i + 2], 16) for i in (1, 3, 5))
+        return (r * 299 + g * 587 + b * 114) // 1000
+
+    # Dark pages are dark, light pages are light, and text contrasts with both.
+    assert brightness(theme.DARK.page) < 60
+    assert brightness(theme.LIGHT.page) > 200
+    assert brightness(theme.DARK.ink) > 200
+    assert brightness(theme.LIGHT.ink) < 60
+
+    for palette in (theme.LIGHT, theme.DARK):
+        page = brightness(palette.page)
+        for name in ("ink", "ink_soft", "accent", "secret", "bad"):
+            assert abs(brightness(getattr(palette, name)) - page) > 60, (palette, name)
+
+
+def test_the_dark_palette_does_not_use_the_vista_widget_theme():
+    """vista draws its widgets from Windows' own light bitmaps, which cannot be
+    recoloured. A dark page framed in white chrome looks broken, so clam -- which
+    is drawn from the colours it is given -- is used instead."""
+
+    class Recorder:
+        def __init__(self):
+            self.used = []
+
+        def theme_use(self, name):
+            self.used.append(name)
+
+        def configure(self, *a, **k):
+            pass
+
+        def map(self, *a, **k):
+            pass
+
+    dark = Recorder()
+    theme.apply(dark, "Segoe UI", theme.DARK)
+    assert dark.used == ["clam"]
+
+    light = Recorder()
+    theme.apply(light, "Segoe UI", theme.LIGHT)
+    assert light.used[0] == "vista"
