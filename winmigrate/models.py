@@ -124,6 +124,9 @@ class SyncRoot:
     known_folders_redirected: list[str] = field(default_factory=list)
     bytes_skipped: int = 0
     files_skipped: int = 0
+    #: False when counting was stopped early. The figures are then a floor, not
+    #: a total, and every place that shows them has to say so.
+    measured_fully: bool = True
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -134,6 +137,7 @@ class SyncRoot:
             "known_folders_redirected": list(self.known_folders_redirected),
             "bytes_skipped": self.bytes_skipped,
             "files_skipped": self.files_skipped,
+            "measured_fully": self.measured_fully,
         }
 
 

@@ -71,7 +71,23 @@ def run_scan(
             "the large items these cover are left out of the plan on purpose",
         )
     result.sync_roots = syncroots_mod.detect(env) if config.skip_synced else []
-    syncroots_mod.measure(result.sync_roots, config.measure_skipped)
+    # The measurement gets the progress callback of its own: on a corporate
+    # OneDrive it is the single slowest thing the scan does, and it used to do
+    # it without saying a word.
+    syncroots_mod.measure(
+        result.sync_roots,
+        config.measure_skipped,
+        progress=(lambda message: _emit(progress, message)) if progress else None,
+    )
+    for root in result.sync_roots:
+        if not root.measured_fully:
+            result.add_note(
+                Severity.INFO,
+                f"{root.label or root.provider} holds at least "
+                f"{root.files_skipped:,} files; counting stopped there",
+                "Its contents are not being copied either way, so the exact figure "
+                "is not worth the wait. Pass --fast to skip this counting entirely.",
+            )
     for root in result.sync_roots:
         log.info("sync root: %s -> %s", root.provider, root.root)
 

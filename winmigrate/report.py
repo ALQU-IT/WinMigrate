@@ -86,8 +86,11 @@ def _render_sync_roots(result: ScanResult, console: Console) -> None:
             root.provider,
             pathutil.display(root.root, result.source.profile_path),
             root.account_hint or "—",
-            humanize.bytes_(root.bytes_skipped),
-            f"{root.files_skipped:,}",
+            # A floor, when counting was stopped early, must not be shown as a
+            # total. "≥" is the whole difference between reporting a number and
+            # claiming one.
+            ("" if root.measured_fully else "≥ ") + humanize.bytes_(root.bytes_skipped),
+            ("" if root.measured_fully else "≥ ") + f"{root.files_skipped:,}",
         )
     console.print(table)
     console.print(

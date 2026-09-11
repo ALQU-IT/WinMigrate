@@ -193,6 +193,38 @@ jobs:
           foreach ($required in @("WinMigrate.exe", "winmigrate-cli.exe", "READ ME FIRST.txt", "SHA256SUMS.txt")) {
             if (-not (Test-Path ".\staging\$required")) { throw "$required is missing from the package" }
           }
+
+          # Run the packaged copy, not the one in dist. They are the same bytes
+          # today, but "it worked where it was built" is a weaker claim than
+          # "it worked from the folder that ships", and the difference is
+          # exactly where a packaging mistake would hide.
+          Push-Location .\staging
+          try {
+            $out = & ".\winmigrate-cli.exe" --version 2>&1
+            $code = $LASTEXITCODE
+            Write-Host "packaged cli --version -> exit $code, output: $out"
+            if ($code -ne 0) { throw "the packaged console build exits $code" }
+            if (-not $out) { throw "the packaged console build printed nothing at all" }
+            if ($out -notmatch "winmigrate") { throw "unexpected output from --version: $out" }
+
+            # A subsystem check, because this is the one failure that looks like
+            # nothing happening: a GUI-subsystem binary run from a console
+            # returns instantly and prints not one character.
+            $bytes = [System.IO.File]::ReadAllBytes("$PWD\winmigrate-cli.exe")
+            $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+            $subsystem = [BitConverter]::ToUInt16($bytes, $peOffset + 0x5C)
+            # 3 = Windows CUI (console), 2 = Windows GUI.
+            Write-Host "winmigrate-cli.exe subsystem: $subsystem (3 = console)"
+            if ($subsystem -ne 3) { throw "winmigrate-cli.exe is not a console binary; it would print nothing" }
+
+            $guiBytes = [System.IO.File]::ReadAllBytes("$PWD\WinMigrate.exe")
+            $guiOffset = [BitConverter]::ToInt32($guiBytes, 0x3C)
+            $guiSubsystem = [BitConverter]::ToUInt16($guiBytes, $guiOffset + 0x5C)
+            Write-Host "WinMigrate.exe subsystem: $guiSubsystem (2 = windowed)"
+            if ($guiSubsystem -ne 2) { throw "WinMigrate.exe is not a windowed binary" }
+          } finally {
+            Pop-Location
+          }
           if (Get-ChildItem .\staging -Filter *.zip) { throw "a zip inside the package: it would nest when uploaded" }
           # Self-contained means self-contained: anything else next to the exe
           # is something a user can copy without, and then it is broken.

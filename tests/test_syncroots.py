@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import time
 from winmigrate.models import SyncRoot
 from winmigrate.platform_win import Environment
 from winmigrate.scan import syncroots
@@ -81,3 +82,113 @@ def test_onedrive_env_vars_are_found_despite_windows_upper_casing(tmp_path):
     env = Environment.fixture(root, {}, environ={"ONEDRIVECOMMERCIAL": str(root / "Work")})
     roots = syncroots.detect(env)
     assert str(root / "Work") in {entry.root for entry in roots}
+
+
+# --- counting what is not being copied -------------------------------------
+def slow_scandir(delay: float):
+    """os.scandir whose entries stat slowly, standing in for cloud placeholders.
+
+    A OneDrive file that is not downloaded is a placeholder, and stat-ing one
+    goes through the Cloud Files driver rather than the disk. On a corporate
+    OneDrive that turns counting into minutes.
+    """
+    import os as _os
+
+    real = _os.scandir
+
+    class SlowEntry:
+        def __init__(self, entry):
+            self._entry = entry
+            self.name = entry.name
+            self.path = entry.path
+
+        def is_dir(self, **kwargs):
+            return self._entry.is_dir(**kwargs)
+
+        def stat(self, **kwargs):
+            time.sleep(delay)
+            return self._entry.stat(**kwargs)
+
+    return lambda path: [SlowEntry(entry) for entry in real(path)]
+
+
+def build_tree(root: Path, folders: int = 20, each: int = 200) -> None:
+    for index in range(folders):
+        folder = root / f"folder{index}"
+        folder.mkdir(parents=True)
+        for number in range(each):
+            (folder / f"f{number}.bin").write_bytes(b"x" * 10)
+
+
+def test_counting_a_sync_root_gives_up_rather_than_taking_minutes(tmp_path: Path, monkeypatch):
+    """This figure exists only to tell the user roughly how much is not being
+    backed up. It is worth a few seconds and it is not worth ten minutes -- and
+    ten minutes is what it cost on a real corporate OneDrive, in silence, before
+    the program had printed a single character.
+    """
+    root = tmp_path / "OneDrive - Contoso"
+    build_tree(root)
+    monkeypatch.setattr(syncroots.os, "scandir", slow_scandir(0.002))
+
+    entry = SyncRoot(provider="onedrive", root=str(root), label="OneDrive - Contoso")
+    started = time.monotonic()
+    syncroots.measure([entry], True, budget_seconds=0.5)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 2.0, f"took {elapsed:.1f}s despite a 0.5s budget"
+    assert entry.measured_fully is False
+    assert entry.files_skipped > 0  # a floor, not nothing
+
+
+def test_a_root_that_fits_in_the_budget_is_counted_exactly(tmp_path: Path):
+    root = tmp_path / "OneDrive"
+    build_tree(root, folders=3, each=10)
+    entry = SyncRoot(provider="onedrive", root=str(root), label="OneDrive")
+    syncroots.measure([entry], True, budget_seconds=30)
+
+    assert entry.measured_fully is True
+    assert entry.files_skipped == 30
+    assert entry.bytes_skipped == 300
+
+
+def test_the_clock_is_checked_far_more_often_than_progress_is_reported(tmp_path: Path):
+    """The budget exists for the case where each stat is slow. Checking the time
+    every couple of thousand files would mean a minute and a half before the
+    first look at a clock set for eight seconds."""
+    assert syncroots._CHECK_CLOCK_EVERY < syncroots._REPORT_EVERY / 10
+
+
+def test_counting_says_what_it_is_doing(tmp_path: Path):
+    """Ten minutes of silence is indistinguishable from a program that has hung,
+    which is exactly how it was reported."""
+    root = tmp_path / "OneDrive - Contoso"
+    build_tree(root, folders=15, each=200)
+    said: list[str] = []
+    entry = SyncRoot(provider="onedrive", root=str(root), label="OneDrive - Contoso")
+    syncroots.measure([entry], True, progress=said.append, budget_seconds=30)
+
+    assert said, "counting reported nothing at all"
+    assert "OneDrive - Contoso" in said[0]
+    assert any("files" in message for message in said[1:]), said
+
+
+def test_an_incomplete_count_is_shown_as_a_floor_not_a_total(tmp_path: Path):
+    """Reporting a number and claiming one are different things."""
+    from rich.console import Console
+
+    from winmigrate import report as report_mod
+    from winmigrate.manifest import detect_source_machine
+    from winmigrate.models import ScanResult
+
+    result = ScanResult(source=detect_source_machine(str(tmp_path)))
+    result.sync_roots = [
+        SyncRoot(provider="onedrive", root=str(tmp_path / "a"), label="Partial",
+                 bytes_skipped=1024, files_skipped=5, measured_fully=False),
+        SyncRoot(provider="onedrive", root=str(tmp_path / "b"), label="Whole",
+                 bytes_skipped=2048, files_skipped=9, measured_fully=True),
+    ]
+    console = Console(record=True, width=200)
+    report_mod.render_preview(result, console)
+    text = " ".join(console.export_text().split())
+    assert "≥" in text
+    assert text.count("≥") == 2  # the floor's size and its file count, not the other root's
