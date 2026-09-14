@@ -711,3 +711,29 @@ def test_a_fake_profile_tree_off_windows_is_still_a_fixture(monkeypatch, profile
     env = wizard._environment(wizard._config())
 
     assert env.registry == {} and env.is_windows is False
+
+
+def test_the_export_address_goes_on_the_clipboard_either_way(monkeypatch, profile: Path):
+    """Launching the browser is not the same as it navigating. An instance that
+    is already open can come to the front on whatever page it was showing, and
+    being told to type "brave://password-manager/settings" by hand is the
+    fiddling this button exists to remove."""
+    from winmigrate import passwords as passwords_mod
+
+    chrome_with_local_passwords(profile)
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    wizard._show(Step.SCANNING)
+    assert pump(wizard) == "scanned"
+    wizard._show(Step.PASSWORDS)
+
+    monkeypatch.setattr(passwords_mod, "open_export_page", lambda target, env=None: True)
+    wizard._open_export_page("chrome")
+    assert wizard.root.clipboard == "chrome://password-manager/settings"
+    assert "clipboard" in wizard.password_status["chrome"].cget("text")
+
+    # And when it could not be started at all, the address is still there.
+    wizard.root.clipboard = ""
+    monkeypatch.setattr(passwords_mod, "open_export_page", lambda target, env=None: False)
+    wizard._open_export_page("chrome")
+    assert wizard.root.clipboard == "chrome://password-manager/settings"
+    assert "Open it yourself" in wizard.password_status["chrome"].cget("text")

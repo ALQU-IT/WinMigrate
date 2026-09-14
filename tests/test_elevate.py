@@ -134,3 +134,92 @@ def test_the_gui_command_accepts_everything_the_relaunch_sends():
     assert not parsed.include_software and not parsed.include_notepad
     assert parsed.compression == "none"
     assert parsed.elevation_attempted is True
+
+
+# --- opening the user's browser from an elevated window ---------------------
+def test_an_elevated_window_launches_the_browser_as_the_user(monkeypatch, tmp_path):
+    """Chromium keeps one instance per profile, and the one the user has open is
+    theirs at medium integrity. An elevated launch cannot hand its command line
+    across that boundary: the window comes to the front without going anywhere,
+    which is precisely what "it opens the browser, but it doesn't go to the
+    link" looks like. So when this process is elevated, the browser is started
+    with the desktop owner's token instead -- a step down in privilege, and the
+    only way to reach the instance that is already running."""
+    from pathlib import Path
+
+    from winmigrate import winlaunch
+
+    calls: list[str] = []
+    exe = tmp_path / "brave.exe"
+    exe.write_bytes(b"MZ")
+
+    monkeypatch.setattr(winlaunch, "is_windows", lambda: True)
+    monkeypatch.setattr(winlaunch, "is_elevated", lambda: True)
+    monkeypatch.setattr(
+        winlaunch,
+        "launch_as_shell_user",
+        lambda executable, arguments: calls.append("as-user") or True,
+    )
+    monkeypatch.setattr(
+        winlaunch.subprocess, "Popen", lambda *a, **k: calls.append("elevated")
+    )
+
+    assert winlaunch.launch(Path(exe), ["brave://password-manager/settings"]) is True
+    assert calls == ["as-user"]
+
+
+def test_it_still_opens_when_the_users_token_cannot_be_borrowed(monkeypatch, tmp_path):
+    """Group policy, a locked-down machine, no shell window. An elevated browser
+    that at least opens beats no browser at all, and the address is on the
+    clipboard regardless."""
+    from pathlib import Path
+
+    from winmigrate import winlaunch
+
+    calls: list[str] = []
+    exe = tmp_path / "brave.exe"
+    exe.write_bytes(b"MZ")
+
+    monkeypatch.setattr(winlaunch, "is_windows", lambda: True)
+    monkeypatch.setattr(winlaunch, "is_elevated", lambda: True)
+    monkeypatch.setattr(winlaunch, "launch_as_shell_user", lambda executable, arguments: False)
+    monkeypatch.setattr(
+        winlaunch.subprocess, "Popen", lambda *a, **k: calls.append("elevated")
+    )
+
+    assert winlaunch.launch(Path(exe), ["x"]) is True
+    assert calls == ["elevated"]
+
+
+def test_an_ordinary_window_does_not_go_near_tokens(monkeypatch, tmp_path):
+    """Borrowing a token needs a privilege an ordinary process does not have,
+    and does not need: its launch already reaches the user's browser."""
+    from pathlib import Path
+
+    from winmigrate import winlaunch
+
+    calls: list[str] = []
+    exe = tmp_path / "brave.exe"
+    exe.write_bytes(b"MZ")
+
+    monkeypatch.setattr(winlaunch, "is_windows", lambda: True)
+    monkeypatch.setattr(winlaunch, "is_elevated", lambda: False)
+    monkeypatch.setattr(
+        winlaunch, "launch_as_shell_user",
+        lambda executable, arguments: calls.append("as-user") or True,
+    )
+    monkeypatch.setattr(
+        winlaunch.subprocess, "Popen", lambda *a, **k: calls.append("elevated")
+    )
+
+    assert winlaunch.launch(Path(exe), ["x"]) is True
+    assert calls == ["elevated"]
+
+
+def test_nothing_is_launched_off_windows(tmp_path):
+    from pathlib import Path
+
+    from winmigrate import winlaunch
+
+    assert winlaunch.launch(Path(tmp_path / "brave.exe"), ["x"]) is False
+    assert winlaunch.launch_as_shell_user(Path(tmp_path / "brave.exe"), ["x"]) is False

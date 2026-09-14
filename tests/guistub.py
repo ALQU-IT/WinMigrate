@@ -136,6 +136,13 @@ class Widget:
     def destroy(self):
         self.destroyed = True
 
+    # -- the clipboard, which the passwords page puts an address on
+    def clipboard_clear(self):
+        self.clipboard = ""
+
+    def clipboard_append(self, text):
+        self.clipboard = getattr(self, "clipboard", "") + str(text)
+
     def after(self, milliseconds, callback=None, *args):
         # Deliberately does not run the callback: the event loop is driven by
         # the test, one event at a time, so a scan finishing cannot interleave

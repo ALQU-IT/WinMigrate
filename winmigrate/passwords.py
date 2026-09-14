@@ -409,27 +409,22 @@ def open_export_page(target: ExportTarget, env: Environment | None = None) -> bo
     not just the one that happened to be tried first.
 
     So the browser's own executable is launched with the URL as an argument,
-    which is the only thing that can resolve it. When the executable cannot be
-    found this returns False rather than opening anything, and the caller tells
-    the user the address to paste instead -- a wrong dialog is worse than none.
-    """
-    import subprocess  # noqa: PLC0415
-    import sys  # noqa: PLC0415
+    which is the only thing that can resolve it -- and, when WinMigrate is
+    running elevated for a shadow copy, as the signed-in user rather than as
+    the administrator. An elevated launch cannot hand its command line to the
+    browser the user already has open, and what that looks like is a window
+    coming to the front without going anywhere. See :mod:`winmigrate.winlaunch`.
 
-    if sys.platform != "win32" or not target.export_page:
+    When the executable cannot be found this returns False rather than opening
+    anything, and the caller tells the user the address to go to instead -- a
+    wrong dialog is worse than none.
+    """
+    from . import winlaunch  # noqa: PLC0415
+
+    if not winlaunch.is_windows() or not target.export_page:
         return False
     executable = browser_executable(target, env or Environment.live())
     if executable is None:
         log.info("no executable found for %s; not opening its password page", target.browser_key)
         return False
-    try:
-        # No shell, no "start": the browser resolves its own scheme, and the URL
-        # never passes through a command interpreter that could reinterpret it.
-        subprocess.Popen(  # noqa: S603 -- fixed executable from the registry
-            [str(executable), target.export_page],
-            close_fds=True,
-        )
-        return True
-    except (OSError, subprocess.SubprocessError) as exc:
-        log.warning("could not launch %s: %s", executable, exc)
-        return False
+    return winlaunch.launch(executable, [target.export_page])

@@ -74,6 +74,7 @@ winmigrate/
   capture.py         plan → bundle, with space pre-check, hashing and VSS
   restore.py         verify → decrypt → write → report
   vss.py             Volume Shadow Copy lifecycle and path translation
+  winlaunch.py       starting a program as the signed-in user, not as admin
   passwords.py       the browser password handoff (browser exports, we encrypt)
   presets.py         named exclusion presets (device backups, VM images, ...)
   odt.py             Office Deployment Tool configuration generation

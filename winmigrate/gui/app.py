@@ -784,18 +784,46 @@ class WinMigrateWizard:
         if target is None or status is None:
             return
         opened = passwords_mod.open_export_page(target, self._environment(self._config()))
+        copied = self._copy_address(target.export_page)
         log.info("export page for %s: %s", key, "opened" if opened else "could not open")
+        # The address goes on the clipboard either way. A browser that was
+        # already open can come to the front on the page it was last showing,
+        # and being told to type "brave://password-manager/settings" by hand is
+        # exactly the fiddling this button exists to remove.
+        paste = (
+            " The address is on your clipboard — paste it into the address bar."
+            if copied
+            else ""
+        )
         if opened:
             status.configure(
-                text=f"{target.title} should now be showing {target.export_page}. "
-                "Use 'Export passwords' there — it will ask for Windows Hello — then "
-                "choose the file you saved."
+                text=f"{target.title} should now be showing {target.export_page}."
+                + paste
+                + " Use 'Export passwords' there — it will ask for Windows Hello — "
+                "then choose the file you saved."
             )
         else:
             status.configure(
                 text=f"Could not start {target.title}. Open it yourself and go to "
-                f"{target.export_page}, export, then choose the file you saved."
+                f"{target.export_page}." + paste + " Export there, then choose the "
+                "file you saved."
             )
+
+    def _copy_address(self, address: str) -> bool:
+        """Put the export page's address on the clipboard. True when it went.
+
+        Nothing secret: it is a fixed page inside the browser, the same string
+        already printed on screen.
+        """
+        if not address:
+            return False
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(address)
+            return True
+        except Exception as exc:  # noqa: BLE001 -- a convenience, never a failure
+            log.info("could not use the clipboard: %s", exc)
+            return False
 
     def _pick_password_csv(self, key: str) -> None:
         from tkinter import filedialog  # noqa: PLC0415
