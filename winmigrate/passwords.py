@@ -72,18 +72,46 @@ EXPORT_PAGES: dict[str, str] = {
 
 @dataclass(slots=True)
 class ExportTarget:
-    """An installed browser whose passwords are local and worth exporting."""
+    """One browser *profile* whose passwords are local and worth exporting.
+
+    A profile, not a browser. People keep work and personal profiles in one
+    Brave, and Chromium's password store, its export dialog and its sign-in
+    state are all per profile -- so offering one export per browser leaves
+    every profile but one behind, silently, which is exactly what it did.
+    """
 
     browser_key: str
     title: str
     engine: str
     export_page: str
     account_email: str | None = None
+    #: The profile's folder name -- "Default", "Profile 2" -- which is what
+    #: Chromium's ``--profile-directory`` takes.
+    profile_id: str = ""
+    #: What the browser calls it: "Person 1", "Work".
+    profile_name: str = ""
+    #: Empty for a browser's primary profile, a slug for every other one. It is
+    #: what keeps a second profile's item id and file name from landing on the
+    #: first's, and it stays empty on the ordinary one-profile machine so
+    #: nothing about those bundles changes.
+    suffix: str = ""
+
+    @property
+    def key(self) -> str:
+        """How the window and the command line name this target."""
+        return f"{self.browser_key}:{self.suffix}" if self.suffix else self.browser_key
+
+    @property
+    def label(self) -> str:
+        """What to call it on screen, with the profile only when there is one."""
+        if self.profile_name and self.profile_id:
+            return f"{self.title} — {self.profile_name}"
+        return self.title
 
 
 @dataclass(slots=True)
 class CloudAccount:
-    """An installed browser whose passwords are already in the cloud.
+    """A browser profile whose passwords are already in the cloud.
 
     Nothing to export and nothing to do on this machine -- but it is worth
     saying so, because "where did my passwords go" is the question this answers
@@ -93,6 +121,11 @@ class CloudAccount:
     browser_key: str
     title: str
     account_email: str | None = None
+    profile_name: str = ""
+
+    @property
+    def label(self) -> str:
+        return f"{self.title} — {self.profile_name}" if self.profile_name else self.title
 
 
 def _browser_profiles(env: Environment) -> list:
@@ -105,59 +138,101 @@ def _browser_profiles(env: Environment) -> list:
     return profiles
 
 
+def _slug(text: str) -> str:
+    keep = [c if (c.isalnum() or c in "-_") else "-" for c in text.strip().lower()]
+    return "-".join(part for part in "".join(keep).split("-") if part)
+
+
+def _primary(same: list):
+    """The profile a browser opens by default.
+
+    "Default" is what Chromium calls it; where there is no such folder -- a
+    Firefox install, or a Chromium whose Default was deleted -- the first in a
+    stable order stands in, so the answer does not change between runs.
+    """
+    for profile in same:
+        if profile.profile_dir.name == "Default":
+            return profile
+    return sorted(same, key=lambda profile: str(profile.profile_dir))[0]
+
+
+def profile_suffix(profile, same: list) -> str:
+    """Empty for the primary profile, a slug for the others.
+
+    The primary keeps the plain name, so a one-profile machine -- nearly all of
+    them -- produces exactly the ids and file names it always did, and a second
+    profile gets ``brave-profile-2-passwords.csv`` beside it rather than on top
+    of it.
+    """
+    primary = _primary(same)
+    if profile.profile_dir == primary.profile_dir:
+        return ""
+    return _slug(profile.profile_dir.name)
+
+
+def followup_id(browser_key: str, suffix: str = "") -> str:
+    """The id of the password follow-up for one browser profile.
+
+    One rule, used by the scan that writes the "export these yourself" note and
+    by the ingest that replaces it with the import instruction. Two spellings of
+    this would mean a bundle carrying both halves of a conversation.
+    """
+    return f"browser:passwords:{browser_key}:{suffix}" if suffix else f"browser:passwords:{browser_key}"
+
+
 def synced_browsers(env: Environment) -> list[CloudAccount]:
-    """Installed browsers whose passwords are already synced.
+    """Browser profiles whose passwords are already synced.
 
     The counterpart to :func:`export_targets`: between them they account for
-    every browser found, which is what lets a page say something true about all
+    every profile found, which is what lets a page say something true about all
     of them rather than silently listing none.
     """
     profiles = _browser_profiles(env)
     accounts: list[CloudAccount] = []
-    seen: set[str] = set()
     for profile in profiles:
-        if profile.browser_key in seen:
+        if not profile.state.sync_on:
             continue
-        seen.add(profile.browser_key)
         same = [p for p in profiles if p.browser_key == profile.browser_key]
-        if not any(p.state.sync_on for p in same):
-            continue
-        email = next((p.state.account_email for p in same if p.state.account_email), None)
         accounts.append(
             CloudAccount(
                 browser_key=profile.browser_key,
                 title=profile.browser_title,
-                account_email=email,
+                account_email=profile.state.account_email,
+                profile_name=profile.display_name if len(same) > 1 else "",
             )
         )
     return accounts
 
 
 def export_targets(env: Environment) -> list[ExportTarget]:
-    """Installed browsers whose passwords are *not* already synced to the cloud.
+    """Browser profiles whose passwords are *not* already synced to the cloud.
 
-    A browser with sync on needs no export -- its passwords come back on
-    sign-in -- so only browsers with sync off (or never configured) are offered.
+    Per profile, because everything about this is per profile: the password
+    store, the export dialog, and whether sync is on at all. Aggregating to one
+    row per browser meant a machine with a work profile and a personal one was
+    offered a single export -- and a browser whose *other* profile happened to
+    sync was skipped entirely, taking the local profile's passwords with it.
+
+    A profile with sync on is still left out, on its own account rather than its
+    browser's: its passwords come back on sign-in and there is nothing to do.
     """
     profiles = _browser_profiles(env)
 
     targets: list[ExportTarget] = []
-    seen: set[str] = set()
     for profile in profiles:
-        if profile.browser_key in seen:
-            continue
-        seen.add(profile.browser_key)
-        same = [p for p in profiles if p.browser_key == profile.browser_key]
-        if any(p.state.sync_on for p in same):
+        if profile.state.sync_on:
             continue  # synced -- no local export needed
-        account = next((p.state.account_email for p in same if p.state.account_email), None)
+        same = [p for p in profiles if p.browser_key == profile.browser_key]
         targets.append(
             ExportTarget(
                 browser_key=profile.browser_key,
                 title=profile.browser_title,
                 engine=profile.engine,
                 export_page=EXPORT_PAGES.get(profile.browser_key, ""),
-                account_email=account,
+                account_email=profile.state.account_email,
+                profile_id=profile.profile_dir.name,
+                profile_name=profile.display_name if len(same) > 1 else "",
+                suffix=profile_suffix(profile, same),
             )
         )
     return targets
@@ -190,17 +265,18 @@ def build_password_item(target: ExportTarget, csv_path: Path) -> Item:
     lives only in the encrypted payload and appears in the sidecar as a redacted
     stub.
     """
-    archive = f"{PASSWORDS_ARCHIVE_DIR}/{target.browser_key}-passwords.csv"
+    stem = f"{target.browser_key}-{target.suffix}" if target.suffix else target.browser_key
+    archive = f"{PASSWORDS_ARCHIVE_DIR}/{stem}-passwords.csv"
     item = Item(
-        id=f"browser:passwords-csv:{target.browser_key}",
+        id=f"browser:passwords-csv:{target.key}",
         category=Category.BROWSER_PASSWORDS,
         kind=Kind.FILE,
-        title=f"{target.title} — exported passwords (CSV)",
+        title=f"{target.label} — exported passwords (CSV)",
         source_path=str(csv_path),
         archive_path=archive,
         sensitivity=Sensitivity.SECRET,
         restore=RestoreSpec(
-            target=f"%USERPROFILE%\\{PASSWORDS_RESTORE_DIR}\\{target.browser_key}-passwords.csv",
+            target=f"%USERPROFILE%\\{PASSWORDS_RESTORE_DIR}\\{stem}-passwords.csv",
             strategy=RestoreStrategy.REPLACE,
             notes=["Import into the browser, then delete this file -- it is plaintext."],
         ),
@@ -259,29 +335,34 @@ def ingest_csv(target: ExportTarget, csv_path: Path, scan) -> Ingest:
     # The scan-time "export these yourself" note is now answered; what is left
     # for the new machine is the import instruction.
     scan.followups = [
-        followup
-        for followup in scan.followups
-        if followup.id != f"browser:passwords:{target.browser_key}"
+        followup for followup in scan.followups if followup.id != followup_id(
+            target.browser_key, target.suffix
+        )
     ]
     scan.followups.append(import_followup(target))
-    log.info("%s password export staged as encrypted-only material", target.browser_key)
+    log.info("%s password export staged as encrypted-only material", target.key)
     return Ingest(True, f"{target.title} passwords added — encrypted only.", item)
 
 
 def import_followup(target: ExportTarget) -> Followup:
     """The restore-side instruction for a captured password CSV."""
+    stem = f"{target.browser_key}-{target.suffix}" if target.suffix else target.browser_key
+    in_profile = (
+        f" in the {target.profile_name} profile" if target.profile_name else ""
+    )
     return Followup(
-        id=f"browser:passwords:{target.browser_key}",
-        title=f"Import your {target.title} passwords, then delete the file",
+        id=followup_id(target.browser_key, target.suffix),
+        title=f"Import your {target.label} passwords, then delete the file",
         why=(
-            f"You exported {target.title}'s passwords into the bundle. They restore as "
+            f"You exported {target.label}'s passwords into the bundle. They restore as "
             f"a plaintext CSV in {PASSWORDS_RESTORE_DIR}\\, which you import and then delete."
         ),
         steps=[
-            f"Open {target.title} and go to {target.export_page or 'the password manager'}.",
+            f"Open {target.title}{in_profile} and go to "
+            f"{target.export_page or 'the password manager'}.",
             f"Choose Import (the same page the export came from) and select "
-            f"{PASSWORDS_RESTORE_DIR}\\{target.browser_key}-passwords.csv.",
-            f"Delete {PASSWORDS_RESTORE_DIR}\\{target.browser_key}-passwords.csv afterwards -- "
+            f"{PASSWORDS_RESTORE_DIR}\\{stem}-passwords.csv.",
+            f"Delete {PASSWORDS_RESTORE_DIR}\\{stem}-passwords.csv afterwards -- "
             "it is plaintext.",
         ],
         category=Category.BROWSER_PASSWORDS,
@@ -427,4 +508,20 @@ def open_export_page(target: ExportTarget, env: Environment | None = None) -> bo
     if executable is None:
         log.info("no executable found for %s; not opening its password page", target.browser_key)
         return False
-    return winlaunch.launch(executable, [target.export_page])
+    return winlaunch.launch(executable, launch_arguments(target))
+
+
+def launch_arguments(target: ExportTarget) -> list[str]:
+    """What to hand the browser: the page, and which profile to open it in.
+
+    Chromium opens the profile it used last, which on a machine with a work and
+    a personal profile is a coin toss -- and the export dialog only ever exports
+    the profile whose window it is in. ``--profile-directory`` names the folder,
+    which is the only identifier that does not change when someone renames a
+    profile. Firefox picks its profile at startup and will not switch while it
+    is running, so there is nothing honest to pass and the page says which
+    profile to be in instead.
+    """
+    if target.engine == "chromium" and target.profile_id:
+        return [f"--profile-directory={target.profile_id}", target.export_page]
+    return [target.export_page]

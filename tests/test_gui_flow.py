@@ -737,3 +737,43 @@ def test_the_export_address_goes_on_the_clipboard_either_way(monkeypatch, profil
     wizard._open_export_page("chrome")
     assert wizard.root.clipboard == "chrome://password-manager/settings"
     assert "Open it yourself" in wizard.password_status["chrome"].cget("text")
+
+
+def test_the_page_offers_every_profile_that_has_local_passwords(
+    monkeypatch, profile: Path, tmp_path: Path
+):
+    """The window asked once per browser, so a machine with a work profile and a
+    personal one could only ever export one of them -- and the row did not say
+    which."""
+    import json as _json
+
+    user_data = profile / "AppData" / "Local" / "Google" / "Chrome" / "User Data"
+    for folder, name in (("Default", "Personal"), ("Profile 2", "Work")):
+        (user_data / folder).mkdir(parents=True)
+        (user_data / folder / "Preferences").write_text(
+            _json.dumps({"profile": {"name": name}}), encoding="utf-8"
+        )
+
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    wizard.use_vss.set(False)
+    wizard._show(Step.SCANNING)
+    assert pump(wizard) == "scanned"
+    wizard._show(Step.PASSWORDS)
+
+    assert sorted(wizard.password_rows) == ["chrome", "chrome:profile-2"]
+
+    # Both exports land in the same bundle, under their own names.
+    for key, name in (("chrome", "personal.csv"), ("chrome:profile-2", "work.csv")):
+        export = tmp_path / name
+        export.write_text("url,username,password\nhttps://x,me,pw\n", encoding="utf-8")
+        wizard._ingest_password_csv(key, export)
+
+    assert sorted(wizard.data.passwords_added) == ["chrome", "chrome:profile-2"]
+    staged = [
+        row.item_id for row in wizard.data.rows if "passwords-csv" in row.item_id
+    ]
+    assert sorted(staged) == [
+        "browser:passwords-csv:chrome",
+        "browser:passwords-csv:chrome:profile-2",
+    ]
+    assert all(item in wizard.data.selected for item in staged)

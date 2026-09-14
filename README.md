@@ -140,7 +140,11 @@ that routine is an infostealer payload regardless of who runs it. Instead it
 detects sign-in and sync state from configuration files only, and either tells
 you the passwords will sync down when you sign in, or walks you through the
 browser's own export and re-import — on its own page in the window, and with
-`--passwords BROWSER=CSV` or the interactive prompt on the command line. What the
+`--passwords BROWSER=CSV` or the interactive prompt on the command line. Per
+browser *profile*, because that is how browsers keep passwords: a Brave with a
+work profile and a personal one is offered two exports, opened in the right
+profile (`--profile-directory`), and each lands in the bundle under its own
+name. What the
 browser writes is plaintext, so it is staged as encrypted-only material: inside
 the bundle it is encrypted, in the plaintext sidecar it is a redacted stub, on
 restore it lands in `WinMigrate-Passwords\` with an import-then-delete

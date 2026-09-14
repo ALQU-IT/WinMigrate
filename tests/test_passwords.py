@@ -394,3 +394,135 @@ def test_a_browser_that_is_not_installed_is_not_invented(tmp_path: Path):
         browser_key="brave", title="Brave", engine="chromium", export_page="x"
     )
     assert passwords.browser_executable(target, env) is None
+
+
+# --- one browser, several profiles ------------------------------------------
+def chrome_profiles(root: Path, profiles: dict) -> Environment:
+    """A Chrome with several profiles: {folder: (display name, sync, email)}."""
+    user_data = root / "AppData" / "Local" / "Google" / "Chrome" / "User Data"
+    for folder, (name, sync, email) in profiles.items():
+        directory = user_data / folder
+        directory.mkdir(parents=True)
+        prefs: dict = {"profile": {"name": name}}
+        if email:
+            prefs["account_info"] = [{"email": email}]
+        if sync:
+            prefs["sync"] = {"requested": True}
+        (directory / "Preferences").write_text(json.dumps(prefs), encoding="utf-8")
+    return Environment.fixture(root, {})
+
+
+def test_every_local_profile_is_offered_not_just_the_first(tmp_path: Path):
+    """People keep work and personal profiles in one browser, and everything
+    about passwords is per profile: the store, the export dialog, whether sync
+    is on. One row per browser silently left every profile but one behind."""
+    env = chrome_profiles(
+        tmp_path,
+        {
+            "Default": ("Personal", False, "me@home.test"),
+            "Profile 2": ("Work", False, "me@work.test"),
+        },
+    )
+
+    targets = passwords.export_targets(env)
+
+    assert [t.key for t in targets] == ["chrome", "chrome:profile-2"]
+    assert [t.label for t in targets] == ["Google Chrome — Personal", "Google Chrome — Work"]
+    # Each carries its own account, not the first one found for the browser.
+    assert [t.account_email for t in targets] == ["me@home.test", "me@work.test"]
+
+
+def test_a_synced_profile_no_longer_hides_a_local_one(tmp_path: Path):
+    """The worse half of the same bug: any synced profile skipped the whole
+    browser, so the local profile's passwords were never offered at all."""
+    env = chrome_profiles(
+        tmp_path,
+        {
+            "Default": ("Personal", True, "me@home.test"),
+            "Profile 2": ("Work", False, "me@work.test"),
+        },
+    )
+
+    assert [t.key for t in passwords.export_targets(env)] == ["chrome:profile-2"]
+    assert [(a.label, a.account_email) for a in passwords.synced_browsers(env)] == [
+        ("Google Chrome — Personal", "me@home.test")
+    ]
+
+
+def test_two_profiles_produce_two_items_rather_than_one_on_top_of_the_other(tmp_path: Path):
+    """Same browser, same file name, one overwriting the other in the bundle --
+    and the second export would have looked like it worked."""
+    env = chrome_profiles(
+        tmp_path,
+        {"Default": ("Personal", False, None), "Profile 2": ("Work", False, None)},
+    )
+    personal, work = passwords.export_targets(env)
+    scan = ScanResult(source=None)
+    body = "url,username,password\nhttps://x,me,pw\n"
+    for name, target in (("personal.csv", personal), ("work.csv", work)):
+        csv = tmp_path / name
+        csv.write_text(body, encoding="utf-8")
+        assert passwords.ingest_csv(target, csv, scan).ok
+
+    staged = [item for item in scan.items if item.category is Category.BROWSER_PASSWORDS]
+    assert [item.id for item in staged] == [
+        "browser:passwords-csv:chrome",
+        "browser:passwords-csv:chrome:profile-2",
+    ]
+    assert [item.archive_path for item in staged] == [
+        "secrets/WinMigrate-Passwords/chrome-passwords.csv",
+        "secrets/WinMigrate-Passwords/chrome-profile-2-passwords.csv",
+    ]
+    # And each answers its own follow-up, not the other's.
+    assert sorted(f.id for f in scan.followups) == [
+        "browser:passwords:chrome",
+        "browser:passwords:chrome:profile-2",
+    ]
+
+
+def test_the_usual_one_profile_machine_is_named_exactly_as_before(tmp_path: Path):
+    """Nearly every machine. The profile suffix must not appear where it
+    distinguishes nothing, or every existing bundle's file names change for no
+    reason."""
+    env = chrome_profile(tmp_path / "p", sync=False)
+    target = passwords.export_targets(env)[0]
+    csv = tmp_path / "pw.csv"
+    csv.write_text("url,username,password\nhttps://x,me,pw\n", encoding="utf-8")
+    scan = ScanResult(source=None)
+
+    item = passwords.ingest_csv(target, csv, scan).item
+
+    assert target.key == "chrome" and target.label == "Google Chrome"
+    assert item.id == "browser:passwords-csv:chrome"
+    assert item.archive_path == "secrets/WinMigrate-Passwords/chrome-passwords.csv"
+
+
+def test_the_browser_is_opened_in_the_profile_the_passwords_are_in(tmp_path: Path):
+    """Chromium opens whichever profile it used last, and its export dialog only
+    ever exports the profile whose window it is in. The folder name is the one
+    identifier that survives someone renaming a profile."""
+    env = chrome_profiles(
+        tmp_path,
+        {"Default": ("Personal", False, None), "Profile 2": ("Work", False, None)},
+    )
+    personal, work = passwords.export_targets(env)
+
+    assert passwords.launch_arguments(work) == [
+        "--profile-directory=Profile 2",
+        "chrome://password-manager/settings",
+    ]
+    assert passwords.launch_arguments(personal) == [
+        "--profile-directory=Default",
+        "chrome://password-manager/settings",
+    ]
+
+    # Firefox picks its profile at startup and will not switch while running,
+    # so there is nothing honest to pass.
+    firefox = passwords.ExportTarget(
+        browser_key="firefox",
+        title="Mozilla Firefox",
+        engine="firefox",
+        export_page="about:logins",
+        profile_id="abc.default-release",
+    )
+    assert passwords.launch_arguments(firefox) == ["about:logins"]

@@ -501,27 +501,33 @@ def _profile_item(profile: BrowserProfile, env: Environment, files_only: bool) -
 
 
 def _password_followups(profiles: list[BrowserProfile]) -> list[Followup]:
-    """One password follow-up per browser that has any signed-in profile,
-    plus a guided-export follow-up for browsers with no sync."""
-    followups: list[Followup] = []
-    seen: set[str] = set()
-    for profile in profiles:
-        if profile.browser_key in seen:
-            continue
-        # Aggregate the browser's profiles to decide the strongest signal.
-        same = [p for p in profiles if p.browser_key == profile.browser_key]
-        seen.add(profile.browser_key)
-        synced = any(p.state.sync_on for p in same)
-        signed = any(p.state.signed_in for p in same)
-        account = next((p.state.account_email for p in same if p.state.account_email), None)
+    """One password follow-up per *profile*, saying which of the two it is.
 
-        if synced:
+    Per profile, because the answer differs per profile. Aggregating to one note
+    per browser meant a Brave with a synced personal profile and a local work
+    one reported "they sync down on sign-in" -- true of the half it looked at,
+    and the reason the other half's passwords would have been left behind
+    without anyone being told.
+    """
+    from .. import passwords as passwords_mod  # noqa: PLC0415 -- avoid a cycle
+
+    followups: list[Followup] = []
+    for profile in profiles:
+        same = [p for p in profiles if p.browser_key == profile.browser_key]
+        suffix = passwords_mod.profile_suffix(profile, same)
+        named = f"{profile.browser_title} — {profile.display_name}" if len(same) > 1 else (
+            profile.browser_title
+        )
+        in_profile = f" in the {profile.display_name} profile" if len(same) > 1 else ""
+        account = profile.state.account_email
+
+        if profile.state.sync_on:
             followups.append(
                 Followup(
-                    id=f"browser:passwords:{profile.browser_key}",
-                    title=f"{profile.browser_title}: passwords sync down on sign-in",
+                    id=passwords_mod.followup_id(profile.browser_key, suffix),
+                    title=f"{named}: passwords sync down on sign-in",
                     why=(
-                        f"{profile.browser_title} sync is on, so its saved passwords are in "
+                        f"{named} sync is on, so its saved passwords are in "
                         "the cloud, not in this bundle. Signing in on the new machine brings "
                         "them back. WinMigrate never reads the password store."
                     ),
@@ -537,18 +543,18 @@ def _password_followups(profiles: list[BrowserProfile]) -> list[Followup]:
         else:
             followups.append(
                 Followup(
-                    id=f"browser:passwords:{profile.browser_key}",
-                    title=f"{profile.browser_title}: export passwords yourself if you want them",
+                    id=passwords_mod.followup_id(profile.browser_key, suffix),
+                    title=f"{named}: export passwords yourself if you want them",
                     why=(
-                        f"{profile.browser_title} sync is "
-                        + ("off" if signed else "not set up")
+                        f"{named} sync is "
+                        + ("off" if profile.state.signed_in else "not set up")
                         + ", so its passwords are only on this machine. WinMigrate does not "
                         "read the password store; the browser's own export does, behind its "
                         "own Windows Hello prompt."
                     ),
                     steps=[
-                        f"In {profile.browser_title}: Settings → Passwords → Export, and "
-                        "authenticate when Windows asks.",
+                        f"In {profile.browser_title}{in_profile}: Settings → Passwords → "
+                        "Export, and authenticate when Windows asks.",
                         "Import the resulting CSV in the same place on the new machine.",
                         "Delete the CSV afterwards -- it is plaintext.",
                     ],

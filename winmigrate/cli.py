@@ -590,7 +590,10 @@ def _collect_browser_passwords(args, result, env, console) -> list[Path]:
     if getattr(args, "no_passwords", False) or result.files_only:
         return []
 
-    targets = {t.browser_key: t for t in passwords_mod.export_targets(env)}
+    # Keyed per profile: "brave" when a browser has one, "brave:profile-2" for
+    # the extras. A browser key on its own still works while it is unambiguous,
+    # which is what anyone typing --passwords brave=... means.
+    targets = {t.key: t for t in passwords_mod.export_targets(env)}
     to_shred: list[Path] = []
 
     # Non-interactive: explicit --passwords BROWSER=CSV pairs.
@@ -602,9 +605,8 @@ def _collect_browser_passwords(args, result, env, console) -> list[Path]:
         explicit[key.strip().lower()] = path.strip()
 
     for key, path in explicit.items():
-        target = targets.get(key)
+        target = _resolve_password_target(targets, key, console)
         if target is None:
-            console.print(f"[yellow]No browser {key!r} with local passwords; skipping.[/yellow]")
             continue
         # A file the user pointed us at is theirs to manage; we do not shred it.
         _ingest_password_csv(target, Path(path), result, console, passwords_mod)
@@ -616,10 +618,10 @@ def _collect_browser_passwords(args, result, env, console) -> list[Path]:
             if key in explicit:
                 continue
             console.print(
-                f"\n[bold]{target.title}[/bold] has passwords saved locally (sync is off)."
+                f"\n[bold]{target.label}[/bold] has passwords saved locally (sync is off)."
             )
             if console.input(
-                f"Export them from {target.title} into the bundle now? [y/N] "
+                f"Export them from {target.label} into the bundle now? [y/N] "
             ).strip().lower() not in {"y", "yes"}:
                 continue
             opened = passwords_mod.open_export_page(target, env)
@@ -628,9 +630,9 @@ def _collect_browser_passwords(args, result, env, console) -> list[Path]:
             # other than the export screen the user needs to know where to go --
             # and finding that out after the browser opened is too late.
             lead = (
-                f"{target.title} should have opened here:"
+                f"{target.label} should have opened here:"
                 if opened
-                else f"Could not launch {target.title} here. Open it yourself and go to:"
+                else f"Could not launch {target.label} here. Open it yourself and go to:"
             )
             console.print(
                 f"[dim]{lead}[/dim]\n    [bold]{target.export_page}[/bold]\n"
@@ -645,6 +647,30 @@ def _collect_browser_passwords(args, result, env, console) -> list[Path]:
                 to_shred.append(Path(raw))
 
     return to_shred
+
+
+def _resolve_password_target(targets: dict, key: str, console: Console):
+    """Find the profile a --passwords key names, or say why it cannot.
+
+    An exact key wins. A bare browser key matches when that browser has exactly
+    one profile offering an export, because that is what it used to mean and
+    still means on almost every machine. When it has several, the ambiguity is
+    named rather than resolved by picking one: the wrong profile's passwords in
+    a bundle is not something to guess at.
+    """
+    if key in targets:
+        return targets[key]
+    matches = [target for target in targets.values() if target.browser_key == key]
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        console.print(f"[yellow]No browser {key!r} with local passwords; skipping.[/yellow]")
+        return None
+    console.print(
+        f"[yellow]{key!r} has {len(matches)} profiles with local passwords. "
+        f"Name one: {', '.join(sorted(target.key for target in matches))}.[/yellow]"
+    )
+    return None
 
 
 def _ingest_password_csv(target, csv_path: Path, result, console, passwords_mod):

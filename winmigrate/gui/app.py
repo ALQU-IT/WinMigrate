@@ -695,7 +695,7 @@ class WinMigrateWizard:
             frame = ttk.Frame(self.passwords_area, style="Page.TFrame")
             frame.pack(fill="x", pady=(0, 14))
             ttk.Label(
-                frame, text=f"{target.title} — saved on this machine", style="Body.TLabel"
+                frame, text=f"{target.label} — saved on this machine", style="Body.TLabel"
             ).pack(anchor="w")
             ttk.Label(
                 frame,
@@ -704,10 +704,10 @@ class WinMigrateWizard:
             ).pack(anchor="w")
             buttons = ttk.Frame(frame, style="Page.TFrame")
             buttons.pack(anchor="w", pady=(6, 0))
-            key = target.browser_key
+            key = target.key
             ttk.Button(
                 buttons,
-                text=f"Open {target.title}",
+                text=f"Open {target.label}",
                 command=lambda k=key: self._open_export_page(k),
             ).pack(side="left")
             ttk.Button(
@@ -720,13 +720,13 @@ class WinMigrateWizard:
             self.password_rows[key] = frame
             self.password_status[key] = status
             if key in self.data.passwords_added:
-                status.configure(text=f"Added — {target.title} passwords travel encrypted only.")
+                status.configure(text=f"Added — {target.label} passwords travel encrypted only.")
 
         self.passwords_cloud.configure(
             text=(
                 "Already in the cloud: "
                 + "; ".join(
-                    f"{account.title}"
+                    f"{account.label}"
                     + (f" (sign in as {account.account_email})" if account.account_email else "")
                     for account in cloud
                 )
@@ -761,7 +761,7 @@ class WinMigrateWizard:
             log.warning("could not work out the browser password state: %s", exc)
             self.password_targets = []
             self.password_cloud_accounts = []
-        self.password_targets_by_key = {t.browser_key: t for t in self.password_targets}
+        self.password_targets_by_key = {t.key: t for t in self.password_targets}
         self.password_state_known = True
         log.info(
             "browser passwords: %s local, %s already synced",
@@ -797,14 +797,14 @@ class WinMigrateWizard:
         )
         if opened:
             status.configure(
-                text=f"{target.title} should now be showing {target.export_page}."
+                text=f"{target.label} should now be showing {target.export_page}."
                 + paste
                 + " Use 'Export passwords' there — it will ask for Windows Hello — "
                 "then choose the file you saved."
             )
         else:
             status.configure(
-                text=f"Could not start {target.title}. Open it yourself and go to "
+                text=f"Could not start {target.label}. Open it yourself and go to "
                 f"{target.export_page}." + paste + " Export there, then choose the "
                 "file you saved."
             )
@@ -832,7 +832,7 @@ class WinMigrateWizard:
         if target is None:
             return
         chosen = filedialog.askopenfilename(
-            title=f"The file {target.title} exported",
+            title=f"The file {target.label} exported",
             filetypes=[("Password export (CSV)", "*.csv"), ("All files", "*.*")],
         )
         if not chosen:
@@ -861,7 +861,7 @@ class WinMigrateWizard:
         log.info("password export for %s: %s", key, "accepted" if outcome.ok else "refused")
         if not outcome.ok:
             return
-        self.data.passwords_added[key] = target.title
+        self.data.passwords_added[key] = target.label
         if csv_path not in self.data.passwords_to_shred:
             self.data.passwords_to_shred.append(csv_path)
         # The item arrived after the choosing page was built. Without this it
