@@ -81,18 +81,65 @@ class ExportTarget:
     account_email: str | None = None
 
 
-def export_targets(env: Environment) -> list[ExportTarget]:
-    """Installed browsers whose passwords are *not* already synced to the cloud.
+@dataclass(slots=True)
+class CloudAccount:
+    """An installed browser whose passwords are already in the cloud.
 
-    A browser with sync on needs no export -- its passwords come back on
-    sign-in -- so only browsers with sync off (or never configured) are offered.
+    Nothing to export and nothing to do on this machine -- but it is worth
+    saying so, because "where did my passwords go" is the question this answers
+    on the new machine: sign in, and they come back.
     """
+
+    browser_key: str
+    title: str
+    account_email: str | None = None
+
+
+def _browser_profiles(env: Environment) -> list:
     from .scan import browsers as browsers_mod  # noqa: PLC0415 -- avoid a cycle
 
     profiles: list = []
     for browser in browsers_mod.CHROMIUM_BROWSERS:
         profiles.extend(browsers_mod.detect_chromium(env, browser))
     profiles.extend(browsers_mod.detect_firefox(env))
+    return profiles
+
+
+def synced_browsers(env: Environment) -> list[CloudAccount]:
+    """Installed browsers whose passwords are already synced.
+
+    The counterpart to :func:`export_targets`: between them they account for
+    every browser found, which is what lets a page say something true about all
+    of them rather than silently listing none.
+    """
+    profiles = _browser_profiles(env)
+    accounts: list[CloudAccount] = []
+    seen: set[str] = set()
+    for profile in profiles:
+        if profile.browser_key in seen:
+            continue
+        seen.add(profile.browser_key)
+        same = [p for p in profiles if p.browser_key == profile.browser_key]
+        if not any(p.state.sync_on for p in same):
+            continue
+        email = next((p.state.account_email for p in same if p.state.account_email), None)
+        accounts.append(
+            CloudAccount(
+                browser_key=profile.browser_key,
+                title=profile.browser_title,
+                account_email=email,
+            )
+        )
+    return accounts
+
+
+def export_targets(env: Environment) -> list[ExportTarget]:
+    """Installed browsers whose passwords are *not* already synced to the cloud.
+
+    A browser with sync on needs no export -- its passwords come back on
+    sign-in -- so only browsers with sync off (or never configured) are offered.
+    """
+    profiles = _browser_profiles(env)
 
     targets: list[ExportTarget] = []
     seen: set[str] = set()
@@ -166,6 +213,59 @@ def build_password_item(target: ExportTarget, csv_path: Path) -> Item:
         )
     )
     return item
+
+
+@dataclass(frozen=True, slots=True)
+class Ingest:
+    """What happened to a CSV the user pointed at, in words they can read."""
+
+    ok: bool
+    message: str
+    item: Item | None = None
+
+
+def ingest_csv(target: ExportTarget, csv_path: Path, scan) -> Ingest:
+    """Put a user-produced CSV into ``scan`` as encrypted-only material.
+
+    One implementation for both front ends. The window and the command line
+    disagreeing about what a password export is, or about which follow-up
+    replaces which, would mean two answers to "what is in this bundle" -- and
+    the untested one would be wrong.
+
+    Only the header is ever read, and only to refuse a file that is not a
+    password export. The rows are never parsed: the item is hashed and staged
+    like any other file, marked SECRET, so it travels inside the encrypted
+    payload and appears in the plaintext sidecar as a redacted stub.
+    """
+    if not csv_path.is_file():
+        return Ingest(False, f"There is no file at {csv_path}.")
+    try:
+        head = csv_path.read_text(encoding="utf-8", errors="replace")[:4096]
+    except OSError as exc:
+        return Ingest(False, f"Could not read {csv_path.name}: {exc}")
+    if not looks_like_password_csv(head):
+        return Ingest(
+            False,
+            f"{csv_path.name} does not look like a password export -- a browser's "
+            "own export has url, username and password columns.",
+        )
+    item = build_password_item(target, csv_path)
+    # Pointing at a second file for the same browser replaces the first rather
+    # than capturing both: the usual reason for doing it is having picked the
+    # wrong file, and two plaintext exports of one browser is the last thing
+    # this should quietly produce.
+    scan.items = [existing for existing in scan.items if existing.id != item.id]
+    scan.items.append(item)
+    # The scan-time "export these yourself" note is now answered; what is left
+    # for the new machine is the import instruction.
+    scan.followups = [
+        followup
+        for followup in scan.followups
+        if followup.id != f"browser:passwords:{target.browser_key}"
+    ]
+    scan.followups.append(import_followup(target))
+    log.info("%s password export staged as encrypted-only material", target.browser_key)
+    return Ingest(True, f"{target.title} passwords added — encrypted only.", item)
 
 
 def import_followup(target: ExportTarget) -> Followup:

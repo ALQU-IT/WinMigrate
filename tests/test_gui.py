@@ -374,6 +374,7 @@ def test_the_final_page_reads_only_fields_the_capture_report_has(monkeypatch):
     )
     wizard.scan_result = None
     wizard.log_path = None
+    wizard.data = app.WizardData()
     summary = app.WinMigrateWizard._done_summary(wizard)
     assert "b.dat" in summary and "b.manifest.json" in summary
 

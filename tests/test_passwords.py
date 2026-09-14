@@ -253,3 +253,87 @@ def test_the_page_is_shown_to_the_user_whether_or_not_the_browser_opened(tmp_pat
     # One print, outside the if/else, carrying the address.
     assert source.count("target.export_page") == 1
     assert "lead = (" in source
+
+
+# --- one staging path, shared by the window and the command line ------------
+def test_the_cloud_half_is_reported_as_well_as_the_local_half(tmp_path: Path):
+    """export_targets and synced_browsers between them account for every browser
+    found. A page that could only list the first would look broken on the
+    machines -- most of them -- where everything is already signed in."""
+    synced = chrome_profile(tmp_path / "a", sync=True)
+    accounts = passwords.synced_browsers(synced)
+    assert [(a.browser_key, a.account_email) for a in accounts] == [
+        ("chrome", "me@example.com")
+    ]
+    assert passwords.export_targets(synced) == []
+
+    local = chrome_profile(tmp_path / "b", sync=False)
+    assert passwords.synced_browsers(local) == []
+    assert [t.browser_key for t in passwords.export_targets(local)] == ["chrome"]
+
+
+def test_ingesting_a_csv_stages_it_encrypted_only_and_answers_the_followup(tmp_path: Path):
+    from winmigrate.models import Followup
+
+    env = chrome_profile(tmp_path / "p", sync=False)
+    target = passwords.export_targets(env)[0]
+    csv = tmp_path / "chrome-passwords.csv"
+    csv.write_text("name,url,username,password,note\nS,https://x,me,pw,\n", encoding="utf-8")
+
+    scan = ScanResult(source=None)
+    scan.followups = [
+        Followup(
+            id="browser:passwords:chrome",
+            title="Export your Chrome passwords",
+            why="Sync is off, so they live only on this machine.",
+        )
+    ]
+
+    outcome = passwords.ingest_csv(target, csv, scan)
+
+    assert outcome.ok and outcome.item is not None
+    assert outcome.item.sensitivity is Sensitivity.SECRET
+    assert outcome.item.archive_path.startswith("secrets/")
+    # The scan-time "export these yourself" note is answered by the import one.
+    assert [f.title for f in scan.followups] == [
+        "Import your Google Chrome passwords, then delete the file"
+    ]
+
+
+def test_pointing_at_a_second_file_replaces_the_first_rather_than_both(tmp_path: Path):
+    """The usual reason to choose again is having picked the wrong file. Two
+    plaintext exports of one browser is the last thing this should quietly
+    produce."""
+    env = chrome_profile(tmp_path / "p", sync=False)
+    target = passwords.export_targets(env)[0]
+    scan = ScanResult(source=None)
+    header = "url,username,password\nhttps://x,me,pw\n"
+    first = tmp_path / "wrong.csv"
+    first.write_text(header, encoding="utf-8")
+    second = tmp_path / "right.csv"
+    second.write_text(header, encoding="utf-8")
+
+    passwords.ingest_csv(target, first, scan)
+    passwords.ingest_csv(target, second, scan)
+
+    staged = [item for item in scan.items if item.category is Category.BROWSER_PASSWORDS]
+    assert len(staged) == 1
+    assert staged[0].source_path == str(second)
+    assert len([f for f in scan.followups if f.id == "browser:passwords:chrome"]) == 1
+
+
+def test_a_file_that_is_not_an_export_is_refused_with_a_reason(tmp_path: Path):
+    env = chrome_profile(tmp_path / "p", sync=False)
+    target = passwords.export_targets(env)[0]
+    scan = ScanResult(source=None)
+    notes = tmp_path / "notes.txt"
+    notes.write_text("shopping list\n", encoding="utf-8")
+
+    outcome = passwords.ingest_csv(target, notes, scan)
+
+    assert not outcome.ok and outcome.item is None
+    assert "url, username and password" in outcome.message
+    assert scan.items == []
+
+    missing = passwords.ingest_csv(target, tmp_path / "nothing.csv", scan)
+    assert not missing.ok and scan.items == []

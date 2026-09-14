@@ -36,6 +36,7 @@ class Step(str, Enum):
     WELCOME = "welcome"
     SCANNING = "scanning"
     SELECT = "select"
+    PASSWORDS = "passwords"
     DESTINATION = "destination"
     CONFIRM = "confirm"
     WORKING = "working"
@@ -55,6 +56,7 @@ BACKUP_ORDER: tuple[Step, ...] = (
     Step.WELCOME,
     Step.SCANNING,
     Step.SELECT,
+    Step.PASSWORDS,
     Step.DESTINATION,
     Step.CONFIRM,
     Step.WORKING,
@@ -150,6 +152,12 @@ TITLES: dict[Step, tuple[str, str]] = {
         "Choose what to keep",
         "Everything is selected. Untick anything you would rather leave behind.",
     ),
+    Step.PASSWORDS: (
+        "Saved browser passwords",
+        "WinMigrate never reads a password store. Where passwords are not already "
+        "in the cloud, the browser exports them itself — behind its own Windows "
+        "Hello prompt — and WinMigrate encrypts what you hand it.",
+    ),
     Step.DESTINATION: (
         "Where should the backup go?",
         "One file, encrypted with a passphrase only you hold.",
@@ -176,6 +184,7 @@ NEXT_LABEL: dict[Step, str] = {
     Step.RESTORE_DONE: "Finish",
     Step.WELCOME: "Scan",
     Step.SELECT: "Next",
+    Step.PASSWORDS: "Next",
     Step.DESTINATION: "Next",
     Step.CONFIRM: "Start backup",
     Step.DONE: "Finish",
@@ -194,6 +203,11 @@ class WizardData:
     rows: list = field(default_factory=list)
     selected: set[str] = field(default_factory=set)
     output_path: str = ""
+    #: Browsers whose export the user completed, by browser key. Only ever ids
+    #: and titles -- the CSV itself goes straight into the encrypted bundle.
+    passwords_added: dict = field(default_factory=dict)
+    #: CSVs to offer to shred once the bundle is written.
+    passwords_to_shred: list = field(default_factory=list)
     passphrase: str = ""
     passphrase_confirm: str = ""
     capture_done: bool = False
@@ -307,6 +321,12 @@ def check(step: Step, data: WizardData) -> Check:
             return Check(False, "Nothing is selected, so there is nothing to back up.")
         return Check(True)
 
+    if step is Step.PASSWORDS:
+        # Never a gate. Exporting passwords is optional by design -- most people
+        # are signed in and have nothing to do here -- and a backup must not be
+        # blocked on the one page that touches secrets.
+        return Check(True)
+
     if step is Step.DESTINATION:
         if not data.output_path.strip():
             return Check(False, "Choose where to save the backup.")
@@ -353,7 +373,14 @@ def progress_steps(mode: Mode | str = Mode.BACKUP) -> tuple[Step, ...]:
             Step.RESTORE_CONFIRM,
             Step.RESTORE_DONE,
         )
-    return (Step.WELCOME, Step.SELECT, Step.DESTINATION, Step.CONFIRM, Step.DONE)
+    return (
+        Step.WELCOME,
+        Step.SELECT,
+        Step.PASSWORDS,
+        Step.DESTINATION,
+        Step.CONFIRM,
+        Step.DONE,
+    )
 
 
 #: Where a page that runs something is shown on the rail.
@@ -376,6 +403,7 @@ def rail_index(step: Step, mode: Mode | str = Mode.BACKUP) -> int:
 RAIL_LABELS: dict[Step, str] = {
     Step.WELCOME: "Scan",
     Step.SELECT: "Choose",
+    Step.PASSWORDS: "Passwords",
     Step.DESTINATION: "Destination",
     Step.CONFIRM: "Confirm",
     Step.DONE: "Finish",

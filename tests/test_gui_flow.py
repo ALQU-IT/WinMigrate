@@ -8,6 +8,7 @@ emptied while the button that needed it stayed live.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -53,7 +54,7 @@ def test_the_rail_follows_the_mode_rather_than_trailing_it(monkeypatch):
     "Finish" appearing twice.
     """
     wizard, _ = open_window(monkeypatch)
-    assert rail(wizard) == ["●  Scan", "○  Choose", "○  Destination", "○  Confirm", "○  Finish"]
+    assert rail(wizard) == ["●  Scan", "○  Choose", "○  Passwords", "○  Destination", "○  Confirm", "○  Finish"]
 
     # Choosing on the first page repaints immediately, without waiting for the
     # page to change.
@@ -63,13 +64,13 @@ def test_the_rail_follows_the_mode_rather_than_trailing_it(monkeypatch):
 
     wizard.mode_var.set(Mode.BACKUP.value)
     wizard._show(Step.CHOOSE)
-    assert rail(wizard) == ["●  Scan", "○  Choose", "○  Destination", "○  Confirm", "○  Finish"]
+    assert rail(wizard) == ["●  Scan", "○  Choose", "○  Passwords", "○  Destination", "○  Confirm", "○  Finish"]
 
 
 def test_the_rail_marks_progress_as_the_pages_advance(monkeypatch):
     wizard, _ = open_window(monkeypatch)
     wizard._show(Step.DESTINATION)
-    assert rail(wizard)[:3] == ["✓  Scan", "✓  Choose", "●  Destination"]
+    assert rail(wizard)[:4] == ["✓  Scan", "✓  Choose", "✓  Passwords", "●  Destination"]
 
 
 # --- the backup branch ------------------------------------------------------
@@ -402,3 +403,194 @@ def test_the_run_is_written_down_as_it_happens(monkeypatch, profile: Path, tmp_p
     assert str(output) in written
     # The passphrase was typed into this run. It is not in what was written down.
     assert "hunter2" not in written
+
+
+# --- browser passwords ------------------------------------------------------
+def chrome_with_local_passwords(root: Path) -> None:
+    """A Chrome profile that is signed in but not syncing: passwords are local."""
+    import json
+
+    folder = root / "AppData" / "Local" / "Google" / "Chrome" / "User Data" / "Default"
+    folder.mkdir(parents=True)
+    (folder / "Preferences").write_text(
+        json.dumps({"profile": {"name": "Person 1"}, "account_info": [{"email": "me@x.test"}]}),
+        encoding="utf-8",
+    )
+
+
+def test_the_window_offers_the_password_handoff_the_command_line_had(
+    monkeypatch, profile: Path
+):
+    """The page existed only on the command line, so someone using the window
+    was never asked about browser passwords at all -- the migration silently
+    left them behind."""
+    chrome_with_local_passwords(profile)
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+
+    wizard._show(Step.SCANNING)
+    assert pump(wizard) == "scanned"
+    wizard._show(Step.PASSWORDS)
+
+    assert [t.browser_key for t in wizard.password_targets] == ["chrome"]
+    assert "chrome" in wizard.password_rows
+    assert "export" in wizard.passwords_intro.cget("text").lower()
+
+
+def test_an_export_chosen_after_the_choosing_page_still_reaches_the_bundle(
+    monkeypatch, profile: Path, tmp_path: Path
+):
+    """The item is created two pages after the list was built. Without being
+    added to the selection it would be marked "deselected" at capture time and
+    silently left out -- the one item the user went furthest out of their way to
+    include."""
+    from winmigrate import restore as restore_mod
+    from winmigrate.restore import RestoreOptions
+
+    chrome_with_local_passwords(profile)
+    export = tmp_path / "Chrome Passwords.csv"
+    export.write_text(
+        "name,url,username,password,note\nS,https://secretsite.test,me,swordfish,\n",
+        encoding="utf-8",
+    )
+
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    wizard.use_vss.set(False)
+    wizard._show(Step.SCANNING)
+    assert pump(wizard) == "scanned"
+
+    wizard._show(Step.PASSWORDS)
+    wizard._ingest_password_csv("chrome", export)
+    assert wizard.password_status["chrome"].cget("text").startswith("Google Chrome passwords added")
+    # Not deleted yet: the plaintext file is the user's until the bundle holds it.
+    assert export.is_file()
+
+    output = tmp_path / "out.dat"
+    wizard.output_var.set(str(output))
+    wizard.passphrase.insert(0, "hunter2")
+    wizard.passphrase2.insert(0, "hunter2")
+    wizard._show(Step.CONFIRM)
+    assert "Google Chrome" in wizard.confirm_text.cget("text")
+
+    wizard._show(Step.WORKING)
+    assert pump(wizard) == "captured"
+
+    # In the bundle, and only in the bundle. The plaintext sidecar -- which
+    # travels beside the .dat and needs no passphrase to read -- carries a
+    # redacted stub and none of what the export contained.
+    sidecar = json.dumps(restore_mod.load_sidecar(output))
+    assert "swordfish" not in sidecar and "secretsite" not in sidecar
+    entry = next(
+        item
+        for item in restore_mod.load_sidecar(output)["items"]
+        if item["id"] == "browser:passwords-csv:chrome"
+    )
+    assert entry["redacted"] is True and entry["sensitivity"] == "secret"
+
+    destination = tmp_path / "new"
+    destination.mkdir()
+    report = restore_mod.restore(
+        RestoreOptions(bundle=output, passphrase="hunter2", destination=destination)
+    )
+    assert report.ok
+    restored = destination / "WinMigrate-Passwords" / "chrome-passwords.csv"
+    assert restored.is_file()
+    assert "swordfish" in restored.read_text(encoding="utf-8")
+    # And the follow-up now tells the new machine to import it and delete it.
+    assert any(f.id == "browser:passwords:chrome" for f in report.followups)
+
+
+def test_the_plaintext_export_is_deleted_once_the_bundle_holds_it(
+    monkeypatch, profile: Path, tmp_path: Path
+):
+    """What the browser wrote is plaintext sitting in Downloads. The copy in the
+    bundle is encrypted; the original has served its purpose."""
+    chrome_with_local_passwords(profile)
+    export = tmp_path / "Chrome Passwords.csv"
+    export.write_text("url,username,password\nhttps://x,me,pw\n", encoding="utf-8")
+
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    wizard.use_vss.set(False)
+    wizard._show(Step.SCANNING)
+    assert pump(wizard) == "scanned"
+    wizard._show(Step.PASSWORDS)
+    wizard._ingest_password_csv("chrome", export)
+
+    wizard.output_var.set(str(tmp_path / "out.dat"))
+    wizard.passphrase.insert(0, "hunter2")
+    wizard.passphrase2.insert(0, "hunter2")
+    wizard._show(Step.WORKING)
+    assert pump(wizard) == "captured"
+
+    assert not export.exists()
+    assert any("deleted" in line for line in wizard.shred_results)
+
+
+def test_unticking_the_box_leaves_the_users_own_file_alone(
+    monkeypatch, profile: Path, tmp_path: Path
+):
+    """Deleting something a person made is theirs to decide. Unticked means
+    untouched, and nothing else about the backup changes."""
+    chrome_with_local_passwords(profile)
+    export = tmp_path / "Chrome Passwords.csv"
+    export.write_text("url,username,password\nhttps://x,me,pw\n", encoding="utf-8")
+
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    wizard.use_vss.set(False)
+    wizard._show(Step.SCANNING)
+    assert pump(wizard) == "scanned"
+    wizard._show(Step.PASSWORDS)
+    wizard._ingest_password_csv("chrome", export)
+    wizard.shred_after.set(False)
+
+    wizard.output_var.set(str(tmp_path / "out.dat"))
+    wizard.passphrase.insert(0, "hunter2")
+    wizard.passphrase2.insert(0, "hunter2")
+    wizard._show(Step.WORKING)
+    assert pump(wizard) == "captured"
+
+    assert export.is_file()
+    assert wizard.shred_results == []
+
+
+def test_a_machine_with_everything_synced_says_so_rather_than_nothing(
+    monkeypatch, profile: Path
+):
+    """The common case. "Nothing to do" has to be said out loud, with the
+    account to sign into, or the page reads as broken."""
+    import json
+
+    folder = profile / "AppData" / "Local" / "Google" / "Chrome" / "User Data" / "Default"
+    folder.mkdir(parents=True)
+    (folder / "Preferences").write_text(
+        json.dumps(
+            {
+                "profile": {"name": "Person 1"},
+                "account_info": [{"email": "me@x.test"}],
+                "sync": {"requested": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    wizard._show(Step.SCANNING)
+    assert pump(wizard) == "scanned"
+    wizard._show(Step.PASSWORDS)
+
+    assert wizard.password_targets == []
+    assert "sign in" in wizard.passwords_intro.cget("text").lower()
+    assert "me@x.test" in wizard.passwords_cloud.cget("text")
+
+
+def test_files_only_mode_has_nothing_to_offer_and_says_which(monkeypatch, profile: Path):
+    """files-only is a promise that no credential material travels. The page
+    must not offer to add some."""
+    chrome_with_local_passwords(profile)
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    wizard.files_only.set(True)
+    wizard._show(Step.SCANNING)
+    assert pump(wizard) == "scanned"
+    wizard._show(Step.PASSWORDS)
+
+    assert wizard.password_rows == {}
+    assert "files-only" in wizard.passwords_intro.cget("text").lower()

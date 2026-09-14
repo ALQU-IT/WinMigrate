@@ -38,7 +38,7 @@ from ..manifest import detect_source_machine
 from ..models import ScanResult
 from ..platform_win import Environment
 from ..scan import run_scan
-from ..util import humanize
+from ..util import humanize, paths as pathutil
 from . import defaults, elevate, runlog, selection, theme
 from .wizard import Mode, Step, WizardData
 
@@ -290,6 +290,7 @@ class WinMigrateWizard:
             (Step.WELCOME, self._page_welcome),
             (Step.SCANNING, self._page_scanning),
             (Step.SELECT, self._page_select),
+            (Step.PASSWORDS, self._page_passwords),
             (Step.DESTINATION, self._page_destination),
             (Step.CONFIRM, self._page_confirm),
             (Step.WORKING, self._page_working),
@@ -598,6 +599,278 @@ class WinMigrateWizard:
         self.total_label = ttk.Label(row, text="", style="Body.TLabel")
         self.total_label.pack(side="right")
 
+    def _page_passwords(self, page: Any) -> None:
+        """The browser password handoff, which only the command line had.
+
+        The rule this page exists to keep: WinMigrate never reads a password
+        store and never touches DPAPI. The browser does its own export, behind
+        its own Windows Hello prompt, and all this does is open the right page,
+        take the file the user saved, and put it in the encrypted bundle. The
+        tool never sees the OS credential and never decrypts anything.
+        """
+        tk, ttk = self.tk, self.ttk
+        self.passwords_intro = ttk.Label(
+            page, text="", style="Body.TLabel", justify="left", wraplength=640
+        )
+        self.passwords_intro.pack(anchor="w", pady=(0, 12))
+
+        self.passwords_area = ttk.Frame(page, style="Page.TFrame")
+        self.passwords_area.pack(fill="x")
+
+        self.passwords_cloud = ttk.Label(
+            page, text="", style="Hint.TLabel", justify="left", wraplength=640
+        )
+        self.passwords_cloud.pack(anchor="w", pady=(12, 0))
+
+        self.shred_after = tk.BooleanVar(value=True)
+        self.shred_check = ttk.Checkbutton(
+            page,
+            text="Delete the exported file(s) from this machine once the backup is written",
+            variable=self.shred_after,
+            style="Wizard.TCheckbutton",
+        )
+        self.shred_hint = ttk.Label(
+            page,
+            text="     Recommended: what the browser wrote is plaintext. The copy "
+            "inside the backup is encrypted.",
+            style="Hint.TLabel",
+        )
+        # Both are packed only once there is a file to delete.
+        self.password_rows: dict[str, Any] = {}
+        self.password_status: dict[str, Any] = {}
+        self.password_targets: list = []
+        self.password_cloud_accounts: list = []
+        self.password_targets_by_key: dict[str, Any] = {}
+        #: Looked up once. Coming back to this page must not re-read every
+        #: browser's preferences, and must not lose what has already been added.
+        self.password_state_known = False
+
+    def _render_passwords(self) -> None:
+        """Say something true about every browser found, not only the ones
+        with work to do.
+
+        Three states, and the page shows whichever applies: passwords saved
+        locally (export them), passwords already synced (nothing to do, sign in
+        on the new machine), and files-only mode (no credential material travels
+        at all). A page that only ever listed the first would look broken on the
+        machines where there is nothing to list.
+        """
+        ttk = self.ttk
+        for frame in self.password_rows.values():
+            frame.destroy()
+        self.password_rows.clear()
+        self.password_status.clear()
+
+        if self.files_only.get():
+            self.passwords_intro.configure(
+                text="Files-only mode: no credential material of any kind travels in "
+                "this backup, so there is nothing to export here."
+            )
+            self.passwords_cloud.configure(text="")
+            return
+
+        if not self.password_state_known:
+            self._find_password_targets()
+
+        cloud = self.password_cloud_accounts
+        if self.password_targets:
+            self.passwords_intro.configure(
+                text="These browsers have passwords saved on this machine rather "
+                "than in an account. Export them from the browser itself — it will "
+                "ask for Windows Hello — and hand the file to WinMigrate, which "
+                "encrypts it into the backup. This is optional; you can skip it."
+            )
+        elif cloud:
+            self.passwords_intro.configure(
+                text="Nothing to do here: every browser found keeps its passwords "
+                "in an account, so they come back when you sign in on the new machine."
+            )
+        else:
+            self.passwords_intro.configure(
+                text="No browser with passwords saved on this machine was found, so "
+                "there is nothing to export."
+            )
+
+        for target in self.password_targets:
+            frame = ttk.Frame(self.passwords_area, style="Page.TFrame")
+            frame.pack(fill="x", pady=(0, 14))
+            ttk.Label(
+                frame, text=f"{target.title} — saved on this machine", style="Body.TLabel"
+            ).pack(anchor="w")
+            ttk.Label(
+                frame,
+                text=f"     Export page: {target.export_page or 'the browser password manager'}",
+                style="Hint.TLabel",
+            ).pack(anchor="w")
+            buttons = ttk.Frame(frame, style="Page.TFrame")
+            buttons.pack(anchor="w", pady=(6, 0))
+            key = target.browser_key
+            ttk.Button(
+                buttons,
+                text=f"Open {target.title}",
+                command=lambda k=key: self._open_export_page(k),
+            ).pack(side="left")
+            ttk.Button(
+                buttons,
+                text="Choose the exported file…",
+                command=lambda k=key: self._pick_password_csv(k),
+            ).pack(side="left", padx=(8, 0))
+            status = ttk.Label(frame, text="", style="Hint.TLabel", wraplength=620)
+            status.pack(anchor="w", pady=(6, 0))
+            self.password_rows[key] = frame
+            self.password_status[key] = status
+            if key in self.data.passwords_added:
+                status.configure(text=f"Added — {target.title} passwords travel encrypted only.")
+
+        self.passwords_cloud.configure(
+            text=(
+                "Already in the cloud: "
+                + "; ".join(
+                    f"{account.title}"
+                    + (f" (sign in as {account.account_email})" if account.account_email else "")
+                    for account in cloud
+                )
+                + "."
+                if cloud
+                else ""
+            )
+        )
+        self._refresh_shred_box()
+
+    def _refresh_shred_box(self) -> None:
+        if self.data.passwords_to_shred:
+            self.shred_check.pack(anchor="w", pady=(16, 0))
+            self.shred_hint.pack(anchor="w")
+        else:
+            self.shred_check.pack_forget()
+            self.shred_hint.pack_forget()
+
+    def _find_password_targets(self) -> None:
+        """Which browsers have local passwords, and which are already synced.
+
+        Read-only, and only configuration: the sign-in state comes out of the
+        browser's own preferences files. No password store is opened.
+        """
+        from .. import passwords as passwords_mod  # noqa: PLC0415
+
+        try:
+            env = self._environment(self._config())
+            self.password_targets = passwords_mod.export_targets(env)
+            self.password_cloud_accounts = passwords_mod.synced_browsers(env)
+        except Exception as exc:  # noqa: BLE001 -- a page, not the backup
+            log.warning("could not work out the browser password state: %s", exc)
+            self.password_targets = []
+            self.password_cloud_accounts = []
+        self.password_targets_by_key = {t.browser_key: t for t in self.password_targets}
+        self.password_state_known = True
+        log.info(
+            "browser passwords: %s local, %s already synced",
+            len(self.password_targets),
+            len(self.password_cloud_accounts),
+        )
+
+    def _open_export_page(self, key: str) -> None:
+        """Open the browser on its own export page.
+
+        An internal browser URL means nothing to the Windows shell, so the
+        browser's own executable is launched with the address as an argument.
+        When it cannot be found the address is shown instead -- a wrong dialog
+        is worse than none.
+        """
+        from .. import passwords as passwords_mod  # noqa: PLC0415
+
+        target = self.password_targets_by_key.get(key)
+        status = self.password_status.get(key)
+        if target is None or status is None:
+            return
+        opened = passwords_mod.open_export_page(target, self._environment(self._config()))
+        log.info("export page for %s: %s", key, "opened" if opened else "could not open")
+        if opened:
+            status.configure(
+                text=f"{target.title} should now be showing {target.export_page}. "
+                "Use 'Export passwords' there — it will ask for Windows Hello — then "
+                "choose the file you saved."
+            )
+        else:
+            status.configure(
+                text=f"Could not start {target.title}. Open it yourself and go to "
+                f"{target.export_page}, export, then choose the file you saved."
+            )
+
+    def _pick_password_csv(self, key: str) -> None:
+        from tkinter import filedialog  # noqa: PLC0415
+
+        target = self.password_targets_by_key.get(key)
+        if target is None:
+            return
+        chosen = filedialog.askopenfilename(
+            title=f"The file {target.title} exported",
+            filetypes=[("Password export (CSV)", "*.csv"), ("All files", "*.*")],
+        )
+        if not chosen:
+            return
+        self._ingest_password_csv(key, Path(chosen))
+
+    def _ingest_password_csv(self, key: str, csv_path: Path) -> None:
+        """Stage the user's export as encrypted-only material.
+
+        The same :func:`winmigrate.passwords.ingest_csv` the command line uses,
+        so there is one answer to what a password export is and where it lands.
+        The item is SECRET: it exists only inside the encrypted payload and the
+        plaintext sidecar carries a redacted stub.
+        """
+        from .. import passwords as passwords_mod  # noqa: PLC0415
+
+        target = self.password_targets_by_key.get(key)
+        status = self.password_status.get(key)
+        if target is None or self.scan_result is None:
+            return
+        outcome = passwords_mod.ingest_csv(target, csv_path, self.scan_result)
+        if status is not None:
+            status.configure(text=outcome.message)
+        # The browser and the outcome, never the path: it points at a plaintext
+        # password file, and the log is written to the drive the backup is on.
+        log.info("password export for %s: %s", key, "accepted" if outcome.ok else "refused")
+        if not outcome.ok:
+            return
+        self.data.passwords_added[key] = target.title
+        if csv_path not in self.data.passwords_to_shred:
+            self.data.passwords_to_shred.append(csv_path)
+        # The item arrived after the choosing page was built. Without this it
+        # would be marked "deselected" at capture time and silently left out --
+        # the one item the user went furthest out of their way to include.
+        self.data.rows = selection.rows_for(self.scan_result)
+        if outcome.item is not None:
+            self.data.selected.add(outcome.item.id)
+        self._refresh_shred_box()
+        self._refresh_buttons()
+
+    def _shred_exported_csvs(self) -> list[str]:
+        """Delete the plaintext exports, once they are safely in the bundle.
+
+        Only files the user handed to this run, only when they left the box
+        ticked, and only ones the capture actually read -- a file that failed to
+        be captured is the one file that must not be deleted.
+        """
+        from .. import passwords as passwords_mod  # noqa: PLC0415
+
+        if not self.data.passwords_to_shred or not self.shred_after.get():
+            return []
+        failed = {
+            pathutil.normalize_key(Path(path)) for path, _reason in
+            (self.capture_report.failures if self.capture_report else [])
+        }
+        done: list[str] = []
+        for path in self.data.passwords_to_shred:
+            if pathutil.normalize_key(path) in failed:
+                done.append(f"{path.name} was not captured, so it was left alone")
+                continue
+            ok = passwords_mod.shred(path)
+            log.info("shred %s: %s", path.name, "done" if ok else "failed")
+            done.append(f"{path.name} deleted" if ok else f"{path.name} could not be deleted")
+        self.data.passwords_to_shred = []
+        return done
+
     def _page_destination(self, page: Any) -> None:
         tk, ttk = self.tk, self.ttk
         ttk.Label(page, text="Save the backup as", style="Body.TLabel").pack(anchor="w")
@@ -733,6 +1006,8 @@ class WinMigrateWizard:
             self._start_scan()
         elif step is Step.SELECT:
             self._render_rows()
+        elif step is Step.PASSWORDS:
+            self._render_passwords()
         elif step is Step.DESTINATION:
             if not self.output_var.get():
                 self.output_var.set(str(self._proposed_output()))
@@ -742,6 +1017,10 @@ class WinMigrateWizard:
         elif step is Step.WORKING:
             self._start_capture()
         elif step is Step.DONE:
+            # Before the summary, so it can say what happened to them: the
+            # plaintext exports have served their purpose once the bundle holds
+            # an encrypted copy.
+            self.shred_results = self._shred_exported_csvs()
             self.done_text.configure(text=self._done_summary())
             self._forget_passphrases()
 
@@ -1009,6 +1288,13 @@ class WinMigrateWizard:
             "The backup is encrypted with the passphrase you typed. Nothing is",
             "uploaded anywhere; the file stays where you put it.",
         ]
+        if self.data.passwords_added:
+            lines.insert(
+                6,
+                "Passwords:    exported from "
+                + ", ".join(sorted(self.data.passwords_added.values()))
+                + " (encrypted only)",
+            )
         if self.use_vss.get() and not elevated:
             lines.append("")
             lines.append(
@@ -1033,6 +1319,15 @@ class WinMigrateWizard:
         ]
         if report.failures:
             lines += ["", f"{len(report.failures)} file(s) could not be read. See the log."]
+        if self.data.passwords_added:
+            lines += [
+                "",
+                "Exported passwords travelled encrypted only, from "
+                + ", ".join(sorted(self.data.passwords_added.values()))
+                + ". Import them on the new machine and delete the file afterwards.",
+            ]
+        for line in getattr(self, "shred_results", []):
+            lines += ["", line]
         if self.log_path is not None:
             lines += ["", f"Log:          {self.log_path}"]
         if report.vanished:

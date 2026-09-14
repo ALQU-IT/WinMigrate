@@ -648,29 +648,17 @@ def _collect_browser_passwords(args, result, env, console) -> list[Path]:
 
 
 def _ingest_password_csv(target, csv_path: Path, result, console, passwords_mod):
-    """Validate a CSV and add it to the scan as an encrypted-only item."""
-    if not csv_path.is_file():
-        console.print(f"[yellow]No file at {csv_path}; skipping {target.title}.[/yellow]")
+    """Validate a CSV and add it to the scan as an encrypted-only item.
+
+    The staging itself lives in :func:`winmigrate.passwords.ingest_csv`, which
+    the window uses too; what is left here is saying what happened on a console.
+    """
+    outcome = passwords_mod.ingest_csv(target, csv_path, result)
+    if not outcome.ok:
+        console.print(f"[yellow]{outcome.message} Skipping {target.title}.[/yellow]")
         return None
-    try:
-        head = csv_path.read_text(encoding="utf-8", errors="replace")[:4096]
-    except OSError as exc:
-        console.print(f"[yellow]Could not read {csv_path}: {exc}; skipping.[/yellow]")
-        return None
-    if not passwords_mod.looks_like_password_csv(head):
-        console.print(
-            f"[yellow]{csv_path} does not look like a password export "
-            "(no url/username/password header); skipping.[/yellow]"
-        )
-        return None
-    item = passwords_mod.build_password_item(target, csv_path)
-    # Replace the scan-time "export yourself" note with the restore-side import
-    # instruction for this browser (same follow-up id).
-    result.followups = [f for f in result.followups if f.id != f"browser:passwords:{target.browser_key}"]
-    result.followups.append(passwords_mod.import_followup(target))
-    result.items.append(item)
-    console.print(f"[green]{target.title} passwords added (encrypted-only).[/green]")
-    return item
+    console.print(f"[green]{outcome.message}[/green]")
+    return outcome.item
 
 
 def _shred_password_csvs(paths: list[Path], console: Console) -> None:

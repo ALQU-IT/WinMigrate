@@ -139,7 +139,13 @@ WinMigrate does **not** decrypt browsers' saved-password stores, and will not:
 that routine is an infostealer payload regardless of who runs it. Instead it
 detects sign-in and sync state from configuration files only, and either tells
 you the passwords will sync down when you sign in, or walks you through the
-browser's own export and re-import. It likewise detects and reinstalls your
+browser's own export and re-import — on its own page in the window, and with
+`--passwords BROWSER=CSV` or the interactive prompt on the command line. What the
+browser writes is plaintext, so it is staged as encrypted-only material: inside
+the bundle it is encrypted, in the plaintext sidecar it is a redacted stub, on
+restore it lands in `WinMigrate-Passwords\` with an import-then-delete
+instruction, and the window offers to delete the export from this machine once
+the bundle holds it. It likewise detects and reinstalls your
 Office edition without ever extracting a product key: the generated
 configuration contains no `PIDKEY`, and the only licence detail recorded is the
 last five characters that `ospp.vbs` prints itself — enough for you to recognise
