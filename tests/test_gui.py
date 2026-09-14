@@ -296,15 +296,29 @@ def test_every_ttk_style_the_window_uses_is_configured():
     assert used - configured - named == set()
 
 
-def test_the_passphrase_is_cleared_as_soon_as_the_capture_has_it():
-    """It lives in the widget and the options object, and nowhere else. The
-    window is open for the length of an hour-long capture with the fields
-    visible on screen."""
+def test_the_passphrase_is_dropped_when_the_job_ends_not_when_it_starts():
+    """It used to be cleared the moment the worker had it, which looked careful
+    and set a trap: a capture that fails at ninety per cent sends the user back
+    to try again, and they find the field empty, the button still live, and the
+    retry failing with a message about the passphrase being wrong.
+
+    So it is held for the length of the job and dropped on the page that says
+    the job is over -- both jobs, and the field for the other one too, since
+    only one of them was ever in use.
+    """
     source = _app_source()
+
     start = source.index("def _start_capture")
-    body = source[start : source.index("def _capture_worker")]
-    assert 'self.passphrase.delete(0, "end")' in body
-    assert 'self.passphrase2.delete(0, "end")' in body
+    starting = source[start : source.index("def _capture_worker")]
+    assert "delete(0" not in starting, "the passphrase is cleared before the work is done"
+
+    forgetting = source[source.index("def _forget_passphrases") :]
+    forgetting = forgetting[: forgetting.index("def _collect")]
+    for field in ("self.passphrase", "self.passphrase2", "self.bundle_passphrase"):
+        assert field in forgetting, field
+
+    # And it is called from the two pages that mean "finished".
+    assert source.count("self._forget_passphrases()") == 2
 
 
 def test_every_event_a_worker_emits_is_handled(monkeypatch):

@@ -37,6 +37,12 @@ class Palette:
     warn: str
     good: str
     bad: str
+    #: Carried on the palette rather than inferred from object identity. An
+    #: ``is`` check against the module's own instance stops being true the
+    #: moment the module is imported twice -- a frozen build, a reload, a test
+    #: that clears sys.modules -- and it does not raise, it just hands a dark
+    #: page the light widget theme and leaves it framed in white.
+    dark: bool = False
 
 
 LIGHT = Palette(
@@ -52,6 +58,7 @@ LIGHT = Palette(
     warn="#9a6700",
     good="#0f7b32",
     bad="#b42318",
+    dark=False,
 )
 
 #: Windows' own dark surfaces are near-black rather than mid-grey, and its
@@ -70,6 +77,7 @@ DARK = Palette(
     warn="#e8b339",
     good="#4ad07a",
     bad="#ff6b5e",
+    dark=True,
 )
 
 #: Where Windows records the choice. 0 is dark, 1 is light -- the value is named
@@ -151,7 +159,7 @@ def apply(style, family: str, palette: Palette = LIGHT) -> None:
     recoloured, so a dark page would end up framed in white chrome. "clam" is
     drawn from the colours it is given and so can actually go dark.
     """
-    wanted = ("clam",) if palette is DARK else ("vista", "clam")
+    wanted = ("clam",) if palette.dark else ("vista", "clam")
     for name in wanted:
         try:
             style.theme_use(name)

@@ -11,6 +11,7 @@ if __name__ == "__main__":
     freeze_support()
     import tkinter
     import tkinter.filedialog  # noqa: F401
+    import tkinter.font  # noqa: F401
     import tkinter.messagebox  # noqa: F401
     import tkinter.ttk  # noqa: F401
 

@@ -279,6 +279,13 @@ def check(step: Step, data: WizardData) -> Check:
         return Check(True)
 
     if step is Step.RESTORE_CONFIRM:
+        # Checked again here, not only on the page that collects it. The field
+        # is emptied once the passphrase has been handed to the worker, and
+        # without this the button stays live for a second attempt that fails
+        # with "the passphrase is wrong, or the file has been altered" -- which
+        # is untrue twice over and sends the user looking at their backup.
+        if not data.bundle_passphrase:
+            return Check(False, "Go back and enter the backup's passphrase again.")
         if not data.destination.strip():
             return Check(False, "Choose where the files should go.")
         # The parent has to exist; the destination itself is created.
@@ -313,6 +320,10 @@ def check(step: Step, data: WizardData) -> Check:
         return Check(True)
 
     if step is Step.CONFIRM:
+        # The same guard on the way out. Nothing should be able to reach the
+        # encryption with an empty passphrase, whatever route it took here.
+        if not data.passphrase:
+            return Check(False, "Go back and enter a passphrase.")
         return Check(True)
 
     if step is Step.DONE:

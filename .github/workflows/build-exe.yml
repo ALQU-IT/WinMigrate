@@ -92,6 +92,7 @@ jobs:
           --hidden-import tkinter.ttk
           --hidden-import tkinter.filedialog
           --hidden-import tkinter.messagebox
+          --hidden-import tkinter.font
           --runtime-tmpdir "%LOCALAPPDATA%\WinMigrate"
           gui_entry.py
 

@@ -621,6 +621,12 @@ class WinMigrateWizard:
     def _show(self, step: Step) -> None:
         from . import wizard
 
+        # The mode lives in a widget until it is collected, and the rail, the
+        # buttons and the validation all depend on it. _refresh_buttons collects
+        # and repaints at the end of this method, which is what actually keeps
+        # the rail honest; doing it here as well means nothing in between reads
+        # a stale mode.
+        self._collect()
         for frame in self.pages.values():
             frame.pack_forget()
         self.step = step
@@ -629,36 +635,36 @@ class WinMigrateWizard:
         self.subtitle_label.configure(text=subtitle)
         self.pages[step].pack(fill="both", expand=True)
 
-        current = wizard.rail_index(step, self.data.mode)
-        self._relabel_rail()
-        for index, label in enumerate(self.rail_labels):
-            marker = theme.rail_marker(index, current)
-            text = label.cget("text").strip()
-            for glyph in ("✓", "●", "○"):
-                text = text.replace(glyph, "").strip()
-            label.configure(text=f"{marker}  {text}", style=theme.rail_style(index, current))
-
+        self._paint_rail()
         self._on_enter(step)
         self._refresh_buttons()
 
-    def _relabel_rail(self) -> None:
-        """The rail says different things depending on the job.
+    def _paint_rail(self) -> None:
+        """Draw the rail for the job being done and the page showing.
+
+        Label and marker together, in one pass. They were two passes reading the
+        mode at different moments, which is how the rail ended up describing one
+        job while the window was doing the other.
 
         Backing up and restoring have a different number of stages, so the
-        entries are rewritten when the mode is chosen rather than one rail being
-        made to describe both badly.
+        entries are rewritten rather than one rail being made to describe both
+        badly, and the spare entry is hidden rather than left showing a step
+        that will never arrive.
         """
-        from .wizard import RAIL_LABELS, progress_steps
+        from .wizard import RAIL_LABELS, progress_steps, rail_index
 
         entries = progress_steps(self.data.mode)
+        current = rail_index(self.step, self.data.mode)
         for index, label in enumerate(self.rail_labels):
-            if index < len(entries):
-                label.configure(text=f"  {RAIL_LABELS[entries[index]]}")
-                label.pack(anchor="w", padx=16, pady=4)
-            else:
-                # Restoring has fewer stages; the spare entries are hidden
-                # rather than left showing a step that will never arrive.
+            if index >= len(entries):
                 label.pack_forget()
+                continue
+            marker = theme.rail_marker(index, current)
+            label.configure(
+                text=f"{marker}  {RAIL_LABELS[entries[index]]}",
+                style=theme.rail_style(index, current),
+            )
+            label.pack(anchor="w", padx=16, pady=4)
 
     def _on_enter(self, step: Step) -> None:
         if step is Step.SOURCE:
@@ -678,6 +684,7 @@ class WinMigrateWizard:
             self._start_restore()
         elif step is Step.RESTORE_DONE:
             self._render_restore_done()
+            self._forget_passphrases()
         elif step is Step.WELCOME:
             self._update_elevation_note()
         elif step is Step.SCANNING:
@@ -695,6 +702,23 @@ class WinMigrateWizard:
             self._start_capture()
         elif step is Step.DONE:
             self.done_text.configure(text=self._done_summary())
+            self._forget_passphrases()
+
+    def _forget_passphrases(self) -> None:
+        """Empty the passphrase fields, once the job they were for is over.
+
+        Not when the work starts, which is what this used to do. A capture that
+        fails at ninety per cent, or a restore that cannot write one file, sends
+        the user back to try again -- and they would find the field empty, the
+        button still live, and the retry failing with a message about the
+        passphrase being wrong. Held until the job is genuinely finished, and
+        then dropped.
+        """
+        for field in (self.passphrase, self.passphrase2, self.bundle_passphrase):
+            field.delete(0, "end")
+        self.data.passphrase = ""
+        self.data.passphrase_confirm = ""
+        self.data.bundle_passphrase = ""
 
     def _collect(self) -> None:
         """Pull the widgets' values into the data the rules are checked against."""
@@ -725,6 +749,10 @@ class WinMigrateWizard:
         finished = self.step in wizard.TERMINAL
         self.cancel_button.configure(text="Close" if finished else "Cancel")
         self.hint.configure(text=verdict.message if not verdict.ok else "")
+        # Choosing the job on the first page changes what the rail says, and
+        # waiting for the next page to redraw it means the user picks Restore
+        # and watches a rail that still describes a backup.
+        self._paint_rail()
         if self.step is Step.WELCOME:
             self._update_elevation_note()
 
@@ -1144,9 +1172,6 @@ class WinMigrateWizard:
             overwrite=self.overwrite_var.get(),
             items=tuple(sorted(self.data.restore_selected)),
         )
-        # The passphrase is in the options object now and nowhere the window can
-        # leak it, the same as on the backup side.
-        self.bundle_passphrase.delete(0, "end")
         threading.Thread(target=self._restore_worker, args=(options,), daemon=True).start()
 
     def _restore_worker(self, options: Any) -> None:
@@ -1247,10 +1272,6 @@ class WinMigrateWizard:
             use_vss=self.use_vss.get(),
             compression=self.options.get("compression", "auto"),
         )
-        # Cleared the moment the worker has them: the passphrase lives in the
-        # options object and nowhere the window can leak it.
-        self.passphrase.delete(0, "end")
-        self.passphrase2.delete(0, "end")
         threading.Thread(
             target=self._capture_worker,
             args=(options, self._config(), set(self.data.selected)),

@@ -252,7 +252,7 @@ def test_you_cannot_restore_nothing():
 
 
 def test_the_destination_must_be_somewhere_that_could_exist(tmp_path: Path):
-    data = WizardData(mode=Mode.RESTORE, destination="")
+    data = WizardData(mode=Mode.RESTORE, destination="", bundle_passphrase="pw")
     assert check(Step.RESTORE_CONFIRM, data).ok is False
 
     data.destination = str(tmp_path / "nowhere" / "deeper")
@@ -326,7 +326,11 @@ def test_both_palettes_define_every_colour():
     in front of someone."""
     import dataclasses
 
-    fields = {f.name for f in dataclasses.fields(theme.Palette)}
+    # Every colour, which is every field but the flag saying which palette it is.
+    fields = {
+        f.name for f in dataclasses.fields(theme.Palette) if f.type in ("str", str)
+    } - {"dark"}
+    assert len(fields) >= 10, "the check has lost track of the palette's shape"
     for palette in (theme.LIGHT, theme.DARK):
         for name in fields:
             value = getattr(palette, name)
@@ -376,3 +380,59 @@ def test_the_dark_palette_does_not_use_the_vista_widget_theme():
     light = Recorder()
     theme.apply(light, "Segoe UI", theme.LIGHT)
     assert light.used[0] == "vista"
+
+
+
+def test_neither_confirm_page_lets_an_empty_passphrase_through(tmp_path: Path):
+    """The field is emptied once the job it was for is finished, and a user who
+    comes back to retry would otherwise find the button live and the attempt
+    failing with "the passphrase is wrong, or the file has been altered" --
+    untrue twice over, and it sends them looking at their backup for a fault
+    that is not there.
+    """
+    backup = WizardData(output_path=str(tmp_path / "b.dat"), passphrase="")
+    verdict = check(Step.CONFIRM, backup)
+    assert verdict.ok is False and "passphrase" in verdict.message.lower()
+    backup.passphrase = "hunter2"
+    assert check(Step.CONFIRM, backup).ok is True
+
+    restore = WizardData(
+        mode=Mode.RESTORE, destination=str(tmp_path), bundle_passphrase=""
+    )
+    verdict = check(Step.RESTORE_CONFIRM, restore)
+    assert verdict.ok is False and "passphrase" in verdict.message.lower()
+    restore.bundle_passphrase = "hunter2"
+    assert check(Step.RESTORE_CONFIRM, restore).ok is True
+
+
+
+def test_a_palette_knows_whether_it_is_dark_rather_than_being_recognised_by_identity():
+    """apply() used to decide with ``palette is DARK``, and identity stops being
+    true the moment the module is imported twice -- a frozen build, a reload, a
+    test that clears sys.modules. It does not raise; it hands a dark page the
+    light widget theme and leaves it framed in white chrome."""
+    import dataclasses
+
+    assert theme.LIGHT.dark is False and theme.DARK.dark is True
+    assert theme.palette_for(True).dark is True
+
+    # A copy is a different object and must still be treated as dark.
+    copied = dataclasses.replace(theme.DARK)
+    assert copied is not theme.DARK
+
+    class Recorder:
+        def __init__(self):
+            self.used = []
+
+        def theme_use(self, name):
+            self.used.append(name)
+
+        def configure(self, *a, **k):
+            pass
+
+        def map(self, *a, **k):
+            pass
+
+    recorder = Recorder()
+    theme.apply(recorder, "Segoe UI", copied)
+    assert recorder.used == ["clam"]
