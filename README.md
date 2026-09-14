@@ -103,6 +103,19 @@ profile it inspects, and cannot trigger a cloud download.
 * which cloud-sync folders were found, and which account owns each;
 * what you will still have to do yourself once the restore is done.
 
+### The log
+
+Every run writes one. The command line writes it where `--log-file` says; the
+window writes it beside the program itself — the USB drive you started it from,
+next to the backup — as `winmigrate-<date>-<time>.log`, and shows the name in
+the side rail while it runs. It opens with where and when the run started, which
+copy of the program it was, and whether it had administrator rights, then
+records each phase as it happens: the scan, the shadow copy Windows can spend
+minutes creating before the first byte is written, the capture, the restore.
+
+Secrets never reach it. Passphrases stay in the window they were typed into, and
+anything a call site marks as secret is dropped before any handler sees it.
+
 ## Reinstalling software
 
 Applications are inventoried, not copied: what travels is the list, so the new

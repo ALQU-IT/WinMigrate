@@ -39,7 +39,7 @@ from ..models import ScanResult
 from ..platform_win import Environment
 from ..scan import run_scan
 from ..util import humanize
-from . import defaults, elevate, selection, theme
+from . import defaults, elevate, runlog, selection, theme
 from .wizard import Mode, Step, WizardData
 
 log = logging.getLogger(__name__)
@@ -112,7 +112,20 @@ TCL_ADVICE = (
 def run(options: dict | None = None) -> int:
     """Open the window. ``options`` carries the first page's choices across an
     elevation restart. Returns a process exit code."""
+    options = dict(options or {})
     scrub_tcl_environment()
+    # Before the window, before tkinter: the failures worth having a log for
+    # include the one where no window appears at all.
+    if options.get("log_file"):
+        # winmigrate gui --log-file: the command line configured it already.
+        log_path = Path(options["log_file"])
+    else:
+        log_path = runlog.begin(
+            "window",
+            {"elevation attempted": "yes" if options.get("elevation_attempted") else "no"},
+        )
+    if log_path is not None:
+        options["log_path"] = str(log_path)
     try:
         import tkinter as tk  # noqa: PLC0415
     except ImportError as exc:
@@ -129,7 +142,7 @@ def run(options: dict | None = None) -> int:
         # than as a PyInstaller crash dialog quoting search paths.
         fatal(TCL_ADVICE.format(error=exc))
         return 2
-    WinMigrateWizard(root, options or {})
+    WinMigrateWizard(root, options)
     root.mainloop()
     return 0
 
@@ -154,6 +167,7 @@ class WinMigrateWizard:
         self.capture_report: Any = None
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.elevation_attempted = bool(options.get("elevation_attempted"))
+        self.log_path = Path(options["log_path"]) if options.get("log_path") else None
         self._capture_total = 1
         self._capture_done = 0
 
@@ -203,6 +217,18 @@ class WinMigrateWizard:
             label.pack(anchor="w", padx=16, pady=4)
             self.rail_labels.append(label)
 
+        # Pinned to the bottom of the rail rather than mentioned once at the
+        # end: the moment someone wants the log is the moment something looks
+        # wrong, which is in the middle, not after.
+        self.log_label = ttk.Label(
+            self.rail,
+            text=self._log_note(),
+            style="RailOff.TLabel",
+            wraplength=theme.RAIL_WIDTH - 32,
+            justify="left",
+        )
+        self.log_label.pack(side="bottom", anchor="w", padx=16, pady=(0, 16))
+
         right = ttk.Frame(body, style="Page.TFrame")
         right.pack(side="left", fill="both", expand=True)
 
@@ -238,6 +264,17 @@ class WinMigrateWizard:
             inner, text="Cancel", style="Wizard.TButton", command=self._cancel
         )
         self.cancel_button.pack(side="right", padx=(0, 8))
+
+    def _log_note(self) -> str:
+        """One line for the rail: the log's name, not its whole path.
+
+        The rail is narrow and the folder is one the user is already standing
+        in -- it is beside the program. The full path goes in the log itself and
+        on the last page, where there is room for it.
+        """
+        if self.log_path is None:
+            return ""
+        return f"log\n{self.log_path.name}"
 
     # --- pages -------------------------------------------------------------
     def _build_pages(self) -> None:
@@ -621,6 +658,10 @@ class WinMigrateWizard:
     def _show(self, step: Step) -> None:
         from . import wizard
 
+        # The log's spine: every later line is read against the page that was
+        # on screen when it was written.
+        log.info("page: %s", getattr(step, "value", step))
+
         # The mode lives in a widget until it is collected, and the rail, the
         # buttons and the validation all depend on it. _refresh_buttons collects
         # and repaints at the end of this method, which is what actually keeps
@@ -830,12 +871,17 @@ class WinMigrateWizard:
             include_software=self.include_software.get(),
             include_notepad=self.include_notepad.get(),
         )
+        log.info("asking Windows for administrator rights (for a shadow copy)")
         if elevate.relaunch_as_admin(arguments):
+            # This process is about to disappear; the elevated one opens its own
+            # log, and its banner says it was started by an elevation request.
+            log.info("elevated copy started; this one is closing")
             self.root.destroy()
             return True
         # Declined, or no UAC to ask. Carrying on without a shadow copy is what
         # the command line does, so it is what this does -- with the note on the
         # page updated to say so rather than a dialog nobody reads.
+        log.info("elevation declined or unavailable; continuing without a shadow copy")
         self.elevation_attempted = True
         self._update_elevation_note()
         return False
@@ -987,6 +1033,8 @@ class WinMigrateWizard:
         ]
         if report.failures:
             lines += ["", f"{len(report.failures)} file(s) could not be read. See the log."]
+        if self.log_path is not None:
+            lines += ["", f"Log:          {self.log_path}"]
         if report.vanished:
             lines += [
                 "",
@@ -1172,6 +1220,14 @@ class WinMigrateWizard:
             overwrite=self.overwrite_var.get(),
             items=tuple(sorted(self.data.restore_selected)),
         )
+        log.info(
+            "restore started: %s items, %s, from %s into %s%s",
+            len(self.data.restore_selected),
+            humanize.bytes_(total_bytes),
+            options.bundle,
+            options.destination,
+            " (practice run)" if options.dry_run else "",
+        )
         threading.Thread(target=self._restore_worker, args=(options,), daemon=True).start()
 
     def _restore_worker(self, options: Any) -> None:
@@ -1209,6 +1265,8 @@ class WinMigrateWizard:
             lines.append(f"⚠ {len(report.failures)} file(s) could not be written.")
         if report.dry_run:
             lines += ["", "This was a practice run. Nothing was written."]
+        if self.log_path is not None:
+            lines += ["", f"Log: {self.log_path}"]
         self.restore_done_text.configure(text="\n".join(lines))
 
         self.followup_box.configure(state="normal")
@@ -1251,6 +1309,14 @@ class WinMigrateWizard:
 
     def _start_scan(self) -> None:
         config = self._config()
+        log.info(
+            "scan started: profile=%s files_only=%s wifi=%s software=%s notepad=%s",
+            config.profile_root or "the signed-in profile",
+            config.files_only,
+            config.include_wifi,
+            config.include_software,
+            config.include_notepad,
+        )
         threading.Thread(target=self._scan_worker, args=(config,), daemon=True).start()
 
     def _scan_worker(self, config: ScanConfig) -> None:
@@ -1266,11 +1332,20 @@ class WinMigrateWizard:
         self._capture_total = max(total_bytes, 1)
         self._capture_done = 0
         self.capture_bar.configure(value=0)
+        self.capture_detail.configure(text="Preparing…")
         options = CaptureOptions(
             output=Path(self.output_var.get()),
             passphrase=self.passphrase.get(),
             use_vss=self.use_vss.get(),
             compression=self.options.get("compression", "auto"),
+        )
+        log.info(
+            "capture started: %s items, %s, shadow copy=%s, rights=%s, to %s",
+            len(self.data.selected),
+            humanize.bytes_(total_bytes),
+            "requested" if options.use_vss else "no",
+            "administrator" if elevate.is_elevated() else "standard user",
+            options.output,
         )
         threading.Thread(
             target=self._capture_worker,
@@ -1358,6 +1433,14 @@ class WinMigrateWizard:
             )
             self.restore_detail.configure(text=str(title))
         elif kind == "restored":
+            log.info(
+                "restore finished: %s files (%s), %s kept, %s failed, in %s",
+                payload.restored_files,
+                humanize.bytes_(payload.restored_bytes),
+                payload.kept_existing,
+                len(payload.failures),
+                humanize.duration(payload.duration_seconds),
+            )
             self.restore_bar.configure(value=1000)
             self.restore_report = payload
             self.data.restore_done = True
@@ -1374,6 +1457,12 @@ class WinMigrateWizard:
             )
             self.capture_detail.configure(text=str(title))
         elif kind == "scanned":
+            totals = payload.totals()
+            log.info(
+                "scan finished: %s items, %s to capture",
+                len(payload.items),
+                humanize.bytes_(totals.capture_bytes),
+            )
             self.scan_bar.stop()
             self.scan_result = payload
             self.data.rows = selection.rows_for(payload)
@@ -1381,6 +1470,12 @@ class WinMigrateWizard:
             self.data.scan_done = True
             self._show(Step.SELECT)
         elif kind == "captured":
+            log.info(
+                "capture finished: %s (%s) in %s",
+                payload.bundle_path,
+                humanize.bytes_(payload.bundle_bytes),
+                humanize.duration(payload.duration_seconds),
+            )
             self.capture_bar.configure(value=1000)
             self.capture_report = payload
             self.data.capture_done = True

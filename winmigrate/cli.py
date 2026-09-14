@@ -156,6 +156,9 @@ def cmd_gui(args: argparse.Namespace, _console: Console) -> int:
             "include_notepad": args.include_notepad,
             "compression": args.compression,
             "elevation_attempted": args.elevation_attempted,
+            # main() has already configured logging for an explicit --log-file;
+            # the window adopts it rather than opening a second one.
+            "log_file": str(args.log_file) if args.log_file else "",
         }
     )
 
@@ -851,9 +854,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     console = Console(stderr=False, quiet=args.quiet)
-    logging_setup.configure(
+    log_path = logging_setup.configure(
         args.log_file, verbose=args.verbose, quiet=args.quiet, console=console
     )
+    if log_path is not None:
+        # Only when there is a file to put it in: the banner is for the record,
+        # not for the console, which the user is already looking at.
+        purpose = getattr(getattr(args, "func", None), "__name__", "run")
+        logging_setup.log_start_banner(purpose.replace("cmd_", ""))
     try:
         return args.func(args, console)
     except WinMigrateError as exc:

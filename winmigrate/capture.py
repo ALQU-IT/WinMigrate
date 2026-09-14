@@ -171,7 +171,7 @@ def capture(
         and (item.archive_path or "").startswith(SECRETS_PREFIX)
     )
 
-    shadow = _open_shadow_copy(scan, options, report)
+    shadow = _open_shadow_copy(scan, options, report, progress)
 
     algorithm, level = compression_mod.choose(
         options.compression, totals.compressible_bytes, totals.capture_bytes
@@ -244,13 +244,35 @@ def capture(
     return report
 
 
-def _open_shadow_copy(scan: ScanResult, options: CaptureOptions, report: CaptureReport):
-    """Try for a shadow copy; carry on without one, saying so."""
+def _open_shadow_copy(
+    scan: ScanResult,
+    options: CaptureOptions,
+    report: CaptureReport,
+    progress: ProgressCallback | None = None,
+):
+    """Try for a shadow copy; carry on without one, saying so.
+
+    This runs before a single byte is written, and on a busy machine Windows can
+    take minutes over it. Until now that time was spent in silence, in front of
+    a progress bar truthfully stopped at zero -- which is indistinguishable from
+    a hang, and was reported as one. So it says what it is waiting for, both on
+    screen and in the log.
+    """
     if not options.use_vss or not vss.is_windows():
         return None
     try:
         volume = vss.volume_of(scan.source.profile_path)
+        if progress is not None:
+            # Zero bytes: this moves the wording, not the bar. Nothing has been
+            # captured yet and the bar must not pretend otherwise.
+            # ASCII on purpose: this string is also a rich progress description
+            # on a console whose code page is often cp1252, where an em dash or
+            # an ellipsis is an encoding error instead of a word.
+            progress("asking Windows for a shadow copy (this can take a few minutes)", 0)
+        log.info("creating a shadow copy of %s (this can take several minutes)", volume)
+        started = time.monotonic()
         shadow = vss.create(volume)
+        log.info("shadow copy ready after %.0f s", time.monotonic() - started)
         if not vss.usable_for(shadow, scan.source.profile_path):
             # Reading through a snapshot that does not resolve fails every file.
             # Direct reads are what happens without administrator rights anyway,
@@ -268,6 +290,8 @@ def _open_shadow_copy(scan: ScanResult, options: CaptureOptions, report: Capture
             log.warning("shadow copy created but unusable; falling back to direct reads")
             return None
         report.used_shadow_copy = True
+        if progress is not None:
+            progress("shadow copy ready; starting the backup", 0)
         return shadow
     except vss.ShadowCopyError as exc:
         report.notes.append(

@@ -317,3 +317,88 @@ def test_a_path_that_is_not_there_blocks_the_button_with_a_reason(
     wizard._refresh_buttons()
     assert wizard.next_button.state == "disabled"
     assert "not there" in wizard.hint.cget("text")
+
+
+# --- the log ----------------------------------------------------------------
+def test_the_window_says_where_its_log_is_while_it_is_still_running(
+    monkeypatch, profile: Path, tmp_path: Path
+):
+    """A log nobody can find is worth as much as no log. The moment someone
+    wants it is the moment something looks wrong -- which is in the middle of a
+    capture, not after it -- so the rail carries it on every page, and the last
+    page carries the whole path.
+    """
+    log_path = tmp_path / "E_drive" / "winmigrate-20260914-120000.log"
+    log_path.parent.mkdir(parents=True)
+    wizard, _ = open_window(
+        monkeypatch, {"profile_root": str(profile), "log_path": str(log_path)}
+    )
+    wizard.use_vss.set(False)
+
+    assert log_path.name in wizard.log_label.cget("text")
+
+    wizard._show(Step.SCANNING)
+    assert pump(wizard) == "scanned"
+    output = tmp_path / "out.dat"
+    wizard.output_var.set(str(output))
+    wizard.passphrase.insert(0, "hunter2")
+    wizard.passphrase2.insert(0, "hunter2")
+    wizard._show(Step.WORKING)
+    assert pump(wizard) == "captured"
+
+    assert str(log_path) in wizard.done_text.cget("text")
+
+
+def test_a_window_without_a_log_says_nothing_rather_than_something_empty(
+    monkeypatch, profile: Path
+):
+    """No candidate folder would take a file. The window still opens and works;
+    it just has no log to point at, and must not point at one anyway."""
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+
+    assert wizard.log_path is None
+    assert wizard.log_label.cget("text") == ""
+
+
+def test_the_run_is_written_down_as_it_happens(monkeypatch, profile: Path, tmp_path: Path):
+    """The log is the answer to "it looked stuck": which phase was running, on
+    what, to where. Checked by capturing what the window actually logs during a
+    real backup rather than by reading the call sites."""
+    import logging
+
+    records: list[str] = []
+
+    class Collect(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = Collect()
+    logger = logging.getLogger("winmigrate.gui.app")
+    logger.addHandler(handler)
+    # What a real run gets from logging_setup.configure(), which the window
+    # calls before it opens: everything reaches the file, warnings reach the eye.
+    # setLevel, not logger.level = ...: the attribute alone leaves logging's
+    # own is-this-enabled cache holding the old answer, and the records vanish.
+    previous = logger.level
+    logger.setLevel(logging.DEBUG)
+    try:
+        wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+        wizard.use_vss.set(False)
+        wizard._show(Step.SCANNING)
+        assert pump(wizard) == "scanned"
+        output = tmp_path / "out.dat"
+        wizard.output_var.set(str(output))
+        wizard.passphrase.insert(0, "hunter2")
+        wizard.passphrase2.insert(0, "hunter2")
+        wizard._show(Step.WORKING)
+        assert pump(wizard) == "captured"
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous)
+
+    written = "\n".join(records)
+    assert "scan started" in written and "scan finished" in written
+    assert "capture started" in written and "capture finished" in written
+    assert str(output) in written
+    # The passphrase was typed into this run. It is not in what was written down.
+    assert "hunter2" not in written

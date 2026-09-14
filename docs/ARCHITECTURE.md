@@ -80,6 +80,14 @@ winmigrate/
   reinstall.py       the reinstall artifacts, and running winget/Office setup
   report.py          rich rendering of the preview, capture and restore reports
   errors.py          exception hierarchy
+  gui/
+    app.py           the window: pages, widgets and the two background workers
+    wizard.py        which page follows which, and when the button works
+    theme.py         palette, fonts, light/dark detection
+    selection.py     ScanResult/manifest -> tickable rows, and back
+    defaults.py      where the bundle is proposed: the drive it was started from
+    elevate.py       the one UAC prompt, asked before the scan
+    runlog.py        where the window's log goes, and its start banner
   util/
     paths.py         long-path handling, containment tests, %VAR% expansion
     hashing.py       sha256 and the sha256-tree-v1 directory digest
