@@ -79,6 +79,24 @@ class Environment:
         return cls(profile_root=Path(profile))
 
     @classmethod
+    def rooted(cls, profile_root: os.PathLike[str] | str) -> "Environment":
+        """The real machine, reading a profile other than the signed-in one.
+
+        Live registry, live platform -- only the profile paths are moved. The
+        caveat is inherent rather than a choice: HKCU is whichever user is
+        signed in, so account-shaped details (a browser's e-mail, OneDrive's
+        account) belong to them and not to the profile being read. Everything
+        machine-wide -- installed software, Office, where a browser is
+        installed -- is the same either way, and a fixture would have none of it.
+        """
+        root = Path(os.fspath(profile_root))
+        environ = dict(os.environ)
+        environ["USERPROFILE"] = str(root)
+        environ["APPDATA"] = str(root / "AppData" / "Roaming")
+        environ["LOCALAPPDATA"] = str(root / "AppData" / "Local")
+        return cls(profile_root=root, environ=environ)
+
+    @classmethod
     def fixture(
         cls,
         profile_root: os.PathLike[str] | str,

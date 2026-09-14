@@ -39,7 +39,7 @@ from .models import (
     Severity,
 )
 from .platform_win import HKCU, HKLM, Environment
-from .util import hashing
+from .util import hashing, paths as pathutil
 
 log = logging.getLogger(__name__)
 
@@ -332,6 +332,43 @@ BROWSER_EXECUTABLES: dict[str, str] = {
 
 APP_PATHS_KEY = r"Software\Microsoft\Windows\CurrentVersion\App Paths"
 
+#: Where each browser installs itself when ``App Paths`` cannot answer.
+#:
+#: It usually can, but not always: a browser installed for another user, one
+#: updated in a way that left the key stale, a machine where the key was never
+#: written. The cost of missing is that the button does nothing and the user is
+#: told to navigate there themselves -- which is the one job this had -- so the
+#: standard locations are worth trying before giving up. Per-user installs first
+#: for Chrome and Brave, which default to %LOCALAPPDATA%.
+WELL_KNOWN_INSTALLS: dict[str, tuple[str, ...]] = {
+    "chrome": (
+        r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe",
+        r"%ProgramFiles%\Google\Chrome\Application\chrome.exe",
+        r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe",
+    ),
+    "edge": (
+        r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe",
+        r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe",
+    ),
+    "brave": (
+        r"%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe",
+        r"%ProgramFiles%\BraveSoftware\Brave-Browser\Application\brave.exe",
+        r"%ProgramFiles(x86)%\BraveSoftware\Brave-Browser\Application\brave.exe",
+    ),
+    "vivaldi": (
+        r"%LOCALAPPDATA%\Vivaldi\Application\vivaldi.exe",
+        r"%ProgramFiles%\Vivaldi\Application\vivaldi.exe",
+    ),
+    "chromium": (
+        r"%LOCALAPPDATA%\Chromium\Application\chrome.exe",
+        r"%ProgramFiles%\Chromium\Application\chrome.exe",
+    ),
+    "firefox": (
+        r"%ProgramFiles%\Mozilla Firefox\firefox.exe",
+        r"%ProgramFiles(x86)%\Mozilla Firefox\firefox.exe",
+    ),
+}
+
 
 def browser_executable(target: ExportTarget, env: Environment) -> Path | None:
     """Where ``target``'s browser is installed, or None if it cannot be found.
@@ -349,6 +386,14 @@ def browser_executable(target: ExportTarget, env: Environment) -> Path | None:
             candidate = Path(raw.strip().strip('"'))
             if candidate.is_file():
                 return candidate
+    for pattern in WELL_KNOWN_INSTALLS.get(target.browser_key, ()):
+        # Forward slashes: Windows accepts them everywhere, and it is what lets
+        # this be exercised against a fixture tree on the machine it is written
+        # on rather than only on the machine it runs on.
+        candidate = Path(pathutil.to_posix(pathutil.expand(pattern, env.environ)))
+        if candidate.is_file():
+            log.info("%s found at its standard location, not in App Paths", target.browser_key)
+            return candidate
     return None
 
 

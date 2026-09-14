@@ -337,3 +337,60 @@ def test_a_file_that_is_not_an_export_is_refused_with_a_reason(tmp_path: Path):
 
     missing = passwords.ingest_csv(target, tmp_path / "nothing.csv", scan)
     assert not missing.ok and scan.items == []
+
+
+# --- finding the browser to open -------------------------------------------
+def test_the_browser_is_found_where_it_installs_itself_when_app_paths_is_silent(
+    tmp_path: Path,
+):
+    """App Paths usually answers, but not always -- a stale key, an install
+    done for another user. Missing means the button does nothing and the user
+    is told to navigate there themselves, which is the one job it had."""
+    program_files = tmp_path / "Program Files"
+    brave = program_files / "BraveSoftware" / "Brave-Browser" / "Application" / "brave.exe"
+    brave.parent.mkdir(parents=True)
+    brave.write_bytes(b"MZ")
+
+    env = Environment.fixture(
+        tmp_path / "profile", {}, {"ProgramFiles": str(program_files)}
+    )
+    target = passwords.ExportTarget(
+        browser_key="brave",
+        title="Brave",
+        engine="chromium",
+        export_page="brave://password-manager/settings",
+    )
+
+    assert passwords.browser_executable(target, env) == brave
+
+
+def test_the_registry_still_wins_when_it_has_an_answer(tmp_path: Path):
+    """App Paths is what Windows itself uses; a portable or relocated install is
+    only in there."""
+    installed = tmp_path / "Elsewhere" / "brave.exe"
+    installed.parent.mkdir(parents=True)
+    installed.write_bytes(b"MZ")
+    standard = tmp_path / "Program Files" / "BraveSoftware" / "Brave-Browser" / "Application"
+    standard.mkdir(parents=True)
+    (standard / "brave.exe").write_bytes(b"MZ")
+
+    env = Environment.fixture(
+        tmp_path / "profile",
+        {
+            f"HKLM\\{passwords.APP_PATHS_KEY}\\brave.exe": {"": f'"{installed}"'},
+        },
+        {"ProgramFiles": str(tmp_path / "Program Files")},
+    )
+    target = passwords.ExportTarget(
+        browser_key="brave", title="Brave", engine="chromium", export_page="x"
+    )
+
+    assert passwords.browser_executable(target, env) == installed
+
+
+def test_a_browser_that_is_not_installed_is_not_invented(tmp_path: Path):
+    env = Environment.fixture(tmp_path / "profile", {}, {"ProgramFiles": str(tmp_path / "pf")})
+    target = passwords.ExportTarget(
+        browser_key="brave", title="Brave", engine="chromium", export_page="x"
+    )
+    assert passwords.browser_executable(target, env) is None

@@ -652,3 +652,62 @@ def test_the_passwords_come_back_when_a_backup_is_restored(
     instructions = written(window.followup_box)
     assert "Import your Google Chrome passwords" in instructions
     assert "delete" in instructions.lower()
+
+
+# --- which machine the window is looking at ---------------------------------
+def windows_live(monkeypatch, profile: str):
+    """Pretend this is Windows, signed in as ``profile``."""
+    from winmigrate.platform_win import Environment
+
+    monkeypatch.delenv("WINMIGRATE_ALLOW_NON_WINDOWS", raising=False)
+    live = Environment(
+        profile_root=Path(profile),
+        environ={"USERPROFILE": profile},
+        registry=None,        # live reads
+        is_windows=True,
+    )
+    monkeypatch.setattr(Environment, "live", classmethod(lambda cls: live), raising=True)
+    return live
+
+
+def test_the_window_reads_the_real_machine_rather_than_a_fixture(monkeypatch):
+    """It handed back Environment.fixture() whenever the profile field held a
+    path -- which it always does, because the window fills it in with the
+    signed-in profile. A fixture has an empty registry and says it is not
+    Windows, so on a real machine every registry-backed part of a backup
+    quietly did nothing: the software inventory, Office, OneDrive's account,
+    the display layouts, and finding the browser to open on the passwords page.
+    """
+    # The window is built first: opening it reads the theme from the registry,
+    # and the machine these tests run on has none.
+    wizard, _ = open_window(monkeypatch, {"profile_root": r"C:\Users\alessio"})
+    live = windows_live(monkeypatch, r"C:\Users\alessio")
+
+    env = wizard._environment(wizard._config())
+
+    assert env is live
+    assert env.registry is None and env.is_windows is True
+
+
+def test_another_profile_on_a_real_machine_still_reads_that_machine(monkeypatch):
+    """Backing up a different account moves the profile paths. It does not turn
+    the registry off -- what is installed, and where, is machine-wide."""
+    wizard, _ = open_window(monkeypatch, {"profile_root": r"D:\OldDisk\Users\maria"})
+    windows_live(monkeypatch, r"C:\Users\alessio")
+
+    env = wizard._environment(wizard._config())
+
+    # registry=None means live reads rather than a fixture's empty dict; the
+    # platform stays whatever it really is, which is the point of not faking it.
+    assert env.registry is None
+    assert env.profile_root == Path(r"D:\OldDisk\Users\maria")
+    assert env.environ["USERPROFILE"] == r"D:\OldDisk\Users\maria"
+
+
+def test_a_fake_profile_tree_off_windows_is_still_a_fixture(monkeypatch, profile: Path):
+    """Developing this on Linux, and the Windows test runs, depend on it."""
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+
+    env = wizard._environment(wizard._config())
+
+    assert env.registry == {} and env.is_windows is False

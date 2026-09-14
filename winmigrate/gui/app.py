@@ -1596,11 +1596,31 @@ class WinMigrateWizard:
         return config
 
     def _environment(self, config: ScanConfig) -> Environment:
-        return (
-            Environment.fixture(config.profile_root)
-            if config.profile_root is not None
-            else Environment.live()
-        )
+        """The machine the window is actually running on.
+
+        This used to hand back ``Environment.fixture()`` whenever the profile
+        field held a path -- which it always does, because the window fills it
+        in with the signed-in profile. A fixture has an empty registry and
+        declares itself not to be Windows: that is what makes developing this
+        off Windows possible, and on a real machine it silently switched off
+        every registry-backed part of a backup. The installed-software
+        inventory, Office detection, OneDrive's account, the display layouts,
+        where a browser is installed -- all read nothing and reported nothing
+        wrong. The command line's --profile-root really is a development
+        switch, documented as one; the window's "Profile to back up" field is
+        not, and sharing one helper conflated them.
+        """
+        root = config.profile_root
+        if root is None:
+            return Environment.live()
+        live = Environment.live()
+        if not live.is_windows or os.environ.get("WINMIGRATE_ALLOW_NON_WINDOWS") == "1":
+            # A development run against a fake profile tree.
+            return Environment.fixture(root)
+        if pathutil.normalize_key(root) == pathutil.normalize_key(live.profile_root):
+            return live
+        # A real machine, a profile that is not the signed-in one.
+        return Environment.rooted(root)
 
     def _start_scan(self) -> None:
         config = self._config()
