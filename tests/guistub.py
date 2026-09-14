@@ -39,6 +39,7 @@ class Widget:
         self._children: list = []
         self._packed = True
         self._text = kwargs.get("text", "")
+        self._inserted: list[str] = []
 
     # -- geometry
     def pack(self, **kwargs):
@@ -78,7 +79,11 @@ class Widget:
         pass
 
     def insert(self, *args, **kwargs):
-        pass
+        # Text widgets are written into rather than configured, and what the
+        # restore page puts in the follow-up box -- "import these, then delete
+        # the file" -- is the actual output of a restore. Recorded so a test can
+        # read it.
+        self._inserted.extend(str(arg) for arg in args if isinstance(arg, str))
 
     def delete(self, *args, **kwargs):
         pass
@@ -256,6 +261,11 @@ def pump(wizard, until=("scanned", "captured", "opened", "open-failed", "restore
         if kind in until:
             return kind
     return "too many events"
+
+
+def written(widget) -> str:
+    """Everything inserted into a Text widget, as one string."""
+    return "".join(widget._inserted)
 
 
 def rail(wizard) -> list[str]:

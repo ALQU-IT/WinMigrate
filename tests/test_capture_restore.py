@@ -188,6 +188,54 @@ def test_a_single_item_can_be_restored_on_its_own(captured, tmp_path: Path):
     assert not (destination / "Documents").exists()
 
 
+def test_a_single_file_item_can_be_restored_on_its_own(
+    profile: Path, env: Environment, tmp_path: Path
+):
+    """Selecting by id matched ``archive_path + "/"``, which is how a tree's
+    members are named -- and how a *file's* member is not. Every single-file
+    item was therefore dropped from any restore that selected anything, the
+    window's included, since it always names what it is putting back. The one
+    that hurt was the password export the user had just gone through their
+    browser to produce: listed, ticked, and silently not written.
+    """
+    from winmigrate import passwords as passwords_mod
+
+    config = ScanConfig(profile_root=profile)
+    scan = run_scan(config, env)
+    export = tmp_path / "chrome.csv"
+    export.write_text("url,username,password\nhttps://x,me,pw\n", encoding="utf-8")
+    target = passwords_mod.ExportTarget(
+        browser_key="chrome",
+        title="Google Chrome",
+        engine="chromium",
+        export_page="chrome://password-manager/settings",
+    )
+    staged = passwords_mod.ingest_csv(target, export, scan)
+    assert staged.ok
+
+    output = tmp_path / "out" / "with-passwords.dat"
+    capture_mod.capture(
+        scan, CaptureOptions(output=output, passphrase=PASSPHRASE, use_vss=False), config, env
+    )
+
+    destination = tmp_path / "one"
+    result = restore_mod.restore(
+        RestoreOptions(
+            bundle=output,
+            passphrase=PASSPHRASE,
+            destination=destination,
+            items=(staged.item.id,),
+        )
+    )
+
+    written = destination / "WinMigrate-Passwords" / "chrome-passwords.csv"
+    assert result.restored_files == 1
+    assert written.is_file()
+    assert "https://x" in written.read_text(encoding="utf-8")
+    # Selecting one item still means one item.
+    assert not (destination / "Documents").exists()
+
+
 def test_selecting_an_unknown_item_is_an_error(captured, tmp_path: Path):
     report, _scan = captured
     with pytest.raises(RestoreError, match="no such item"):

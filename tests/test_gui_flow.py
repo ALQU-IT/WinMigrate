@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from guistub import open_window, pump, rail
+from guistub import open_window, pump, rail, written
 from winmigrate import capture as capture_mod
 from winmigrate import restore as restore_mod
 from winmigrate.capture import CaptureOptions
@@ -594,3 +594,61 @@ def test_files_only_mode_has_nothing_to_offer_and_says_which(monkeypatch, profil
 
     assert wizard.password_rows == {}
     assert "files-only" in wizard.passwords_intro.cget("text").lower()
+
+
+def test_the_passwords_come_back_when_a_backup_is_restored(
+    monkeypatch, profile: Path, tmp_path: Path
+):
+    """The round trip, driven through the window both ways. Restoring listed the
+    export, ticked it, reported it restored -- and wrote nothing, because the
+    window always names what it is putting back and naming a single file matched
+    no member at all. What comes back is the plaintext CSV in a folder of its
+    own, plus the instruction to import it and delete it: WinMigrate does not
+    put passwords into a browser, which is a thing only the person can do.
+    """
+    chrome_with_local_passwords(profile)
+    export = tmp_path / "Chrome Passwords.csv"
+    export.write_text(
+        "url,username,password\nhttps://secretsite.test,me,swordfish\n", encoding="utf-8"
+    )
+    bundle_path = tmp_path / "b.dat"
+
+    backup, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    backup.use_vss.set(False)
+    backup._show(Step.SCANNING)
+    assert pump(backup) == "scanned"
+    backup._show(Step.PASSWORDS)
+    backup._ingest_password_csv("chrome", export)
+    backup.output_var.set(str(bundle_path))
+    backup.passphrase.insert(0, "hunter2")
+    backup.passphrase2.insert(0, "hunter2")
+    backup._show(Step.WORKING)
+    assert pump(backup) == "captured"
+
+    destination = tmp_path / "new"
+    destination.mkdir()
+    window, _ = open_window(monkeypatch, {})
+    window.mode_var.set(Mode.RESTORE.value)
+    window.bundle_var.set(str(bundle_path))
+    window.bundle_passphrase.insert(0, "hunter2")
+    window._show(Step.OPENING)
+    assert pump(window) == "opened"
+
+    # Listed, and marked as the secret it is, so it can be left off a shared
+    # machine deliberately rather than by accident.
+    row = next(
+        r for r in window.data.restore_rows if r.item_id == "browser:passwords-csv:chrome"
+    )
+    assert row.secret is True and row.item_id in window.data.restore_selected
+
+    window.destination_var.set(str(destination))
+    window._show(Step.RESTORING)
+    assert pump(window) == "restored"
+
+    restored = destination / "WinMigrate-Passwords" / "chrome-passwords.csv"
+    assert restored.is_file()
+    assert "swordfish" in restored.read_text(encoding="utf-8")
+    # And the last page says what is left for the person to do.
+    instructions = written(window.followup_box)
+    assert "Import your Google Chrome passwords" in instructions
+    assert "delete" in instructions.lower()

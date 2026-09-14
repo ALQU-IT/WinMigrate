@@ -180,9 +180,7 @@ def restore(options: RestoreOptions, progress: ProgressCallback | None = None) -
             if info.name == manifest_mod.MANIFEST_ARCHIVE_NAME:
                 report.manifest = _load_manifest(stream)
                 continue
-            if prefixes is not None and not any(
-                info.name.startswith(f"{prefix}/") for prefix in prefixes
-            ):
+            if prefixes is not None and not _wanted(info.name, prefixes):
                 continue
             _restore_member(
                 info, stream, destination, options, report, written,
@@ -364,6 +362,19 @@ def _selected_prefixes(options: RestoreOptions, bundle_path: Path) -> list[str] 
             "nothing to restore from them"
         )
     return list(prefixes.values())
+
+
+def _wanted(name: str, prefixes: list[str]) -> bool:
+    """Is this archive member part of one of the selected items?
+
+    A tree's archive path is a directory and its members sit under it; a single
+    file's archive path *is* the member name. Matching only ``prefix + "/"``
+    therefore let every tree through and silently dropped every file -- the
+    password export a user had just gone through their browser to produce
+    included. The trailing slash is still what separates a real child from a
+    sibling whose name merely starts the same way.
+    """
+    return any(name == prefix or name.startswith(f"{prefix}/") for prefix in prefixes)
 
 
 def _prefixes_from(entries: list[dict[str, Any]], wanted: tuple[str, ...]) -> dict[str, str]:
