@@ -33,7 +33,7 @@ from pathlib import Path
 from . import __version__
 from . import bundle as bundle_mod
 from . import compression as compression_mod
-from . import crypto, manifest as manifest_mod, vss
+from . import crypto, keepawake, manifest as manifest_mod, vss
 from .config import ScanConfig
 from .errors import WinMigrateError
 from .models import Action, Item, Kind, Note, ScanResult, Severity, utcnow
@@ -199,7 +199,12 @@ def capture(
     }
 
     try:
-        with bundle_mod.BundleWriter(output, options.passphrase, header) as writer:
+        # Held for the whole write. An hour-long capture on a laptop that sleeps
+        # at thirty minutes is a bundle that stops halfway with nothing on
+        # screen in the morning to say why.
+        with keepawake.KeepAwake("capture"), bundle_mod.BundleWriter(
+            output, options.passphrase, header
+        ) as writer:
             for item in scan.items:
                 if item.action is not Action.CAPTURE or item.kind not in {Kind.TREE, Kind.FILE}:
                     continue

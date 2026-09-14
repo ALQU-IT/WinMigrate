@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import bundle as bundle_mod
+from . import keepawake
 from . import manifest as manifest_mod
 from .errors import IntegrityError, WinMigrateError
 from .models import Followup, Note, Severity
@@ -60,6 +61,10 @@ class RestoreOptions:
     dry_run: bool = False
     overwrite: bool = False           # replace files that differ, instead of keeping them
     items: tuple[str, ...] = ()       # restore only these item ids
+    #: Re-apply the settings that need no identity -- Wi-Fi, network printers,
+    #: mapped drives, environment variables. On by default: re-adding eleven
+    #: printers by hand is not consent, it is tedium.
+    apply_settings: bool = True
 
 
 @dataclass(slots=True)
@@ -77,6 +82,8 @@ class RestoreReport:
     failures: list[tuple[str, str]] = field(default_factory=list)
     followups: list[Followup] = field(default_factory=list)
     artifacts: object | None = None    # reinstall.Artifacts, when there was software
+    #: apply.Result for each setting re-applied, skipped or failed.
+    applied: list = field(default_factory=list)
     notes: list[Note] = field(default_factory=list)
     duration_seconds: float = 0.0
     manifest: dict | None = None
@@ -164,7 +171,9 @@ def restore(options: RestoreOptions, progress: ProgressCallback | None = None) -
     # items by id has to be resolved from the sidecar before extraction starts.
     prefixes = _selected_prefixes(options, bundle_path)
 
-    with bundle_mod.BundleReader(bundle_path, options.passphrase) as reader:
+    with keepawake.KeepAwake("restore"), bundle_mod.BundleReader(
+        bundle_path, options.passphrase
+    ) as reader:
         for info, stream in reader.members():
             if not info.isfile() or stream is None:
                 continue
@@ -189,8 +198,60 @@ def restore(options: RestoreOptions, progress: ProgressCallback | None = None) -
     _collect_followups(report)
     if not options.dry_run:
         _write_reinstall_artifacts(report, destination)
+        if options.apply_settings:
+            _apply_settings(report, destination)
     report.duration_seconds = time.monotonic() - started
     return report
+
+
+#: Where the Wi-Fi profiles land, matching the archive prefix capture uses.
+WIFI_RESTORE_DIR = "WinMigrate-WiFi"
+
+
+def _apply_settings(report: RestoreReport, destination: Path) -> None:
+    """Re-apply the settings that need no identity.
+
+    Deliberately last: files first, then the settings that point at them. And
+    deliberately forgiving -- a printer whose driver is missing is a line in the
+    report, not a failed restore. The files are already on disk by this point
+    and nothing here can take them away again.
+    """
+    from . import apply as apply_mod  # noqa: PLC0415 -- keeps the import off the scan path
+
+    manifest = report.manifest or {}
+    records = {
+        item.get("id"): item.get("record")
+        for item in manifest.get("items", [])
+        if isinstance(item, dict) and isinstance(item.get("record"), dict)
+    }
+
+    try:
+        report.applied.extend(apply_mod.apply_wifi(destination / WIFI_RESTORE_DIR))
+        if "settings:printers" in records:
+            report.applied.extend(apply_mod.apply_printers(records["settings:printers"]))
+        if "settings:mapped_drives" in records:
+            report.applied.extend(apply_mod.apply_mapped_drives(records["settings:mapped_drives"]))
+        if "settings:env_vars" in records:
+            report.applied.extend(apply_mod.apply_environment(records["settings:env_vars"]))
+    except Exception as exc:  # noqa: BLE001 -- the restore itself already succeeded
+        log.warning("could not re-apply settings", exc_info=True)
+        report.notes.append(
+            Note(
+                Severity.WARNING,
+                "some settings could not be re-applied automatically",
+                f"{type(exc).__name__}: {exc}. The follow-up list has them.",
+            )
+        )
+
+    failures = [result for result in report.applied if not result.ok]
+    if failures:
+        report.notes.append(
+            Note(
+                Severity.WARNING,
+                f"{len(failures)} setting(s) could not be re-applied",
+                "They are listed in the report; each can be done by hand.",
+            )
+        )
 
 
 def _default_profile() -> Path:

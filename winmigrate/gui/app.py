@@ -264,7 +264,13 @@ class WinMigrateWizard:
 
     def _page_choose(self, page: Any) -> None:
         tk, ttk = self.tk, self.ttk
-        self.mode_var = tk.StringVar(value=Mode.BACKUP.value)
+        # A backup sitting in the same folder as the program is a strong signal
+        # about why someone is here: they have carried a USB drive to the new
+        # machine and plugged it in. Defaulting to backup in that situation is
+        # the wrong guess, and the wrong guess is the one that writes files.
+        self.found_bundles = defaults.bundles_beside_program()
+        opening = Mode.RESTORE.value if self.found_bundles else Mode.BACKUP.value
+        self.mode_var = tk.StringVar(value=opening)
         for value, heading, blurb in (
             (
                 Mode.BACKUP.value,
@@ -289,6 +295,19 @@ class WinMigrateWizard:
             ).pack(anchor="w", pady=(14, 0))
             ttk.Label(page, text="     " + blurb, style="Hint.TLabel", wraplength=600,
                       justify="left").pack(anchor="w")
+            if value == Mode.RESTORE.value and self.found_bundles:
+                found = defaults.describe_bundle_file(self.found_bundles[0])
+                extra = (
+                    f" (and {len(self.found_bundles) - 1} more)"
+                    if len(self.found_bundles) > 1 else ""
+                )
+                ttk.Label(
+                    page,
+                    text=f"     Found here: {found}{extra}",
+                    style="Good.TLabel",
+                    wraplength=600,
+                    justify="left",
+                ).pack(anchor="w")
 
     def _page_source(self, page: Any) -> None:
         tk, ttk = self.tk, self.ttk
@@ -643,6 +662,8 @@ class WinMigrateWizard:
 
     def _on_enter(self, step: Step) -> None:
         if step is Step.SOURCE:
+            if not self.bundle_var.get() and getattr(self, "found_bundles", None):
+                self.bundle_var.set(str(self.found_bundles[0]))
             self._describe_bundle()
         elif step is Step.OPENING:
             self.open_bar.start(14)

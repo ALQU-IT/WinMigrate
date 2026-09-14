@@ -9,6 +9,7 @@ registry dictionary, so the scan logic itself is exercised on any OS.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from dataclasses import dataclass, field
@@ -30,6 +31,8 @@ CLOUD_PLACEHOLDER_MASK = (
     | FILE_ATTRIBUTE_RECALL_ON_OPEN
     | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
 )
+
+log = logging.getLogger(__name__)
 
 HKCU = "HKCU"
 HKLM = "HKLM"
@@ -105,6 +108,34 @@ class Environment:
         if not self.is_windows:
             return None
         return self._read_live_registry_key(hive, key)
+
+    def write_registry_value(self, hive: str, key: str, name: str, value: str) -> bool:
+        """Write one string value. True when it was written.
+
+        The only write in the whole Environment, and deliberately narrow: one
+        value at a time, strings only, and against a fixture it records the
+        write rather than performing one. Everything else here reads.
+        """
+        if self.registry is not None:
+            self.registry.setdefault(f"{hive}\\{key}", {})[name] = value
+            return True
+        if not self.is_windows:
+            return False
+        import winreg  # noqa: PLC0415 -- Windows-only import
+
+        try:
+            with winreg.CreateKeyEx(
+                self._hive(hive), key, 0, winreg.KEY_SET_VALUE
+            ) as handle:
+                # REG_EXPAND_SZ so a value containing %USERPROFILE% keeps
+                # meaning what it meant, rather than being frozen to the path it
+                # happened to have on the machine it came from.
+                kind = winreg.REG_EXPAND_SZ if "%" in value else winreg.REG_SZ
+                winreg.SetValueEx(handle, name, 0, kind, value)
+            return True
+        except OSError as exc:
+            log.warning("could not write %s\\%s\\%s: %s", hive, key, name, exc)
+            return False
 
     def registry_subkeys(self, hive: str, key: str) -> list[str]:
         """List subkey names, empty when the key does not exist."""

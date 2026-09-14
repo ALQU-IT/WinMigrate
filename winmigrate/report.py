@@ -428,6 +428,8 @@ def render_restore_report(report, console: Console, *, dry_run: bool | None = No
             Panel("\n".join(lines), title="Software — nothing installed yet", border_style="cyan")
         )
 
+    render_applied_settings(getattr(report, "applied", []), console)
+
     if report.followups:
         console.print()
         console.print("[bold]Now finish these yourself — they need your identity, not the tool's:[/bold]")
@@ -499,3 +501,111 @@ def render_bundle_summary(header: dict, sidecar: dict | None, console: Console) 
         console.print(f"\n[bold]{len(followups)} follow-up(s) after restoring:[/bold]")
         for followup in followups:
             console.print(f"  • {followup.get('title', '')}")
+
+
+def render_verify_report(verify_report, console: Console) -> None:
+    """What reading a bundle back established.
+
+    Written to be read by someone with a reformat pending. The headline is
+    whether they can go ahead; everything else is detail underneath it.
+    """
+    lines = [
+        f"checked: {verify_report.files_checked:,} files, "
+        f"{humanize.bytes_(verify_report.bytes_checked)}",
+        f"items verified against their recorded digest: {verify_report.items_checked}",
+    ]
+    if verify_report.sidecar_verified:
+        lines.append("the bundle also matches the digest in its sidecar")
+    lines.append(f"took {humanize.duration(verify_report.duration_seconds)}")
+
+    if verify_report.ok:
+        console.print(
+            Panel(
+                "\n".join(lines),
+                title="Verified — the bundle opens and everything in it matches",
+                title_align="left",
+                border_style="green",
+            )
+        )
+    else:
+        console.print(
+            Panel(
+                "\n".join(lines),
+                title="This bundle is not trustworthy",
+                title_align="left",
+                border_style="red",
+            )
+        )
+
+    if verify_report.mismatches:
+        table = Table(
+            title=f"Contents do not match what was recorded ({len(verify_report.mismatches)})",
+            title_justify="left",
+        )
+        table.add_column("Item")
+        for item_id in verify_report.mismatches[:20]:
+            table.add_row(item_id)
+        console.print(table)
+    if verify_report.missing:
+        table = Table(
+            title=f"Listed in the manifest, absent from the archive "
+            f"({len(verify_report.missing)})",
+            title_justify="left",
+        )
+        table.add_column("Item")
+        for item_id in verify_report.missing[:20]:
+            table.add_row(item_id)
+        console.print(table)
+    if verify_report.unchecked:
+        console.print(
+            f"[dim]{len(verify_report.unchecked)} item(s) carry no recorded digest and "
+            f"could not be compared.[/dim]"
+        )
+    if not verify_report.ok:
+        console.print(
+            "[red]Do not rely on this bundle, and do not wipe the machine it came "
+            "from.[/red] Capture again, to a different drive if this one may be at "
+            "fault."
+        )
+
+
+def render_applied_settings(applied, console: Console) -> None:
+    """What was re-applied, what was left, and what refused.
+
+    Shown even when everything worked. A setting silently applied is
+    indistinguishable from one silently skipped, and a tool whose premise is
+    showing its work does not get to go quiet at the point where it changes the
+    machine.
+    """
+    if not applied:
+        return
+    from .apply import Outcome  # noqa: PLC0415
+
+    done = [r for r in applied if r.outcome is Outcome.APPLIED]
+    skipped = [r for r in applied if r.outcome is Outcome.SKIPPED]
+    failed = [r for r in applied if r.outcome is Outcome.FAILED]
+
+    if done:
+        console.print(
+            f"[green]Re-applied {len(done)} setting(s)[/green] "
+            f"[dim]— Wi-Fi networks, printers, drives and variables need no "
+            f"sign-in, so they were done for you.[/dim]"
+        )
+    if failed:
+        table = Table(
+            title=f"Could not re-apply ({len(failed)})", title_justify="left"
+        )
+        table.add_column("Setting")
+        table.add_column("Why")
+        for result in failed[:20]:
+            table.add_row(f"{result.kind}: {result.name}", result.detail or "—")
+        console.print(table)
+    if skipped:
+        table = Table(
+            title=f"Left for you ({len(skipped)})", title_justify="left"
+        )
+        table.add_column("Setting")
+        table.add_column("Why")
+        for result in skipped[:20]:
+            table.add_row(f"{result.kind}: {result.name}", result.detail or "—")
+        console.print(table)

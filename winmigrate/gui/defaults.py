@@ -73,3 +73,60 @@ def same_drive(one: os.PathLike[str] | str, other: os.PathLike[str] | str) -> bo
     first = PureWindowsPath(str(one)).drive.upper()
     second = PureWindowsPath(str(other)).drive.upper()
     return bool(first) and first == second
+
+
+#: A bundle is always written with this extension, and its sidecar sits beside
+#: it with the same stem.
+BUNDLE_SUFFIX = ".dat"
+
+
+def bundles_beside_program(directory=None) -> list[Path]:
+    """Backups sitting in the folder WinMigrate is running from, newest first.
+
+    The second half of a migration is done on the new machine, usually standing
+    over it with a USB drive plugged in, and the backup is on that drive next to
+    the program. Making someone choose a mode and then browse for a file they
+    are already standing on is two steps that exist only because they were easy
+    to write.
+
+    A file is only offered if its plaintext sidecar is beside it. That is not
+    fussiness: without the sidecar there is no transfer check and no way to say
+    anything about the bundle before the passphrase is typed, and something that
+    merely ends in .dat is as likely to be someone else's data file.
+    """
+    directory = Path(directory) if directory is not None else program_directory()
+    try:
+        candidates = [
+            path
+            for path in directory.iterdir()
+            if path.is_file() and path.suffix.lower() == BUNDLE_SUFFIX
+        ]
+    except OSError:
+        return []
+    found = [path for path in candidates if path.with_suffix(".manifest.json").is_file()]
+    found.sort(key=_sort_key, reverse=True)
+    return found
+
+
+def _sort_key(path: Path) -> float:
+    """Newest first, by the file's own timestamp rather than its name.
+
+    The default name carries a timestamp, but a bundle someone renamed should
+    still sort sensibly rather than falling to the bottom.
+    """
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def describe_bundle_file(path: Path) -> str:
+    """One line for a chooser: the name, its size, and when it was made."""
+    from ..util import humanize  # noqa: PLC0415
+
+    try:
+        stat = path.stat()
+    except OSError:
+        return path.name
+    made = datetime.fromtimestamp(stat.st_mtime).strftime("%d %b %Y, %H:%M")
+    return f"{path.name} — {humanize.bytes_(stat.st_size)}, {made}"

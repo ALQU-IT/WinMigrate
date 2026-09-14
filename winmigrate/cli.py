@@ -83,6 +83,17 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_parser.add_argument("--json", action="store_true", help="raw header and sidecar as JSON")
     inspect_parser.set_defaults(func=cmd_inspect)
 
+    verify_parser = subparsers.add_parser(
+        "verify",
+        parents=[common],
+        help="read a bundle back and check every file against its manifest",
+    )
+    verify_parser.add_argument("bundle", type=Path)
+    verify_parser.add_argument(
+        "--passphrase-file", type=Path, help="read the passphrase from this file"
+    )
+    verify_parser.set_defaults(func=cmd_verify)
+
     restore_parser = subparsers.add_parser(
         "restore", parents=[common], help="restore a bundle onto this machine"
     )
@@ -191,6 +202,12 @@ def _add_capture_arguments(parser: argparse.ArgumentParser) -> None:
         help="write even if the destination looks too small",
     )
     parser.add_argument(
+        "--verify",
+        action="store_true",
+        help="read the bundle back afterwards and check every file against its "
+        "manifest, so the source machine can be wiped on more than hope",
+    )
+    parser.add_argument(
         "--compression",
         choices=compression_mod.CHOICES,
         default="auto",
@@ -236,6 +253,13 @@ def _add_restore_arguments(parser: argparse.ArgumentParser) -> None:
         default=[],
         metavar="ID",
         help="restore only this item id (repeatable)",
+    )
+    parser.add_argument(
+        "--no-apply-settings",
+        dest="apply_settings",
+        action="store_false",
+        help="do not re-add Wi-Fi networks, printers, mapped drives or environment "
+        "variables; list them for you to do by hand instead",
     )
 
 
@@ -505,6 +529,20 @@ def cmd_capture(args: argparse.Namespace, console: Console) -> int:
 
     _shred_password_csvs(shred_after, console)
     report.render_capture_report(capture_report, console)
+
+    if getattr(args, "verify", False):
+        from . import verify as verify_mod  # noqa: PLC0415
+
+        with console.status("[cyan]reading the bundle back…") as status:
+            def on_verify(name: str, _size: int) -> None:
+                status.update(f"[cyan]checking {Path(name).name}…")
+
+            verify_report = verify_mod.verify(
+                capture_report.bundle_path, passphrase, on_verify
+            )
+        report.render_verify_report(verify_report, console)
+        if not verify_report.ok:
+            return 3
     # 3, not 0: the bundle is valid and worth keeping, but it is not the whole
     # plan, and a script that moves it to the NAS and wipes the source machine
     # has to be able to tell the difference.
@@ -665,6 +703,24 @@ def cmd_inspect(args: argparse.Namespace, console: Console) -> int:
     return 0
 
 
+def cmd_verify(args: argparse.Namespace, console: Console) -> int:
+    """Decrypt a bundle and check it, writing nothing.
+
+    The question someone asks before reformatting a laptop is not "did this file
+    arrive intact" but "does it open, and is everything in it still what it was".
+    """
+    from . import verify as verify_mod  # noqa: PLC0415
+
+    passphrase = _read_passphrase(args, confirm=False)
+    with console.status("[cyan]reading the bundle back…") as status:
+        def on_progress(name: str, _size: int) -> None:
+            status.update(f"[cyan]checking {Path(name).name}…")
+
+        verify_report = verify_mod.verify(Path(args.bundle), passphrase, on_progress)
+    report.render_verify_report(verify_report, console)
+    return 0 if verify_report.ok else 3
+
+
 def cmd_restore(args: argparse.Namespace, console: Console) -> int:
     require_windows(allow_override=args.destination is not None or _override_allowed())
     passphrase = _read_passphrase(args, confirm=False)
@@ -675,6 +731,7 @@ def cmd_restore(args: argparse.Namespace, console: Console) -> int:
         dry_run=args.dry_run,
         overwrite=args.overwrite,
         items=tuple(args.item),
+        apply_settings=getattr(args, "apply_settings", True),
     )
     with console.status("[cyan]restoring…"):
         restore_report = restore_mod.restore(options)
