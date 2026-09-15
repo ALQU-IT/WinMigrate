@@ -211,3 +211,138 @@ def test_inspect_reads_the_header_without_a_passphrase(tmp_path: Path):
     assert header["kdf"]["salt_b64"]
     # The header describes how to derive a key, never what is inside.
     assert not any(key in header for key in ("items", "source", "totals", "payload"))
+
+
+# --- the report must describe what the restore actually did ----------------
+def _report_with(followups, applied):
+    report = restore_mod.RestoreReport(bundle=Path("b.dat"))
+    report.followups = list(followups)
+    report.applied = list(applied)
+    return report
+
+
+def _guided(item_id: str, title: str, steps: list[str]):
+    from winmigrate.models import Followup
+
+    return Followup(id=f"{item_id}:guided", title=f"Re-apply: {title}", why="", steps=steps)
+
+
+def test_a_followup_the_restore_carried_out_is_taken_back():
+    """The follow-up list is written when the backup is made, and nothing there
+    knows what the restore will manage on its own. A machine whose drives had
+    been re-mapped two seconds earlier was still told, under a heading reading
+    "These need you rather than the tool", to go and map them by hand."""
+    from winmigrate.apply import Outcome, Result
+
+    report = _report_with(
+        [_guided("settings:mapped_drives", "Mapped network drives (1)",
+                 ["Reconnect each with: net use <letter>: <path>"])],
+        [Result("drive", r"Z: \\server\share", Outcome.APPLIED)],
+    )
+
+    restore_mod._settle_followups(report)
+
+    assert report.followups == []
+
+
+def test_a_followup_only_half_done_names_the_half_that_is_left():
+    """The danger is not the extra line, it is that the finished work buries
+    the one thing that really was left undone."""
+    from winmigrate.apply import Outcome, Result
+
+    report = _report_with(
+        [_guided("settings:env_vars", "User environment variables (4)",
+                 ["Set each with setx, or via System -> Environment Variables."])],
+        [
+            Result("env", "MYTOKEN", Outcome.APPLIED),
+            Result("env", "EDITOR", Outcome.APPLIED),
+            Result("env", "TEMP", Outcome.SKIPPED, "describes the machine rather than you"),
+            Result("env", "Path", Outcome.FAILED, "access denied"),
+        ],
+    )
+
+    restore_mod._settle_followups(report)
+
+    (left,) = report.followups
+    assert left.title == "Re-apply: User environment variables -- 2 of 4 still to do"
+    assert "2 of 4 were re-applied" in left.why
+    assert left.steps[:2] == [
+        "TEMP -- describes the machine rather than you",
+        "Path -- access denied",
+    ]
+    # The names of what is left, never their values: an environment variable can
+    # hold a token, which is why its record is encrypted-only in the first place.
+    assert not any("setx" in step for step in left.steps[:2])
+
+
+def test_by_hand_instructions_come_back_only_when_something_really_failed():
+    """"Set each with setx" is not merely unnecessary for a variable that was
+    left on purpose -- for a user PATH, which lists where software lived on the
+    old machine, following it breaks the new one."""
+    from winmigrate.apply import Outcome, Result
+
+    report = _report_with(
+        [_guided("settings:env_vars", "User environment variables (2)",
+                 ["Set each with setx, or via System -> Environment Variables."])],
+        [
+            Result("env", "Path", Outcome.SKIPPED, "describes the machine rather than you"),
+            Result("env", "TEMP", Outcome.SKIPPED, "describes the machine rather than you"),
+        ],
+    )
+
+    restore_mod._settle_followups(report)
+
+    (left,) = report.followups
+    assert left.why.startswith("The restore applied none of these")
+    assert not any("setx" in step for step in left.steps)
+
+
+def test_a_dry_run_leaves_every_instruction_standing():
+    """It applied nothing, so there is nothing to take back -- and the same goes
+    for --no-apply-settings and for a record this restore did not select."""
+    report = _report_with(
+        [_guided("settings:printers", "Printers (2)", ["Re-add them by UNC path."])],
+        [],
+    )
+
+    restore_mod._settle_followups(report)
+
+    assert len(report.followups) == 1
+    assert report.followups[0].steps == ["Re-add them by UNC path."]
+
+
+def test_a_followup_that_needs_a_person_is_never_taken_back():
+    """Signing in to Steam is not something an apply result can settle, whatever
+    else was applied in the same restore."""
+    from winmigrate.apply import Outcome, Result
+    from winmigrate.models import Followup
+
+    report = _report_with(
+        [Followup(id="launcher:steam", title="Sign in to Steam", why="", steps=["Sign in."])],
+        [Result("drive", "Z:", Outcome.APPLIED)],
+    )
+
+    restore_mod._settle_followups(report)
+
+    assert len(report.followups) == 1
+
+
+def test_the_two_ends_of_the_guided_followup_id_still_agree():
+    """restore matches a follow-up to the record it answers by string id. The
+    scan mints that id, apply consumes it, and nothing but this test holds the
+    two conventions together -- which is the shape of seam that produced the
+    netsh quoting bug."""
+    from winmigrate.models import Category, Item, Kind, RestoreSpec, RestoreStrategy
+    from winmigrate.scan import syssettings
+
+    for record_id in restore_mod.APPLIED_KINDS:
+        minted = syssettings._guided_followup(
+            Item(
+                id=record_id,
+                category=Category.ENV_VARS,
+                kind=Kind.RECORD,
+                title="x",
+                restore=RestoreSpec(target="t", strategy=RestoreStrategy.GUIDED),
+            )
+        )
+        assert minted.id == record_id + restore_mod.GUIDED_SUFFIX

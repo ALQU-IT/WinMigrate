@@ -268,7 +268,8 @@ def apply_environment(record: dict[str, Any], env=None) -> list[Result]:
         if name.lower() in MACHINE_OWNED_VARS:
             results.append(
                 Result("env", name, Outcome.SKIPPED,
-                       "describes the machine rather than you; the old value is in the report")
+                       "describes the machine rather than you, so the new machine's "
+                       "own value was left alone")
             )
             continue
         try:

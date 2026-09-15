@@ -26,7 +26,7 @@ import shutil
 import time
 from collections.abc import Callable
 from typing import Any
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from . import bundle as bundle_mod
@@ -203,6 +203,7 @@ def restore(options: RestoreOptions, progress: ProgressCallback | None = None) -
         _write_reinstall_artifacts(report, destination)
         if options.apply_settings:
             _apply_settings(report, destination, options.items)
+            _settle_followups(report)
     report.duration_seconds = time.monotonic() - started
     return report
 
@@ -253,6 +254,96 @@ def programs_to_close(manifest: dict[str, Any], wanted: tuple[str, ...] = ()) ->
         if title:
             names.add(title)
     return sorted(names)
+
+
+#: Which record each kind of applied setting comes from, and so which follow-up
+#: it answers. The follow-up's id is the record's with ``:guided`` on the end --
+#: :func:`winmigrate.scan.syssettings._guided_followup` mints it that way, and a
+#: test holds the two conventions together, because a seam that only a string
+#: match joins is exactly where this kind of thing rots.
+APPLIED_KINDS: dict[str, str] = {
+    "settings:env_vars": "env",
+    "settings:mapped_drives": "drive",
+    "settings:printers": "printer",
+}
+
+GUIDED_SUFFIX = ":guided"
+
+
+def _settle_followups(report: RestoreReport) -> None:
+    """Take back the instructions the restore has just carried out.
+
+    The follow-up list is written when the *backup* is made, and nothing at
+    that point knows what the restore will manage on its own. So a machine
+    whose drives had been re-mapped and whose variables had been set two
+    seconds earlier was still told, under a heading reading "These need you
+    rather than the tool", to go and do both by hand.
+
+    That is worse than saying nothing. It sends someone to redo finished work,
+    and in doing so it buries the one line among them that really was left
+    undone. A restore report has one job -- to say what happened -- and a list
+    that cannot tell "done" from "your turn" is not doing it.
+    """
+    from .apply import Outcome  # noqa: PLC0415 -- keeps the import off the scan path
+
+    by_kind: dict[str, list] = {}
+    for result in report.applied:
+        by_kind.setdefault(result.kind, []).append(result)
+
+    kept: list[Followup] = []
+    for followup in report.followups:
+        if not followup.id.endswith(GUIDED_SUFFIX):
+            kept.append(followup)
+            continue
+        record_id = followup.id[: -len(GUIDED_SUFFIX)]
+        results = by_kind.get(APPLIED_KINDS.get(record_id, ""), [])
+        if not results:
+            # Nothing was even attempted for it: a dry run, --no-apply-settings,
+            # a record this restore did not select, or a category the tool does
+            # not apply. The instruction stands.
+            kept.append(followup)
+            continue
+        left = [r for r in results if r.outcome is not Outcome.APPLIED]
+        if not left:
+            log.info("%s was re-applied in full; dropping its follow-up", record_id)
+            continue
+        kept.append(_remaining_followup(followup, len(results) - len(left), left))
+    report.followups = kept
+
+
+def _remaining_followup(followup: Followup, done: int, left: list) -> Followup:
+    """The same follow-up, narrowed to the part the tool could not do.
+
+    Names the setting and never its value. An environment variable can hold a
+    token -- that is why its record is encrypted-only -- and a follow-up is
+    read off a screen and pasted into chat logs.
+
+    The original by-hand steps come back only when something actually *failed*.
+    When the rest were left on purpose -- a user PATH that describes where
+    software lived on the old machine -- "set each with setx" is not advice
+    that was merely unnecessary, it is advice that breaks the new machine.
+    """
+    import re  # noqa: PLC0415
+
+    from .apply import Outcome  # noqa: PLC0415
+
+    total = done + len(left)
+    base = re.sub(r"\s*\(\d+\)\s*$", "", followup.title)
+    failed = [r for r in left if r.outcome is Outcome.FAILED]
+    steps = [f"{r.name} -- {r.detail}" if r.detail else r.name for r in left]
+    if failed:
+        steps.extend(followup.steps)
+    return replace(
+        followup,
+        title=f"{base} -- {len(left)} of {total} still to do",
+        why=(
+            f"{done} of {total} were re-applied by the restore itself. "
+            "These were not, for the reason against each."
+            if done
+            else "The restore applied none of these. The reason is against each."
+        ),
+        steps=steps,
+    )
 
 
 def _apply_settings(report: RestoreReport, destination: Path, wanted: tuple[str, ...] = ()) -> None:

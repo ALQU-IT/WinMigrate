@@ -145,17 +145,27 @@ def _printers(env: Environment) -> Item | None:
     default_name = default.split(",", 1)[0] if isinstance(default, str) else None
     if not connections and not default_name:
         return None
+    # A machine with no network printers can still have a default -- a local
+    # one, or Print to PDF. That is worth recording, but calling the item
+    # "Printers (0)" and then telling the user to re-add network printers by
+    # their UNC path is an instruction to do nothing, carefully.
+    if connections:
+        title = f"Printers ({len(connections)})"
+        notes = ["Re-add network printers by their UNC path; install drivers as needed."]
+    else:
+        title = f"Default printer ({default_name})"
+        notes = [f"Set {default_name} as the default once it is installed."]
     return Item(
         id="settings:printers",
         category=Category.PRINTERS,
         kind=Kind.RECORD,
-        title=f"Printers ({len(connections)})",
+        title=title,
         record={"connections": sorted(connections), "default": default_name},
         record_public=True,
         restore=RestoreSpec(
             target="Add printer",
             strategy=RestoreStrategy.GUIDED,
-            notes=["Re-add network printers by their UNC path; install drivers as needed."],
+            notes=notes,
         ),
     )
 

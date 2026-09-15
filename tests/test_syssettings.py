@@ -63,6 +63,27 @@ def test_printers_and_default_are_read():
     assert printers["connections"] == [r"\\printserver\HP-Laser"]
 
 
+def test_a_machine_with_no_network_printers_is_not_told_to_re_add_none(tmp_path: Path):
+    """A default printer with no network connections is worth recording -- but
+    "Printers (0)", followed by "re-add network printers by their UNC path", is
+    an instruction to do nothing, carefully."""
+    env = env_with({
+        r"HKCU\Software\Microsoft\Windows NT\CurrentVersion\Windows": {
+            "Device": "Microsoft Print to PDF,winspool,PORTPROMPT:"
+        },
+    })
+
+    items, followups = syssettings.scan_system_settings(env)
+    printers = item(items, "settings:printers")
+
+    assert printers.title == "Default printer (Microsoft Print to PDF)"
+    assert printers.record["connections"] == []
+    (followup,) = [f for f in followups if f.id == "settings:printers:guided"]
+    assert followup.steps == [
+        "Set Microsoft Print to PDF as the default once it is installed."
+    ]
+
+
 def test_absent_settings_produce_no_items(tmp_path: Path):
     (tmp_path / "Documents").mkdir()
     items, _ = syssettings.scan_system_settings(Environment.fixture(tmp_path, {}))

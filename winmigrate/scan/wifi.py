@@ -38,6 +38,17 @@ log = logging.getLogger(__name__)
 
 PROFILE_NAME_PATTERN = re.compile(r"^\s*All User Profile\s*:\s*(.+?)\s*$", re.MULTILINE)
 
+#: The header netsh prints above the list, even when the list is empty.
+#:
+#: A machine with a Wi-Fi adapter and no saved networks gets "Profiles on
+#: interface Wi-Fi:", nothing under it, and exit code 1 -- and an exit code was
+#: being read as the answer, so a desktop that had simply never joined a network
+#: was told its profiles "could not be listed" and to try again from an account
+#: that can read them. There was no such account: there was nothing to read.
+#: Localised like the name label above, and failing the same way -- an
+#: unrecognised language falls back to believing the exit code.
+LISTING_HEADER = re.compile(r"^\s*Profiles on interface\b", re.MULTILINE)
+
 
 def parse_profile_names(netsh_output: str) -> list[str]:
     """Pull SSIDs out of ``netsh wlan show profiles`` output.
@@ -55,11 +66,23 @@ def parse_profile_names(netsh_output: str) -> list[str]:
 
 
 def list_profiles(runner=process.run) -> tuple[list[str], str | None]:
-    """List saved Wi-Fi profile names. Windows-only; returns (names, error)."""
+    """List saved Wi-Fi profile names. Windows-only; returns (names, error).
+
+    The exit code is the last thing consulted, not the first. netsh answers
+    "none saved" with exit 1 and a header over an empty list, so output that
+    contains the answer is taken as the answer; only output that contains
+    neither names nor a listing is a failure worth reporting.
+    """
     result = runner(["netsh", "wlan", "show", "profiles"], timeout=60)
+    names = parse_profile_names(result.stdout)
+    if names:
+        return names, None
+    if LISTING_HEADER.search(result.stdout or ""):
+        log.info("netsh listed no Wi-Fi profiles; none are saved on this machine")
+        return [], None
     if not result.ok:
         return [], result.summary()
-    return parse_profile_names(result.stdout), None
+    return [], None
 
 
 def scan_wifi(env: Environment, include_wifi: bool, files_only: bool = False):

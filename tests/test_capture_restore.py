@@ -925,6 +925,64 @@ def test_restoring_one_item_does_not_re_apply_every_setting(
     assert applied == ["env"]
 
 
+def test_a_restore_that_re_applied_a_setting_stops_telling_you_to(
+    profile: Path, env: Environment, tmp_path: Path, monkeypatch
+):
+    """End to end, because the taking-back only happens if the restore calls
+    for it: the capture writes "Re-apply: Mapped network drives (1)" into the
+    bundle, the restore maps the drive, and the report must then not hand that
+    instruction to the user under a heading reading "These need you rather than
+    the tool"."""
+    from winmigrate import apply as apply_mod
+    from winmigrate.apply import Outcome, Result
+    from winmigrate.models import Category, Followup, Item, Kind, RestoreSpec, RestoreStrategy
+
+    config = ScanConfig(profile_root=profile, include_software=False)
+    scan = run_scan(config, env)
+    scan.items.append(
+        Item(
+            id="settings:mapped_drives",
+            category=Category.MAPPED_DRIVES,
+            kind=Kind.RECORD,
+            title="Mapped network drives (1)",
+            record={"drives": {"Z": r"\\server\share"}},
+            record_public=True,
+            restore=RestoreSpec(
+                target="net use",
+                strategy=RestoreStrategy.GUIDED,
+                notes=["Reconnect each with: net use <letter>: <path>"],
+            ),
+        )
+    )
+    scan.followups.append(
+        Followup(
+            id="settings:mapped_drives:guided",
+            title="Re-apply: Mapped network drives (1)",
+            why="recorded in the bundle and re-applied by hand on the new machine",
+            steps=["Reconnect each with: net use <letter>: <path>"],
+        )
+    )
+    bundle = tmp_path / "drives.dat"
+    capture_mod.capture(
+        scan, CaptureOptions(output=bundle, passphrase=PASSPHRASE, use_vss=False), config, env
+    )
+
+    monkeypatch.setattr(
+        apply_mod,
+        "apply_mapped_drives",
+        lambda record, **kw: [Result("drive", r"Z: \\server\share", Outcome.APPLIED)],
+    )
+
+    report = restore_mod.restore(
+        RestoreOptions(
+            bundle=bundle, passphrase=PASSPHRASE, destination=tmp_path / "done"
+        )
+    )
+
+    assert [r.outcome for r in report.applied if r.kind == "drive"] == [Outcome.APPLIED]
+    assert not [f for f in report.followups if f.id == "settings:mapped_drives:guided"]
+
+
 def test_the_programs_holding_those_files_open_are_named(tmp_path: Path):
     """Restoring a browser profile into a running browser is the one way this
     tool can damage something: the browser holds those files open, rewrites
