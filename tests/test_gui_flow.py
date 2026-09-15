@@ -848,3 +848,107 @@ def test_choosing_a_second_file_forgets_the_first_completely(
 
     assert first.is_file()
     assert not second.exists()
+
+
+# --- saying what it changed -------------------------------------------------
+def test_a_restore_says_which_settings_it_put_back(monkeypatch, bundle: Path, tmp_path: Path):
+    """A restore re-applies Wi-Fi profiles, printers, mapped drives and
+    environment variables, and the window said nothing about any of it -- not
+    on the page that asks to start, and not on the one that reports what
+    happened."""
+    from winmigrate.apply import Outcome, Result
+
+    destination = tmp_path / "new"
+    destination.mkdir()
+    wizard, _ = open_window(monkeypatch, {})
+    wizard.mode_var.set(Mode.RESTORE.value)
+    wizard.bundle_var.set(str(bundle))
+    wizard.bundle_passphrase.insert(0, "pw")
+    wizard._show(Step.OPENING)
+    assert pump(wizard) == "opened"
+    wizard.destination_var.set(str(destination))
+    wizard._show(Step.RESTORE_CONFIRM)
+
+    assert "Wi-Fi networks, printers" in wizard.restore_summary.cget("text")
+
+    wizard._show(Step.RESTORING)
+    assert pump(wizard) == "restored"
+    wizard.restore_report.applied = [
+        Result(kind="wifi", name="Office", outcome=Outcome.APPLIED),
+        Result(kind="printer", name="HP-4th-floor", outcome=Outcome.FAILED, detail="no driver"),
+    ]
+    wizard._render_restore_done()
+
+    text = wizard.restore_done_text.cget("text")
+    assert "wifi Office" in text
+    assert "printer HP-4th-floor: no driver" in text
+
+
+def test_the_practice_run_says_it_will_not_touch_settings_either(
+    monkeypatch, bundle: Path, tmp_path: Path
+):
+    wizard, _ = open_window(monkeypatch, {})
+    wizard.mode_var.set(Mode.RESTORE.value)
+    wizard.bundle_var.set(str(bundle))
+    wizard.bundle_passphrase.insert(0, "pw")
+    wizard._show(Step.OPENING)
+    assert pump(wizard) == "opened"
+    wizard.destination_var.set(str(tmp_path / "new"))
+    wizard.dry_run_var.set(True)
+    wizard._show(Step.RESTORE_CONFIRM)
+
+    summary = wizard.restore_summary.cget("text")
+    assert "Wi-Fi networks, printers" not in summary
+    assert "Practice run" in summary
+
+
+def test_unticking_it_means_the_restore_is_told_not_to(monkeypatch, bundle: Path, tmp_path: Path):
+    from winmigrate import restore as restore_mod
+
+    seen: list = []
+    monkeypatch.setattr(
+        restore_mod, "restore",
+        lambda options, progress=None: seen.append(options) or _stub_restore_report(options),
+    )
+    wizard, _ = open_window(monkeypatch, {})
+    wizard.mode_var.set(Mode.RESTORE.value)
+    wizard.bundle_var.set(str(bundle))
+    wizard.bundle_passphrase.insert(0, "pw")
+    wizard.destination_var.set(str(tmp_path / "new"))
+    wizard.apply_settings_var.set(False)
+    wizard.data.restore_selected = {"files:documents"}
+    wizard._start_restore()
+    assert pump(wizard) == "restored"
+
+    assert seen and seen[0].apply_settings is False
+
+
+def _stub_restore_report(options):
+    from winmigrate.restore import RestoreReport
+
+    return RestoreReport(bundle=options.bundle, destination=options.destination)
+
+
+def test_a_capture_warning_reaches_the_last_page(monkeypatch, profile: Path, tmp_path: Path):
+    """"The shadow copy could not be read, so files were read directly" only
+    ever appeared in the log and on the console. It means files a program was
+    holding open were copied live, which is worth knowing before the old
+    machine is wiped."""
+    from winmigrate.models import Note, Severity
+
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    wizard.use_vss.set(False)
+    wizard._show(Step.SCANNING)
+    assert pump(wizard) == "scanned"
+    wizard.output_var.set(str(tmp_path / "out.dat"))
+    wizard.passphrase.insert(0, "hunter2")
+    wizard.passphrase2.insert(0, "hunter2")
+    wizard._show(Step.WORKING)
+    assert pump(wizard) == "captured"
+
+    wizard.capture_report.notes.append(
+        Note(Severity.WARNING, "the shadow copy could not be read, so files were read directly")
+    )
+    wizard.done_text.configure(text=wizard._done_summary())
+
+    assert "shadow copy could not be read" in wizard.done_text.cget("text")

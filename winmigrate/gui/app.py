@@ -35,7 +35,7 @@ from .. import capture as capture_mod
 from ..capture import CaptureOptions
 from ..config import ScanConfig
 from ..manifest import detect_source_machine
-from ..models import ScanResult
+from ..models import ScanResult, Severity
 from ..platform_win import Environment
 from ..scan import run_scan
 from ..util import humanize, paths as pathutil
@@ -451,6 +451,25 @@ class WinMigrateWizard:
             variable=self.overwrite_var, style="Wizard.TCheckbutton",
             command=self._refresh_restore_summary,
         ).pack(anchor="w", pady=(6, 0))
+        # A restore changes more than files, and the window was not saying so.
+        # The command line has always had --no-apply-settings; this is the same
+        # choice, made where the person can see what it covers.
+        self.apply_settings_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            page,
+            text="Also put back settings that need no sign-in",
+            variable=self.apply_settings_var, style="Wizard.TCheckbutton",
+            command=self._refresh_restore_summary,
+        ).pack(anchor="w", pady=(6, 0))
+        ttk.Label(
+            page,
+            text="     Wi-Fi networks, printers, mapped drives and your own "
+            "environment variables. Nothing that needs a password or a licence: "
+            "those stay on the list at the end for you to do.",
+            style="Hint.TLabel",
+            wraplength=620,
+            justify="left",
+        ).pack(anchor="w")
         ttk.Label(
             page,
             text="     Off, your own version of a file is kept and the backup's copy "
@@ -1379,6 +1398,13 @@ class WinMigrateWizard:
             f"Keep {report.manifest_path.name} beside the backup. It lets the backup "
             "be checked without the passphrase.",
         ]
+        # The capture's own warnings, which only the log and the console version
+        # were showing: a shadow copy that could not be read means files held
+        # open by a program were copied live, and that is worth knowing before
+        # the old machine is wiped.
+        for note in report.notes:
+            if note.severity is Severity.WARNING:
+                lines += ["", f"⚠ {note.message}"]
         if report.failures:
             lines += ["", f"{len(report.failures)} file(s) could not be read. See the log."]
         if self.data.passwords_added:
@@ -1551,6 +1577,12 @@ class WinMigrateWizard:
             f"{len(self.data.restore_selected)} item(s), "
             f"{humanize.bytes_(total_bytes)} in {total_files:,} files",
         ]
+        if self.apply_settings_var.get() and not self.dry_run_var.get():
+            lines += [
+                "",
+                "Wi-Fi networks, printers, mapped drives and environment variables "
+                "will be put back too.",
+            ]
         if self.dry_run_var.get():
             lines += ["", "Practice run: nothing will be written."]
         elif self.overwrite_var.get():
@@ -1576,6 +1608,7 @@ class WinMigrateWizard:
             dry_run=self.dry_run_var.get(),
             overwrite=self.overwrite_var.get(),
             items=tuple(sorted(self.data.restore_selected)),
+            apply_settings=self.apply_settings_var.get(),
         )
         log.info(
             "restore started: %s items, %s, from %s into %s%s",
@@ -1599,6 +1632,24 @@ class WinMigrateWizard:
         except Exception as exc:  # noqa: BLE001 -- surfaced in the window
             self.events.put(("error", (str(exc), traceback.format_exc())))
 
+    def _applied_lines(self, report: Any) -> list[str]:
+        """The settings a restore put back, grouped by what happened to them."""
+        from ..apply import Outcome  # noqa: PLC0415
+
+        results = list(getattr(report, "applied", []) or [])
+        if not results:
+            return []
+        applied = [r for r in results if r.outcome is Outcome.APPLIED]
+        failed = [r for r in results if r.outcome is Outcome.FAILED]
+        lines = ["", "Settings put back:"]
+        if applied:
+            lines.append("  " + ", ".join(sorted(f"{r.kind} {r.name}" for r in applied)))
+        else:
+            lines.append("  none — nothing in this backup needed re-applying")
+        for result in failed:
+            lines.append(f"  ⚠ {result.kind} {result.name}: {result.detail or 'failed'}")
+        return lines
+
     def _render_restore_done(self) -> None:
         report = self.restore_report
         if report is None:
@@ -1620,6 +1671,13 @@ class WinMigrateWizard:
             )
         if report.failures:
             lines.append(f"⚠ {len(report.failures)} file(s) could not be written.")
+        # What a restore changed beyond files, in the same place it reports the
+        # files. It re-applied Wi-Fi, printers and the rest and then said
+        # nothing about it, which is the one thing this tool must not do.
+        lines += self._applied_lines(report)
+        for note in report.notes:
+            if note.severity is Severity.WARNING:
+                lines += ["", f"⚠ {note.message}"]
         if report.dry_run:
             lines += ["", "This was a practice run. Nothing was written."]
         if self.log_path is not None:
