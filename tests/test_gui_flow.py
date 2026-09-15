@@ -909,6 +909,76 @@ def test_a_restore_says_which_settings_it_put_back(monkeypatch, bundle: Path, tm
     assert "printer HP-4th-floor: no driver" in text
 
 
+def test_the_window_names_the_software_it_prepared_and_did_not_install(
+    monkeypatch, bundle: Path, tmp_path: Path
+):
+    """The restore writes a winget import, an Office configuration and a
+    by-hand list into a folder, and installs none of it -- deliberately. The
+    command line says so at the end of every restore. The window said nothing,
+    so the only software the user ever saw named was the part it could *not*
+    install, and "no apps were installed" was the only reading available."""
+    from winmigrate.reinstall import Artifacts
+
+    destination = tmp_path / "new"
+    destination.mkdir()
+    wizard, _ = open_window(monkeypatch, {})
+    wizard.mode_var.set(Mode.RESTORE.value)
+    wizard.bundle_var.set(str(bundle))
+    wizard.bundle_passphrase.insert(0, "pw")
+    wizard._show(Step.OPENING)
+    assert pump(wizard) == "opened"
+    wizard.destination_var.set(str(destination))
+    wizard._show(Step.RESTORING)
+    assert pump(wizard) == "restored"
+
+    folder = destination / "WinMigrate-Reinstall"
+    wizard.restore_report.artifacts = Artifacts(
+        directory=folder,
+        winget_import=folder / "winget-import.json",
+        manual_list=folder / "reinstall-by-hand.md",
+        reinstallable_count=97,
+        manual_count=167,
+        component_count=8,
+    )
+    wizard._render_restore_done()
+
+    text = wizard.restore_done_text.cget("text")
+    assert "nothing has been installed yet" in text
+    assert "97 can be reinstalled for you" in text
+    assert "167 need installing by hand" in text
+    assert str(folder) in text
+    # Both commands: the bare one prints the plan and installs nothing, which
+    # is deliberate, so offering only it would repeat the same silence.
+    assert f'winmigrate reinstall "{folder}"' in text
+    assert f'winmigrate reinstall "{folder}" --apps' in text
+    # And a way there that does not involve typing the path out.
+    assert wizard.reinstall_button._packed
+
+
+def test_nothing_about_software_is_shown_when_there_was_none(
+    monkeypatch, bundle: Path, tmp_path: Path
+):
+    """A bundle captured with the software list off has no reinstall folder, and
+    a heading about software that says nothing under it is noise."""
+    destination = tmp_path / "new"
+    destination.mkdir()
+    wizard, _ = open_window(monkeypatch, {})
+    wizard.mode_var.set(Mode.RESTORE.value)
+    wizard.bundle_var.set(str(bundle))
+    wizard.bundle_passphrase.insert(0, "pw")
+    wizard._show(Step.OPENING)
+    assert pump(wizard) == "opened"
+    wizard.destination_var.set(str(destination))
+    wizard._show(Step.RESTORING)
+    assert pump(wizard) == "restored"
+
+    wizard.restore_report.artifacts = None
+    wizard._render_restore_done()
+
+    assert "Software" not in wizard.restore_done_text.cget("text")
+    assert not wizard.reinstall_button._packed
+
+
 def test_the_practice_run_says_it_will_not_touch_settings_either(
     monkeypatch, bundle: Path, tmp_path: Path
 ):

@@ -501,8 +501,12 @@ class WinMigrateWizard:
             page, text="", style="Body.TLabel", justify="left", wraplength=640
         )
         self.restore_done_text.pack(anchor="w", pady=(6, 8))
+        self.reinstall_button = ttk.Button(
+            page, text="Open the reinstall folder…", command=self._open_reinstall_folder
+        )
         holder = ttk.Frame(page, style="Page.TFrame")
         holder.pack(fill="both", expand=True)
+        self.followup_holder = holder
         self.followup_box = self.tk.Text(
             holder, height=10, wrap="word", relief="flat", background=self.palette.page,
             foreground=self.palette.ink, borderwidth=0, highlightthickness=1,
@@ -1555,9 +1559,11 @@ class WinMigrateWizard:
         return "\n".join(lines)
 
     def _open_output_folder(self) -> None:
+        self._open_folder(Path(self.output_var.get()).parent)
+
+    def _open_folder(self, target: Path) -> None:
         import subprocess  # noqa: PLC0415
 
-        target = Path(self.output_var.get()).parent
         try:
             if elevate.is_windows():
                 subprocess.Popen(["explorer", str(target)])  # noqa: S603, S607
@@ -1834,6 +1840,67 @@ class WinMigrateWizard:
             lines.append(f"  ⚠ {result.kind} {result.name}: {result.detail or 'failed'}")
         return lines
 
+    def _reinstall_lines(self, report: Any) -> list[str]:
+        """The software a restore prepared and deliberately did not install.
+
+        Putting files back is what was asked for; installing software changes
+        the machine in ways that are slow to undo, can want elevation, and may
+        fetch different versions than were on the old one. So it is a separate
+        step that shows its work and asks first -- and the command line has
+        always said so at the end of a restore.
+
+        The window said nothing at all. It wrote a winget import for 97
+        applications, an Office configuration and a by-hand list into a folder
+        it never named, and then offered a follow-up list whose only mention of
+        software was the 167 it could *not* install. "No apps were installed"
+        is not a misreading of that screen; it is the only reading available.
+        """
+        artifacts = getattr(report, "artifacts", None)
+        if artifacts is None:
+            return []
+        directory = str(getattr(artifacts, "directory", ""))
+        counts = []
+        if getattr(artifacts, "winget_import", None):
+            counts.append(f"{artifacts.reinstallable_count} can be reinstalled for you")
+        if getattr(artifacts, "manual_count", 0):
+            counts.append(f"{artifacts.manual_count} need installing by hand")
+        lines = ["", "Software — nothing has been installed yet:"]
+        if counts:
+            lines.append("  " + ", ".join(counts))
+        if getattr(artifacts, "component_count", 0):
+            lines.append(
+                f"  {artifacts.component_count} runtime(s) and driver(s) are listed for "
+                "completeness; they arrive with whatever needs them"
+            )
+        if getattr(artifacts, "office_configuration", None):
+            lines.append("  an Office configuration matching the old install was written")
+        lines.append(f"  Files: {directory}")
+        # Both commands, because they are not the same one: the bare command
+        # prints the plan and installs nothing, which is the whole point of it.
+        program = self._program_name()
+        lines.append(f'  To see the plan:  {program} reinstall "{directory}"')
+        lines.append(f'  To install them:  {program} reinstall "{directory}" --apps')
+        return lines
+
+    def _program_name(self) -> str:
+        """What to call this program in an instruction the user has to type.
+
+        A frozen build is an .exe with whatever name it was given; telling
+        somebody running WinMigrate.exe to type "winmigrate" is telling them to
+        type something their machine does not have.
+        """
+        import sys  # noqa: PLC0415
+
+        if getattr(sys, "frozen", False):
+            return Path(sys.executable).name
+        return "winmigrate"
+
+    def _open_reinstall_folder(self) -> None:
+        artifacts = getattr(self.restore_report, "artifacts", None)
+        if artifacts is None:
+            return
+        self._open_folder(Path(str(artifacts.directory)))
+
     def _render_restore_done(self) -> None:
         report = self.restore_report
         if report is None:
@@ -1859,6 +1926,7 @@ class WinMigrateWizard:
         # files. It re-applied Wi-Fi, printers and the rest and then said
         # nothing about it, which is the one thing this tool must not do.
         lines += self._applied_lines(report)
+        lines += self._reinstall_lines(report)
         for note in report.notes:
             if note.severity is Severity.WARNING:
                 lines += ["", f"⚠ {note.message}"]
@@ -1867,6 +1935,13 @@ class WinMigrateWizard:
         if self.log_path is not None:
             lines += ["", f"Log: {self.log_path}"]
         self.restore_done_text.configure(text="\n".join(lines))
+
+        if getattr(report, "artifacts", None) is not None:
+            self.reinstall_button.pack(
+                anchor="w", pady=(0, 10), before=self.followup_holder
+            )
+        else:
+            self.reinstall_button.pack_forget()
 
         self.followup_box.configure(state="normal")
         self.followup_box.delete("1.0", "end")
