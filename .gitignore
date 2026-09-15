@@ -16,3 +16,9 @@ plan.json
 build/
 dist/
 *.spec
+
+# Skills installed into this checkout by tooling (npx skills add). They are
+# development aids for whoever is working here, not part of the product.
+.agents/
+.claude/skills/
+skills-lock.json
