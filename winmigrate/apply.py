@@ -94,7 +94,14 @@ def apply_wifi(profile_dir: Path, runner=process.run) -> list[Result]:
         name = path.stem
         try:
             completed = runner(
-                ["netsh", "wlan", "add", "profile", f'filename="{path}"', "user=current"],
+                # filename=<path>, not filename="<path>". The quotes are what
+                # you type at a prompt, where the shell strips them again. Here
+                # the argument list goes to CreateProcess, which escapes the
+                # quotes it is given -- netsh then receives filename=\"C:\...\"
+                # and looks for a file whose name starts with a quote mark. The
+                # export side next door already had this right, so every
+                # network went out correctly and none of them came back.
+                ["netsh", "wlan", "add", "profile", f"filename={path}", "user=current"],
                 timeout=30,
             )
         except Exception as exc:  # noqa: BLE001 -- one network must not stop the rest
@@ -119,6 +126,16 @@ def apply_printers(record: dict[str, Any], runner=process.run) -> list[Result]:
     """
     results: list[Result] = []
     for connection in record.get("connections", []):
+        if isinstance(connection, str) and not _safe_argument(connection):
+            # The record comes out of a bundle, which may have been written on
+            # another machine. printui does its own parsing of what it is
+            # handed, so a name carrying quotes or line breaks is refused
+            # rather than passed on to be interpreted.
+            results.append(
+                Result("printer", connection.strip()[:60], Outcome.SKIPPED,
+                       "the name in the backup is not one this can pass on safely")
+            )
+            continue
         if not isinstance(connection, str) or not connection.startswith("\\\\"):
             results.append(
                 Result("printer", str(connection), Outcome.SKIPPED,
@@ -143,7 +160,7 @@ def apply_printers(record: dict[str, Any], runner=process.run) -> list[Result]:
             )
 
     default = record.get("default")
-    if isinstance(default, str) and default.startswith("\\\\"):
+    if isinstance(default, str) and default.startswith("\\\\") and _safe_argument(default):
         applied = {r.name for r in results if r.outcome is Outcome.APPLIED}
         if default in applied:
             try:
@@ -159,6 +176,17 @@ def apply_printers(record: dict[str, Any], runner=process.run) -> list[Result]:
     return results
 
 
+def _safe_argument(text: str) -> bool:
+    """Can this be handed to a tool that parses its own command line?
+
+    Quotes, control characters and line breaks are the ones that change the
+    meaning of an argument rather than being part of it. A real printer share
+    or UNC path contains none of them, so refusing is free; and the value comes
+    from a bundle, which is a file from another machine.
+    """
+    return bool(text) and not any(character in text for character in '"\r\n\t\x00')
+
+
 # --- mapped drives ---------------------------------------------------------
 def apply_mapped_drives(record: dict[str, Any], runner=process.run) -> list[Result]:
     """Re-map the network drives, persistently, without credentials.
@@ -171,7 +199,18 @@ def apply_mapped_drives(record: dict[str, Any], runner=process.run) -> list[Resu
     for letter, remote in sorted((record.get("drives") or {}).items()):
         if not isinstance(remote, str) or not remote.startswith("\\\\"):
             continue
-        drive = letter if letter.endswith(":") else f"{letter}:"
+        if not _safe_argument(remote):
+            continue
+        # A drive is one letter. Anything else in that field did not come from
+        # a mapped drive, and "net use" takes switches in the same position.
+        plain = str(letter).rstrip(":")
+        if len(plain) != 1 or not plain.isalpha():
+            results.append(
+                Result("drive", str(letter)[:20], Outcome.SKIPPED,
+                       "not a drive letter")
+            )
+            continue
+        drive = f"{plain.upper()}:"
         try:
             completed = runner(
                 ["net", "use", drive, remote, "/persistent:yes"], timeout=60

@@ -261,3 +261,72 @@ def test_a_dry_run_changes_nothing_about_the_machine(tmp_path: Path, monkeypatch
         )
     )
     assert touched == []
+
+
+# --- what the tools actually receive ----------------------------------------
+def test_the_wifi_filename_is_not_wrapped_in_quotes(tmp_path):
+    """filename=<path>, not filename="<path>". The quotes are what you type at a
+    prompt, where the shell strips them again; here the argument list goes to
+    CreateProcess, which escapes them, and netsh looks for a file whose name
+    starts with a quote mark. Every network went out of the export side
+    correctly -- it builds folder=<path> with no quotes -- and none of them
+    could come back."""
+    import subprocess
+
+    folder = tmp_path / "WinMigrate-WiFi"
+    folder.mkdir()
+    (folder / "Office.xml").write_text("<x/>", encoding="utf-8")
+    seen: list[list[str]] = []
+
+    apply_mod.apply_wifi(folder, runner=lambda command, timeout=0: seen.append(command) or _ok())
+
+    assert seen and seen[0][:4] == ["netsh", "wlan", "add", "profile"]
+    argument = seen[0][4]
+    assert argument == f"filename={folder / 'Office.xml'}"
+    assert '"' not in argument
+    # And what Windows would really build from that list carries no escaping.
+    assert '\\"' not in subprocess.list2cmdline(seen[0])
+
+
+def test_a_printer_name_that_could_be_reinterpreted_is_refused(tmp_path):
+    """The record comes out of a bundle, which may have been written on another
+    machine, and printui parses what it is handed itself."""
+    seen: list[list[str]] = []
+    record = {
+        "connections": [
+            r"\\server\good",
+            '\\\\server\\bad" /q /if /b "x',
+            "\\\\server\\line\nbreak",
+        ]
+    }
+
+    results = apply_mod.apply_printers(
+        record, runner=lambda command, timeout=0: seen.append(command) or _ok()
+    )
+
+    assert [command[4] for command in seen] == [r"\\server\good"]
+    skipped = [r for r in results if r.outcome is apply_mod.Outcome.SKIPPED]
+    assert len(skipped) == 2
+    assert all("safely" in r.detail for r in skipped)
+
+
+def test_only_a_drive_letter_is_treated_as_a_drive():
+    """net use takes switches in the same position as the drive."""
+    seen: list[list[str]] = []
+    record = {"drives": {"X": r"\\srv\share", "/delete": r"\\srv\other", "": r"\\srv\third"}}
+
+    results = apply_mod.apply_mapped_drives(
+        record, runner=lambda command, timeout=0: seen.append(command) or _ok()
+    )
+
+    assert [command[2] for command in seen] == ["X:"]
+    assert sorted(r.name for r in results if r.outcome is apply_mod.Outcome.SKIPPED) == [
+        "",
+        "/delete",
+    ]
+
+
+def _ok():
+    from winmigrate.util.process import CommandResult
+
+    return CommandResult(["x"], 0)
