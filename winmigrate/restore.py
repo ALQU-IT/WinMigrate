@@ -388,6 +388,17 @@ def _apply_settings(report: RestoreReport, destination: Path, wanted: tuple[str,
             )
         )
 
+    # One line per setting, because this is the question people actually ask
+    # afterwards -- "why is my drive not mapped?" -- and the report on screen
+    # is gone by the time they ask it. Names only: a variable's name says which
+    # setting this was, and its value is the part that can hold a token.
+    for result in report.applied:
+        log.info(
+            "re-apply %s %s: %s%s",
+            result.kind, result.name, result.outcome.value,
+            f" ({result.detail})" if result.detail else "",
+        )
+
     failures = [result for result in report.applied if not result.ok]
     if failures:
         report.notes.append(

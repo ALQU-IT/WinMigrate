@@ -346,3 +346,46 @@ def test_the_two_ends_of_the_guided_followup_id_still_agree():
             )
         )
         assert minted.id == record_id + restore_mod.GUIDED_SUFFIX
+
+
+def test_every_setting_the_restore_touched_reaches_the_log(caplog, tmp_path: Path):
+    """"Why is my drive not mapped?" is asked after the report has scrolled
+    away. The applied results were kept in memory, shown once and never
+    written down, so the log -- which exists precisely to answer that question
+    later -- had not one line about them."""
+    import logging
+
+    from winmigrate.apply import Outcome, Result
+    from winmigrate import apply as apply_mod
+
+    report = restore_mod.RestoreReport(bundle=Path("b.dat"))
+    report.manifest = {
+        "items": [
+            {"id": "settings:mapped_drives", "record": {"drives": {"Z": r"\\server\share"}}},
+            {"id": "settings:env_vars", "record": {"variables": {"MYTOKEN": "sssh"}}},
+        ]
+    }
+
+    def fake_drives(record, **kw):
+        return [Result("drive", r"Z: \\server\share", Outcome.FAILED, "network name not found")]
+
+    def fake_env(record, **kw):
+        return [Result("env", "MYTOKEN", Outcome.APPLIED)]
+
+    import pytest as _pytest  # noqa: PLC0415
+
+    monkey = _pytest.MonkeyPatch()
+    monkey.setattr(apply_mod, "apply_mapped_drives", fake_drives)
+    monkey.setattr(apply_mod, "apply_environment", fake_env)
+    monkey.setattr(apply_mod, "apply_wifi", lambda directory, **kw: [])
+    try:
+        with caplog.at_level(logging.INFO, logger="winmigrate.restore"):
+            restore_mod._apply_settings(report, tmp_path)
+    finally:
+        monkey.undo()
+
+    written = "\n".join(caplog.messages)
+    assert r"re-apply drive Z: \\server\share: failed (network name not found)" in written
+    assert "re-apply env MYTOKEN: applied" in written
+    # The name of a variable, never its value.
+    assert "sssh" not in written
