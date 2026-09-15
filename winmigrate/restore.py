@@ -210,6 +210,50 @@ def restore(options: RestoreOptions, progress: ProgressCallback | None = None) -
 #: Where the Wi-Fi profiles land, matching the archive prefix capture uses.
 WIFI_RESTORE_DIR = "WinMigrate-WiFi"
 
+#: Categories whose files a running program keeps open, and what to call it.
+#: A browser is named from the item's own title, which carries it.
+HELD_OPEN: dict[str, str] = {
+    "browser_profile": "",
+    "browser_passwords": "",
+    "outlook": "Outlook",
+    "notepad": "Notepad",
+}
+
+
+def programs_to_close(manifest: dict[str, Any], wanted: tuple[str, ...] = ()) -> list[str]:
+    """Programs whose own working files this restore would write over.
+
+    Restoring a browser profile into a running browser is the one way this
+    tool can damage something: the browser holds those files open, rewrites
+    them on its own schedule, and half its database arriving underneath it is
+    worse than the restore simply failing. The capture side has always said to
+    close things for a cleaner copy; the restore side said nothing, and it is
+    the side where it matters.
+
+    Read from the plaintext sidecar as happily as from the manifest -- a
+    redacted stub keeps its category and title, which is all this needs.
+    """
+    names: set[str] = set()
+    for item in manifest.get("items", []):
+        if not isinstance(item, dict):
+            continue
+        if item.get("action") != "capture":
+            continue
+        if wanted and item.get("id") not in wanted:
+            continue
+        label = HELD_OPEN.get(str(item.get("category", "")))
+        if label is None:
+            continue
+        if label:
+            names.add(label)
+            continue
+        # A browser: its title is "Google Chrome — Person 1", and the program
+        # is the half in front.
+        title = str(item.get("title", "")).split("—")[0].strip()
+        if title:
+            names.add(title)
+    return sorted(names)
+
 
 def _apply_settings(report: RestoreReport, destination: Path, wanted: tuple[str, ...] = ()) -> None:
     """Re-apply the settings that need no identity.

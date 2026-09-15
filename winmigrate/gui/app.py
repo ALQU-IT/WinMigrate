@@ -1684,6 +1684,18 @@ class WinMigrateWizard:
             f"{len(self.data.restore_selected)} item(s), "
             f"{humanize.bytes_(total_bytes)} in {total_files:,} files",
         ]
+        from ..restore import programs_to_close  # noqa: PLC0415
+
+        close_these = programs_to_close(
+            self.manifest or {}, tuple(sorted(self.data.restore_selected))
+        )
+        if close_these and not self.dry_run_var.get():
+            lines += [
+                "",
+                "⚠ Close " + ", ".join(close_these) + " before starting. The files "
+                "going back are the ones they keep open, and a program writing to "
+                "them at the same time can damage its own data.",
+            ]
         short = self._room_shortfall(total_bytes)
         if short:
             lines += ["", short]

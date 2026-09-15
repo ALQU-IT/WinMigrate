@@ -763,6 +763,20 @@ def cmd_restore(args: argparse.Namespace, console: Console) -> int:
         apply_settings=getattr(args, "apply_settings", True),
         space_check=getattr(args, "space_check", True),
     )
+    if not args.dry_run:
+        # Before the work, not in the report afterwards: by then the browser
+        # has been written to underneath itself. Read from the plaintext
+        # sidecar, so this costs nothing and needs no decryption.
+        close_these = restore_mod.programs_to_close(
+            restore_mod.load_sidecar(Path(args.bundle)) or {}, tuple(args.item)
+        )
+        if close_these:
+            console.print(
+                "[yellow]Close " + ", ".join(close_these) + " first.[/yellow] The files "
+                "going back are the ones they keep open; a program writing to them at "
+                "the same time can damage its own data."
+            )
+
     with console.status("[cyan]restoring…"):
         restore_report = restore_mod.restore(options)
     report.render_restore_report(restore_report, console, dry_run=args.dry_run)

@@ -93,7 +93,12 @@ Restore flags:
 | `--no-space-check` | Write even if the destination looks too small |
 
 An interrupted restore can simply be re-run: files already present and matching
-are skipped.
+are skipped — matching by content, not by size.
+
+Close the browsers and Outlook before restoring. Their profiles are the files
+being put back, they rewrite them on their own schedule, and half a database
+arriving underneath a running program is worse than a restore that fails: both
+the window and the command line name the programs they can see in the backup.
 
 `scan` is read-only: it never opens a file's contents, never writes to the
 profile it inspects, and cannot trigger a cloud download.

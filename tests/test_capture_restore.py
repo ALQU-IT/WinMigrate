@@ -923,3 +923,40 @@ def test_restoring_one_item_does_not_re_apply_every_setting(
         RestoreOptions(bundle=bundle, passphrase=PASSPHRASE, destination=tmp_path / "all")
     )
     assert applied == ["env"]
+
+
+def test_the_programs_holding_those_files_open_are_named(tmp_path: Path):
+    """Restoring a browser profile into a running browser is the one way this
+    tool can damage something: the browser holds those files open, rewrites
+    them on its own schedule, and half its database arriving underneath it is
+    worse than the restore failing outright."""
+    manifest = {
+        "items": [
+            {"id": "browser:chrome:default", "category": "browser_profile",
+             "title": "Google Chrome — Person 1", "action": "capture"},
+            {"id": "browser:passwords-csv:brave", "category": "browser_passwords",
+             "title": "Brave — exported passwords (CSV)", "action": "capture"},
+            {"id": "settings:outlook_pst:archive", "category": "outlook",
+             "title": "Outlook data file", "action": "capture"},
+            {"id": "files:documents", "category": "user_files",
+             "title": "Documents", "action": "capture"},
+            {"id": "browser:firefox:x", "category": "browser_profile",
+             "title": "Mozilla Firefox — default", "action": "skip"},
+        ]
+    }
+
+    assert restore_mod.programs_to_close(manifest) == ["Brave", "Google Chrome", "Outlook"]
+
+    # Only what is being put back: naming items narrows it.
+    assert restore_mod.programs_to_close(manifest, ("files:documents",)) == []
+    assert restore_mod.programs_to_close(manifest, ("browser:chrome:default",)) == [
+        "Google Chrome"
+    ]
+
+
+def test_a_restore_of_files_only_asks_nobody_to_close_anything(captured, tmp_path: Path):
+    """The fixture profile has no browser, so the page must stay quiet rather
+    than warn about programs that are not in the backup."""
+    report, _scan = captured
+    sidecar = json.loads(report.manifest_path.read_text(encoding="utf-8"))
+    assert restore_mod.programs_to_close(sidecar) == []

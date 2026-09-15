@@ -1234,3 +1234,38 @@ def test_the_window_names_the_records_so_they_are_not_left_out(
     }
     assert "files:documents" in named
     assert records <= named
+
+
+def test_the_restore_page_says_which_programs_to_close(monkeypatch, profile: Path, tmp_path: Path):
+    """The capture side has always said to close things for a cleaner copy.
+    The restore side said nothing, and it is the side where a program writing
+    to those files at the same time damages its own data."""
+    chrome_with_local_passwords(profile)
+    bundle_path = tmp_path / "b.dat"
+
+    backup, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    backup.use_vss.set(False)
+    backup.verify_after.set(False)
+    backup._show(Step.SCANNING)
+    assert pump(backup) == "scanned"
+    backup.output_var.set(str(bundle_path))
+    backup.passphrase.insert(0, "hunter2")
+    backup.passphrase2.insert(0, "hunter2")
+    backup._show(Step.WORKING)
+    assert pump(backup) == "captured"
+
+    wizard, _ = open_window(monkeypatch, {})
+    wizard.mode_var.set(Mode.RESTORE.value)
+    wizard.bundle_var.set(str(bundle_path))
+    wizard.bundle_passphrase.insert(0, "hunter2")
+    wizard._show(Step.OPENING)
+    assert pump(wizard) == "opened"
+    wizard.destination_var.set(str(tmp_path / "new"))
+    wizard._show(Step.RESTORE_CONFIRM)
+
+    assert "Close Google Chrome" in wizard.restore_summary.cget("text")
+
+    # A practice run writes nothing, so nobody has to close anything.
+    wizard.dry_run_var.set(True)
+    wizard._refresh_restore_summary()
+    assert "Close Google Chrome" not in wizard.restore_summary.cget("text")
