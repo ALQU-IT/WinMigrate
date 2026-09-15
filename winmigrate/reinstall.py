@@ -235,26 +235,56 @@ def office_reactivation_steps(installation: OfficeInstallation | None) -> list[s
     return list(REACTIVATION_STEPS.get(installation.activation_type, REACTIVATION_STEPS["unknown"]))
 
 
-def run_winget_import(import_file: Path, runner=process.run) -> process.CommandResult:
-    """Replay winget's export on this machine.
+def winget_import_command(import_file: Path) -> list[str]:
+    """The command that replays winget's export on this machine.
 
     ``--ignore-unavailable`` keeps one missing package from aborting the rest,
     and ``--accept-package-agreements`` is required for an unattended run --
     the user has already agreed to this step at the prompt.
+
+    Named separately from the running of it because it is run two ways: the
+    command line waits for the whole thing, and the window streams it so a
+    ninety-seven application install is something you can watch rather than a
+    bar that moves once at the end.
     """
-    return runner(
-        [
-            "winget",
-            "import",
-            "-i",
-            str(import_file),
-            "--accept-source-agreements",
-            "--accept-package-agreements",
-            "--ignore-unavailable",
-            "--disable-interactivity",
-        ],
-        timeout=WINGET_IMPORT_TIMEOUT,
-    )
+    return [
+        "winget",
+        "import",
+        "-i",
+        str(import_file),
+        "--accept-source-agreements",
+        "--accept-package-agreements",
+        "--ignore-unavailable",
+        "--disable-interactivity",
+    ]
+
+
+def run_winget_import(import_file: Path, runner=process.run) -> process.CommandResult:
+    """Replay winget's export on this machine, waiting for it to finish."""
+    return runner(winget_import_command(import_file), timeout=WINGET_IMPORT_TIMEOUT)
+
+
+def package_identifiers(import_file: Path) -> list[str]:
+    """The packages a winget export asks for, so a window can show the list.
+
+    The export is a file this tool wrote, but it is read back off a disk that
+    a restore has just written to; a malformed one means an empty list and a
+    page that says so, never an exception on the way to the finish line.
+    """
+    try:
+        export = json.loads(import_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        log.warning("could not read %s", import_file, exc_info=True)
+        return []
+    names: list[str] = []
+    for source in _as_list(export.get("Sources")):
+        if not isinstance(source, dict):
+            continue
+        for package in _as_list(source.get("Packages")):
+            identifier = package.get("PackageIdentifier") if isinstance(package, dict) else None
+            if isinstance(identifier, str) and identifier:
+                names.append(identifier)
+    return names
 
 
 def run_office_install(

@@ -163,6 +163,9 @@ class WinMigrateWizard:
         self.step = Step.CHOOSE
         self.manifest: dict | None = None
         self.restore_report: Any = None
+        self.install_result: Any = None
+        self.install_lines: list[str] = []
+        self._install_stop = threading.Event()
         self.scan_result: ScanResult | None = None
         self.capture_report: Any = None
         self.verify_report: Any = None
@@ -288,6 +291,8 @@ class WinMigrateWizard:
             (Step.RESTORE_SELECT, self._page_restore_select),
             (Step.RESTORE_CONFIRM, self._page_restore_confirm),
             (Step.RESTORING, self._page_restoring),
+            (Step.SOFTWARE, self._page_software),
+            (Step.INSTALLING, self._page_installing),
             (Step.RESTORE_DONE, self._page_restore_done),
             (Step.WELCOME, self._page_welcome),
             (Step.SCANNING, self._page_scanning),
@@ -494,6 +499,62 @@ class WinMigrateWizard:
         self.restore_status.pack(anchor="w")
         self.restore_detail = ttk.Label(page, text="", style="Hint.TLabel", wraplength=640)
         self.restore_detail.pack(anchor="w", pady=(6, 0))
+
+    def _page_software(self, page: Any) -> None:
+        """What is about to be installed, and the way past it.
+
+        The list is shown before anything runs because this is the one step
+        that reaches outside the backup: the packages come from the internet,
+        at today's versions, and installing ninety-seven of them is not
+        something to start by accident.
+        """
+        ttk = self.ttk
+        self.software_text = ttk.Label(
+            page, text="", style="Body.TLabel", justify="left", wraplength=640
+        )
+        self.software_text.pack(anchor="w", pady=(6, 8))
+        holder = ttk.Frame(page, style="Page.TFrame")
+        holder.pack(fill="both", expand=True)
+        self.software_box = self.tk.Text(
+            holder, height=9, wrap="none", relief="flat", background=self.palette.page,
+            foreground=self.palette.ink, borderwidth=0, highlightthickness=1,
+            highlightbackground=self.palette.rule,
+        )
+        bar = ttk.Scrollbar(holder, orient="vertical", command=self.software_box.yview)
+        self.software_box.configure(yscrollcommand=bar.set)
+        self.software_box.pack(side="left", fill="both", expand=True)
+        bar.pack(side="right", fill="y")
+        self.software_note = ttk.Label(
+            page, text="", style="Hint.TLabel", justify="left", wraplength=640
+        )
+        self.software_note.pack(anchor="w", pady=(8, 0))
+        ttk.Button(
+            page, text="Skip this \u2014 I will install them myself",
+            command=lambda: self._show(Step.RESTORE_DONE),
+        ).pack(anchor="w", pady=(8, 0))
+
+    def _page_installing(self, page: Any) -> None:
+        ttk = self.ttk
+        self.install_bar = ttk.Progressbar(page, mode="indeterminate")
+        self.install_bar.pack(fill="x", pady=(24, 12))
+        self.install_status = ttk.Label(page, text="Starting\u2026", style="Body.TLabel",
+                                        wraplength=640, justify="left")
+        self.install_status.pack(anchor="w")
+        holder = ttk.Frame(page, style="Page.TFrame")
+        holder.pack(fill="both", expand=True, pady=(10, 0))
+        self.install_output = self.tk.Text(
+            holder, height=9, wrap="word", relief="flat", background=self.palette.page,
+            foreground=self.palette.ink, borderwidth=0, highlightthickness=1,
+            highlightbackground=self.palette.rule,
+        )
+        bar = ttk.Scrollbar(holder, orient="vertical", command=self.install_output.yview)
+        self.install_output.configure(yscrollcommand=bar.set)
+        self.install_output.pack(side="left", fill="both", expand=True)
+        bar.pack(side="right", fill="y")
+        self.install_stop_button = ttk.Button(
+            page, text="Stop installing", command=self._stop_install
+        )
+        self.install_stop_button.pack(anchor="w", pady=(10, 0))
 
     def _page_restore_done(self, page: Any) -> None:
         ttk = self.ttk
@@ -1128,6 +1189,10 @@ class WinMigrateWizard:
             self._refresh_restore_summary()
         elif step is Step.RESTORING:
             self._start_restore()
+        elif step is Step.SOFTWARE:
+            self._render_software()
+        elif step is Step.INSTALLING:
+            self._start_install()
         elif step is Step.RESTORE_DONE:
             self._render_restore_done()
             self._forget_passphrases()
@@ -1840,6 +1905,126 @@ class WinMigrateWizard:
             lines.append(f"  ⚠ {result.kind} {result.name}: {result.detail or 'failed'}")
         return lines
 
+    def _software_to_install(self) -> Any:
+        """The winget import this restore wrote, if it wrote one."""
+        artifacts = getattr(self.restore_report, "artifacts", None)
+        if artifacts is None or not getattr(artifacts, "winget_import", None):
+            return None
+        return artifacts
+
+    def _render_software(self) -> None:
+        from .. import reinstall as reinstall_mod  # noqa: PLC0415
+
+        artifacts = self._software_to_install()
+        self.software_box.configure(state="normal")
+        self.software_box.delete("1.0", "end")
+        if artifacts is None:
+            self.software_text.configure(
+                text="There is nothing here to install: this backup carried no "
+                "software list, or nothing in it has a package."
+            )
+            self.software_note.configure(text="")
+            self.software_box.configure(state="disabled")
+            return
+
+        packages = reinstall_mod.package_identifiers(Path(str(artifacts.winget_import)))
+        manual = getattr(artifacts, "manual_count", 0)
+        lines = [
+            f"{len(packages)} application(s) can be installed for you, straight from "
+            "their publishers, at today's versions."
+        ]
+        if manual:
+            lines.append(
+                f"{manual} more have no package and stay on the list at the end "
+                "for you to fetch by hand."
+            )
+        self.software_text.configure(text="\n".join(lines))
+        for identifier in packages:
+            self.software_box.insert("end", f"{identifier}\n")
+        self.software_box.configure(state="disabled")
+
+        # Elevation is not a detail to discover halfway through. Said here,
+        # while there is still a choice about when to start.
+        if elevate.is_windows() and not elevate.is_elevated():
+            self.software_note.configure(
+                text="WinMigrate is not running as administrator, so Windows will ask "
+                "for permission for some of these as they install. Installing from an "
+                "administrator window asks once instead of once per program."
+            )
+        else:
+            self.software_note.configure(
+                text="Nothing is downloaded or installed until you press Install them."
+            )
+
+    def _start_install(self) -> None:
+        artifacts = self._software_to_install()
+        if artifacts is None:
+            self.events.put(("installed", None))
+            return
+        self.install_lines = []
+        self._install_stop = threading.Event()
+        self.install_output.configure(state="normal")
+        self.install_output.delete("1.0", "end")
+        self.install_output.configure(state="disabled")
+        self.install_bar.start(14)
+        self.install_status.configure(text="Asking winget for the first package\u2026")
+        log.info("installing software from %s", artifacts.winget_import)
+        threading.Thread(
+            target=self._install_worker,
+            args=(Path(str(artifacts.winget_import)),),
+            daemon=True,
+        ).start()
+
+    def _install_worker(self, import_file: Path) -> None:
+        from .. import reinstall as reinstall_mod  # noqa: PLC0415
+        from ..util import process  # noqa: PLC0415
+
+        try:
+            result = process.stream(
+                reinstall_mod.winget_import_command(import_file),
+                lambda line: self.events.put(("install-line", line)),
+                timeout=reinstall_mod.WINGET_IMPORT_TIMEOUT,
+                cancelled=self._install_stop.is_set,
+            )
+            self.events.put(("installed", result))
+        except Exception as exc:  # noqa: BLE001 -- surfaced in the window
+            log.warning("the install could not be run", exc_info=True)
+            self.events.put(("install-failed", str(exc)))
+
+    def _stop_install(self) -> None:
+        """Stop at the next line. What is installed stays installed."""
+        self._install_stop.set()
+        self.install_status.configure(
+            text="Stopping after the package that is running\u2026"
+        )
+        log.info("install stopped by the user")
+
+    def _install_lines(self) -> list[str]:
+        """What the install did, for the page that reports a finished restore."""
+        result = self.install_result
+        if result is None:
+            return []
+        if getattr(result, "unavailable", False):
+            return [
+                "",
+                "Software: winget is not on this machine, so nothing was installed. "
+                "Install 'App Installer' from the Microsoft Store and run the command "
+                "below.",
+            ]
+        if result.error == "stopped":
+            return ["", "Software: you stopped the install. What had finished is installed."]
+        if result.error:
+            return ["", f"\u26a0 Software: the install did not finish \u2014 {result.error}"]
+        if result.returncode:
+            # winget returns non-zero when any single package failed, which on a
+            # list this long is normal and is not the same as nothing working.
+            return [
+                "",
+                f"Software: winget finished with errors (exit {result.returncode}). "
+                "Some packages installed, some did not \u2014 the log has each one.",
+            ]
+        return ["", "Software: winget installed everything it had a package for."]
+
     def _reinstall_lines(self, report: Any) -> list[str]:
         """The software a restore prepared and deliberately did not install.
 
@@ -1926,6 +2111,7 @@ class WinMigrateWizard:
         # files. It re-applied Wi-Fi, printers and the rest and then said
         # nothing about it, which is the one thing this tool must not do.
         lines += self._applied_lines(report)
+        lines += self._install_lines()
         lines += self._reinstall_lines(report)
         for note in report.notes:
             if note.severity is Severity.WARNING:
@@ -2174,7 +2360,42 @@ class WinMigrateWizard:
             self.restore_bar.configure(value=1000)
             self.restore_report = payload
             self.data.restore_done = True
+            # Straight past the software page when there is no software: an
+            # empty page between the work and the result is a step backwards.
+            self._show(
+                Step.SOFTWARE if self._software_to_install() else Step.RESTORE_DONE
+            )
+        elif kind == "install-line":
+            line = str(payload)
+            self.install_lines.append(line)
+            self.install_status.configure(text=line)
+            self.install_output.configure(state="normal")
+            self.install_output.insert("end", line + "\n")
+            # Bounded, because a ninety-seven package import writes thousands of
+            # lines and the whole of it in a Text widget is a window that stops
+            # repainting. The log keeps all of it.
+            if len(self.install_lines) > 400:
+                self.install_output.delete("1.0", "2.0")
+            self.install_output.see("end")
+            self.install_output.configure(state="disabled")
+        elif kind == "installed":
+            self.install_bar.stop()
+            self.install_result = payload
+            if payload is not None:
+                log.info(
+                    "install finished: exit %s%s",
+                    payload.returncode,
+                    f" ({payload.error})" if payload.error else "",
+                )
             self._show(Step.RESTORE_DONE)
+        elif kind == "install-failed":
+            self.install_bar.stop()
+            self.install_result = None
+            self._show(Step.RESTORE_DONE)
+            self.restore_done_text.configure(
+                text=self.restore_done_text.cget("text")
+                + f"\n\n\u26a0 The install could not be started: {payload}"
+            )
         elif kind == "bytes":
             title, size = payload
             self._capture_done += size

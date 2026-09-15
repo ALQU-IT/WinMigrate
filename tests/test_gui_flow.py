@@ -60,7 +60,7 @@ def test_the_rail_follows_the_mode_rather_than_trailing_it(monkeypatch):
     # page to change.
     wizard.mode_var.set(Mode.RESTORE.value)
     wizard._refresh_buttons()
-    assert rail(wizard) == ["●  Backup", "○  Choose", "○  Confirm", "○  Finish"]
+    assert rail(wizard) == ["●  Backup", "○  Choose", "○  Confirm", "○  Software", "○  Finish"]
 
     wizard.mode_var.set(Mode.BACKUP.value)
     wizard._show(Step.CHOOSE)
@@ -1364,3 +1364,154 @@ def test_the_restore_page_says_which_programs_to_close(monkeypatch, profile: Pat
     wizard.dry_run_var.set(True)
     wizard._refresh_restore_summary()
     assert "Close Google Chrome" not in wizard.restore_summary.cget("text")
+
+
+# --- installing the software ------------------------------------------------
+def _with_software(wizard, tmp_path: Path, packages: list[str]):
+    """Give the finished restore a winget import, as a real one would have."""
+    from winmigrate.reinstall import Artifacts
+
+    folder = tmp_path / "WinMigrate-Reinstall"
+    folder.mkdir(exist_ok=True)
+    import_file = folder / "winget-import.json"
+    import_file.write_text(
+        json.dumps(
+            {"Sources": [{"Packages": [{"PackageIdentifier": name} for name in packages]}]}
+        ),
+        encoding="utf-8",
+    )
+    wizard.restore_report.artifacts = Artifacts(
+        directory=folder,
+        winget_import=import_file,
+        reinstallable_count=len(packages),
+        manual_count=3,
+    )
+    return import_file
+
+
+def _finished_restore(monkeypatch, bundle: Path, tmp_path: Path):
+    destination = tmp_path / "new"
+    destination.mkdir(exist_ok=True)
+    wizard, _ = open_window(monkeypatch, {})
+    wizard.mode_var.set(Mode.RESTORE.value)
+    wizard.bundle_var.set(str(bundle))
+    wizard.bundle_passphrase.insert(0, "pw")
+    wizard._show(Step.OPENING)
+    assert pump(wizard) == "opened"
+    wizard.destination_var.set(str(destination))
+    wizard._show(Step.RESTORING)
+    assert pump(wizard) == "restored"
+    return wizard
+
+
+def test_a_restore_with_software_stops_to_offer_it(monkeypatch, bundle: Path, tmp_path: Path):
+    """Backing up a profile and getting it back should not mean going to a
+    command line afterwards. The restore ends on the software page, which lists
+    what it would fetch and installs nothing until asked."""
+    wizard = _finished_restore(monkeypatch, bundle, tmp_path)
+    _with_software(wizard, tmp_path, ["Mozilla.Firefox", "7zip.7zip"])
+
+    wizard._show(Step.SOFTWARE)
+
+    assert "2 application(s) can be installed for you" in wizard.software_text.cget("text")
+    listed = written(wizard.software_box)
+    assert "Mozilla.Firefox" in listed and "7zip.7zip" in listed
+    assert "3 more have no package" in wizard.software_text.cget("text")
+
+
+def test_a_restore_with_no_software_does_not_show_an_empty_page(
+    monkeypatch, bundle: Path, tmp_path: Path
+):
+    """A page between the work and the result, with nothing on it, is a step
+    backwards."""
+    wizard = _finished_restore(monkeypatch, bundle, tmp_path)
+    wizard.restore_report.artifacts = None
+
+    wizard.events.put(("restored", wizard.restore_report))
+    wizard._drain_events()
+
+    assert wizard.step is Step.RESTORE_DONE
+
+
+def test_the_install_streams_what_winget_says_and_reports_how_it_went(
+    monkeypatch, bundle: Path, tmp_path: Path
+):
+    """A bar that moves once at the end, after ninety-seven downloads, is a bar
+    with nothing behind it."""
+    from winmigrate.util import process
+
+    wizard = _finished_restore(monkeypatch, bundle, tmp_path)
+    _with_software(wizard, tmp_path, ["Mozilla.Firefox"])
+
+    def fake_stream(command, on_line, timeout=0, cancelled=None):
+        assert command[:2] == ["winget", "import"]
+        on_line("Found Mozilla Firefox [Mozilla.Firefox]")
+        on_line("Successfully installed")
+        return process.CommandResult(command, 0, "ok")
+
+    monkeypatch.setattr(process, "stream", fake_stream)
+
+    wizard._show(Step.INSTALLING)
+    assert pump(wizard, until=("installed", "install-failed")) == "installed"
+
+    assert wizard.step is Step.RESTORE_DONE
+    assert "Found Mozilla Firefox" in written(wizard.install_output)
+    assert "winget installed everything" in wizard.restore_done_text.cget("text")
+
+
+def test_stopping_an_install_says_what_is_already_installed_stays(
+    monkeypatch, bundle: Path, tmp_path: Path
+):
+    """Stop cannot uninstall what has already been put on, and saying nothing
+    leaves the user wondering which half they have."""
+    from winmigrate.util import process
+
+    wizard = _finished_restore(monkeypatch, bundle, tmp_path)
+    _with_software(wizard, tmp_path, ["Mozilla.Firefox"])
+
+    def fake_stream(command, on_line, timeout=0, cancelled=None):
+        return process.CommandResult(command, None, "part way", error="stopped")
+
+    monkeypatch.setattr(process, "stream", fake_stream)
+    wizard._show(Step.INSTALLING)
+    assert pump(wizard, until=("installed", "install-failed")) == "installed"
+
+    assert "you stopped the install" in wizard.restore_done_text.cget("text")
+    assert "what had finished is installed" in wizard.restore_done_text.cget("text").lower()
+
+
+def test_a_machine_without_winget_is_told_so_rather_than_left_guessing(
+    monkeypatch, bundle: Path, tmp_path: Path
+):
+    from winmigrate.util import process
+
+    wizard = _finished_restore(monkeypatch, bundle, tmp_path)
+    _with_software(wizard, tmp_path, ["Mozilla.Firefox"])
+
+    def fake_stream(command, on_line, timeout=0, cancelled=None):
+        return process.CommandResult(command, None, error="winget not found on this machine")
+
+    monkeypatch.setattr(process, "stream", fake_stream)
+    wizard._show(Step.INSTALLING)
+    assert pump(wizard, until=("installed", "install-failed")) == "installed"
+
+    text = wizard.restore_done_text.cget("text")
+    assert "winget is not on this machine" in text
+    assert "App Installer" in text
+
+
+def test_the_uac_cost_is_named_before_the_install_starts_not_during(
+    monkeypatch, bundle: Path, tmp_path: Path
+):
+    """Ninety-seven permission prompts is a thing to learn beforehand."""
+    from winmigrate.gui import elevate
+
+    monkeypatch.setattr(elevate, "is_windows", lambda: True)
+    monkeypatch.setattr(elevate, "is_elevated", lambda: False)
+    wizard = _finished_restore(monkeypatch, bundle, tmp_path)
+    _with_software(wizard, tmp_path, ["Mozilla.Firefox"])
+
+    wizard._show(Step.SOFTWARE)
+
+    note = wizard.software_note.cget("text")
+    assert "administrator" in note and "once instead of once per program" in note

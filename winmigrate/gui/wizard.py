@@ -48,6 +48,8 @@ class Step(str, Enum):
     RESTORE_SELECT = "restore_select"
     RESTORE_CONFIRM = "restore_confirm"
     RESTORING = "restoring"
+    SOFTWARE = "software"
+    INSTALLING = "installing"
     RESTORE_DONE = "restore_done"
 
 
@@ -70,6 +72,8 @@ RESTORE_ORDER: tuple[Step, ...] = (
     Step.RESTORE_SELECT,
     Step.RESTORE_CONFIRM,
     Step.RESTORING,
+    Step.SOFTWARE,
+    Step.INSTALLING,
     Step.RESTORE_DONE,
 )
 
@@ -134,6 +138,16 @@ TITLES: dict[Step, tuple[str, str]] = {
         "Files already here and identical are skipped, so this can be re-run "
         "safely if it is interrupted.",
     ),
+    Step.SOFTWARE: (
+        "Your files are back \u2014 now your software",
+        "Windows keeps no copy of an installed program worth carrying, so these "
+        "are fetched fresh. Nothing is installed until you say so.",
+    ),
+    Step.INSTALLING: (
+        "Installing your software",
+        "This takes a while and the machine stays usable. You can stop at any "
+        "point; what is already installed stays installed.",
+    ),
     Step.RESTORE_DONE: (
         "Restored",
         "What is left needs you rather than the tool.",
@@ -181,6 +195,7 @@ NEXT_LABEL: dict[Step, str] = {
     Step.SOURCE: "Open",
     Step.RESTORE_SELECT: "Next",
     Step.RESTORE_CONFIRM: "Start restore",
+    Step.SOFTWARE: "Install them",
     Step.RESTORE_DONE: "Finish",
     Step.WELCOME: "Scan",
     Step.SELECT: "Next",
@@ -326,6 +341,11 @@ def check(step: Step, data: WizardData) -> Check:
             return Check(False, f"{parent} does not exist.")
         return Check(True)
 
+    if step is Step.SOFTWARE:
+        # Always passable. Installing is the offer, not the requirement: the
+        # page carries its own way past, and a restore is finished either way.
+        return Check(True)
+
     if step is Step.RESTORE_DONE:
         return Check(True)
 
@@ -398,6 +418,7 @@ def progress_steps(mode: Mode | str = Mode.BACKUP) -> tuple[Step, ...]:
             Step.SOURCE,
             Step.RESTORE_SELECT,
             Step.RESTORE_CONFIRM,
+            Step.SOFTWARE,
             Step.RESTORE_DONE,
         )
     return (
@@ -416,6 +437,7 @@ FOLDED: dict[Step, Step] = {
     Step.WORKING: Step.CONFIRM,
     Step.OPENING: Step.SOURCE,
     Step.RESTORING: Step.RESTORE_CONFIRM,
+    Step.INSTALLING: Step.SOFTWARE,
 }
 
 
@@ -437,5 +459,6 @@ RAIL_LABELS: dict[Step, str] = {
     Step.SOURCE: "Backup",
     Step.RESTORE_SELECT: "Choose",
     Step.RESTORE_CONFIRM: "Confirm",
+    Step.SOFTWARE: "Software",
     Step.RESTORE_DONE: "Finish",
 }

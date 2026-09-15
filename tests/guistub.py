@@ -103,6 +103,9 @@ class Widget:
     def yview(self, *args):
         pass
 
+    def see(self, *args):
+        """Scrolling to the newest line. Nothing to scroll here."""
+
     def focus(self):
         return ""
 

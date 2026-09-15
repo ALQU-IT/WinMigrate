@@ -122,3 +122,112 @@ def powershell(script: str, timeout: int = DEFAULT_TIMEOUT) -> CommandResult:
         ],
         timeout=timeout,
     )
+
+
+def stream(
+    command: list[str],
+    on_line,
+    timeout: int = DEFAULT_TIMEOUT,
+    cancelled=None,
+) -> CommandResult:
+    """Run a command, handing each line of its output over as it arrives.
+
+    :func:`run` captures everything and returns at the end, which is right for
+    a tool that answers in under a second and wrong for one that installs
+    ninety-seven applications. A window watching that happen needs the output
+    while it is happening, or it is a progress bar with nothing behind it.
+
+    ``on_line`` is called for every complete line, and is not allowed to stop
+    the run: it goes to a queue the window drains, and an exception there would
+    kill the install rather than the label it failed to write. ``cancelled`` is
+    asked between reads, so Stop takes effect at the next line rather than at
+    the end of a two-hour import.
+
+    Output is decoded incrementally, so a multi-byte character split across two
+    reads does not become two replacement characters. Lines are split on CR as
+    well as LF: a console progress indicator rewrites one line with carriage
+    returns, and waiting for an LF that never comes shows nothing at all.
+    """
+    import codecs  # noqa: PLC0415
+    import time  # noqa: PLC0415
+
+    log.debug("streaming: %s", " ".join(command))
+    try:
+        process = subprocess.Popen(  # noqa: S603 -- argument list, no shell
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            bufsize=0,
+        )
+    except FileNotFoundError:
+        return CommandResult(command, None, error=f"{command[0]} not found on this machine")
+    except (PermissionError, OSError) as exc:
+        return CommandResult(command, None, error=f"{command[0]} could not be run: {exc}")
+
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    collected: list[str] = []
+    pending = ""
+    deadline = time.monotonic() + timeout
+    stopped = False
+
+    def emit(line: str) -> None:
+        text = line.strip()
+        if not text:
+            return
+        collected.append(text)
+        try:
+            on_line(text)
+        except Exception:  # noqa: BLE001 -- a label must never end an install
+            log.debug("the output handler raised; continuing", exc_info=True)
+
+    timed_out = False
+    try:
+        while process.stdout is not None:
+            chunk = process.stdout.read(4096)
+            if not chunk:
+                break
+            pending += decoder.decode(chunk)
+            pending = pending.replace("\r\n", "\n").replace("\r", "\n")
+            while "\n" in pending:
+                line, pending = pending.split("\n", 1)
+                emit(line)
+            if cancelled is not None and cancelled():
+                stopped = True
+                break
+            if time.monotonic() > deadline:
+                timed_out = True
+                break
+    finally:
+        pending += decoder.decode(b"", final=True)
+        emit(pending)
+        if stopped or timed_out:
+            _end(process)
+        else:
+            # Its output ended, which is not quite the same as it having
+            # exited. Waiting is the difference between reading its exit code
+            # and killing a program that had finished.
+            try:
+                process.wait(timeout=30)
+            except Exception:  # noqa: BLE001
+                _end(process)
+
+    if stopped:
+        return CommandResult(command, None, "\n".join(collected), error="stopped")
+    if timed_out:
+        return CommandResult(
+            command, None, "\n".join(collected),
+            error=f"{command[0]} timed out after {timeout}s",
+        )
+    return CommandResult(command, process.poll(), "\n".join(collected))
+
+
+def _end(process) -> None:
+    """Ask the process to stop, then insist. Never raises."""
+    for stop in (process.terminate, process.kill):
+        try:
+            stop()
+            process.wait(timeout=5)
+            return
+        except Exception:  # noqa: BLE001 -- it may already be gone
+            continue

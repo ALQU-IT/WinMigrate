@@ -145,11 +145,13 @@ winmigrate reinstall C:\restored\WinMigrate-Reinstall --apps     # run winget im
 winmigrate reinstall C:\restored\WinMigrate-Reinstall --office C:\ODT\setup.exe
 ```
 
-The window says the same thing on the page that reports a finished restore --
-how many can be reinstalled for you, how many need a hand, where the files are,
-and both commands -- with a button that opens the folder. It installs nothing by
-itself either: a restore that quietly installed ninety-seven applications would
-be a different tool.
+The window does it for you. A restore that has software in it stops on a page
+listing every package it would fetch, and installs none of it until you press
+the button; winget's output is shown line by line while it runs, Stop takes
+effect at the next package, and what is already installed stays installed. The
+finished page then says how it went, with the same folder and commands for
+anything left -- a restore that installed ninety-seven applications without
+showing them first would be a different tool.
 
 Anything winget has no package for is listed in `reinstall-by-hand.md` rather
 than quietly dropped. Office gets a `configuration.xml` reproducing the edition,

@@ -191,6 +191,8 @@ def test_the_restore_branch_runs_in_its_own_order():
         Step.RESTORE_SELECT,
         Step.RESTORE_CONFIRM,
         Step.RESTORING,
+        Step.SOFTWARE,
+        Step.INSTALLING,
         Step.RESTORE_DONE,
     )
     assert next_step(Step.RESTORE_DONE, Mode.RESTORE) is None
