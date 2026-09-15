@@ -1702,6 +1702,22 @@ class WinMigrateWizard:
         self.restore_summary.configure(text="\n".join(lines))
         self._refresh_buttons()
 
+    def _record_ids(self) -> set[str]:
+        """The manifest's record items -- printers, drives, the software list.
+
+        They carry no files, so they are not in the choosing list, and a restore
+        that names only file items would leave them out along with everything
+        else the user did untick.
+        """
+        manifest = self.manifest or {}
+        return {
+            str(item.get("id"))
+            for item in manifest.get("items", [])
+            if isinstance(item, dict)
+            and item.get("kind") not in ("tree", "file")
+            and item.get("id")
+        }
+
     def _room_shortfall(self, needed: int) -> str:
         """Say on the page, not in an error afterwards, when there is no room.
 
@@ -1746,7 +1762,11 @@ class WinMigrateWizard:
             destination=Path(self.destination_var.get()),
             dry_run=self.dry_run_var.get(),
             overwrite=self.overwrite_var.get(),
-            items=tuple(sorted(self.data.restore_selected)),
+            # The records travel with the selection. They are not tick boxes --
+            # the printers, the software list and the follow-ups are how a
+            # restore explains itself -- but they have to be named, because
+            # naming items is what tells a restore to leave the rest out.
+            items=tuple(sorted(self.data.restore_selected | self._record_ids())),
             apply_settings=self.apply_settings_var.get(),
         )
         log.info(

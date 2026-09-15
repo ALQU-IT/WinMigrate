@@ -202,7 +202,7 @@ def restore(options: RestoreOptions, progress: ProgressCallback | None = None) -
     if not options.dry_run:
         _write_reinstall_artifacts(report, destination)
         if options.apply_settings:
-            _apply_settings(report, destination)
+            _apply_settings(report, destination, options.items)
     report.duration_seconds = time.monotonic() - started
     return report
 
@@ -211,13 +211,19 @@ def restore(options: RestoreOptions, progress: ProgressCallback | None = None) -
 WIFI_RESTORE_DIR = "WinMigrate-WiFi"
 
 
-def _apply_settings(report: RestoreReport, destination: Path) -> None:
+def _apply_settings(report: RestoreReport, destination: Path, wanted: tuple[str, ...] = ()) -> None:
     """Re-apply the settings that need no identity.
 
     Deliberately last: files first, then the settings that point at them. And
     deliberately forgiving -- a printer whose driver is missing is a line in the
     report, not a failed restore. The files are already on disk by this point
     and nothing here can take them away again.
+
+    ``wanted`` is the restore's item selection, if it made one. "Put back just
+    my Desktop" is a sentence about one folder, and it used to add eleven
+    printers and rewrite the user's environment variables as well, because the
+    records were read straight out of the manifest without asking what the
+    restore had been asked for.
     """
     from . import apply as apply_mod  # noqa: PLC0415 -- keeps the import off the scan path
 
@@ -226,6 +232,7 @@ def _apply_settings(report: RestoreReport, destination: Path) -> None:
         item.get("id"): item.get("record")
         for item in manifest.get("items", [])
         if isinstance(item, dict) and isinstance(item.get("record"), dict)
+        and (not wanted or item.get("id") in wanted)
     }
 
     try:

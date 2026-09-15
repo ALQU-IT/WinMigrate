@@ -863,3 +863,63 @@ def test_a_failed_write_leaves_no_part_file_behind(captured, tmp_path: Path, mon
 
     assert any("report.docx" in path for path, _reason in result.failures)
     assert not list(destination.rglob("*.winmigrate-part"))
+
+
+def test_restoring_one_item_does_not_re_apply_every_setting(
+    profile: Path, env: Environment, tmp_path: Path, monkeypatch
+):
+    """"Put back just my Desktop" is a sentence about one folder. It used to
+    add the printers and rewrite the environment variables too, because the
+    records were read straight out of the manifest without asking what the
+    restore had been asked for."""
+    from winmigrate import apply as apply_mod
+    from winmigrate.models import Category, Item, Kind
+
+    config = ScanConfig(profile_root=profile, include_software=False)
+    scan = run_scan(config, env)
+    scan.items.append(
+        Item(
+            id="settings:env_vars",
+            category=Category.ENV_VARS,
+            kind=Kind.RECORD,
+            title="Environment variables",
+            record={"variables": {"MY_TOOL_HOME": r"C:\tools"}},
+        )
+    )
+    bundle = tmp_path / "with-records.dat"
+    capture_mod.capture(
+        scan, CaptureOptions(output=bundle, passphrase=PASSPHRASE, use_vss=False), config, env
+    )
+
+    applied: list[str] = []
+    monkeypatch.setattr(
+        apply_mod, "apply_environment", lambda record, **kw: applied.append("env") or []
+    )
+
+    restore_mod.restore(
+        RestoreOptions(
+            bundle=bundle,
+            passphrase=PASSPHRASE,
+            destination=tmp_path / "one",
+            items=("files:desktop",),
+        )
+    )
+    assert applied == []
+
+    # Naming the record restores that one.
+    restore_mod.restore(
+        RestoreOptions(
+            bundle=bundle,
+            passphrase=PASSPHRASE,
+            destination=tmp_path / "two",
+            items=("files:desktop", "settings:env_vars"),
+        )
+    )
+    assert applied == ["env"]
+
+    # And a restore that named nothing still applies everything it has.
+    applied.clear()
+    restore_mod.restore(
+        RestoreOptions(bundle=bundle, passphrase=PASSPHRASE, destination=tmp_path / "all")
+    )
+    assert applied == ["env"]

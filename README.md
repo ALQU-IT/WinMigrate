@@ -87,7 +87,7 @@ Restore flags:
 | --- | --- |
 | `-n`, `--dry-run` | Report what would be restored, write nothing |
 | `--overwrite` | Replace existing files that differ (default: keep yours) |
-| `--item ID` | Restore only one item, e.g. `--item files:documents` |
+| `--item ID` | Restore only these items, e.g. `--item files:documents` (settings are re-applied only if named too) |
 | `-d`, `--destination` | Restore somewhere other than the current profile |
 | `--no-apply-settings` | Do not re-add Wi-Fi, printers, mapped drives or environment variables |
 | `--no-space-check` | Write even if the destination looks too small |

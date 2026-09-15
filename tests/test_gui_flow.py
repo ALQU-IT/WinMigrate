@@ -1198,3 +1198,39 @@ def test_a_check_that_cannot_run_does_not_hide_the_backup_that_was_written(
     text = wizard.done_text.cget("text")
     assert "the check could not be completed" in text
     assert "the drive went away" in text
+
+
+def test_the_window_names_the_records_so_they_are_not_left_out(
+    monkeypatch, bundle: Path, tmp_path: Path
+):
+    """The records are not tick boxes -- the printers, the software list and
+    the follow-ups are how a restore explains itself -- but a restore that
+    names items leaves out everything it did not name, and the window always
+    names items."""
+    from winmigrate import restore as restore_mod
+
+    seen: list = []
+    monkeypatch.setattr(
+        restore_mod, "restore",
+        lambda options, progress=None: seen.append(options) or _stub_restore_report(options),
+    )
+    wizard, _ = open_window(monkeypatch, {})
+    wizard.mode_var.set(Mode.RESTORE.value)
+    wizard.bundle_var.set(str(bundle))
+    wizard.bundle_passphrase.insert(0, "pw")
+    wizard._show(Step.OPENING)
+    assert pump(wizard) == "opened"
+    wizard.destination_var.set(str(tmp_path / "new"))
+    # Only one file item ticked, as if the user unticked the rest.
+    wizard.data.restore_selected = {"files:documents"}
+    wizard._start_restore()
+    assert pump(wizard) == "restored"
+
+    named = set(seen[0].items)
+    records = {
+        item["id"]
+        for item in wizard.manifest["items"]
+        if item.get("kind") not in ("tree", "file")
+    }
+    assert "files:documents" in named
+    assert records <= named
