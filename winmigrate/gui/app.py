@@ -1472,6 +1472,13 @@ class WinMigrateWizard:
             lines += ["", line]
         if self.log_path is not None:
             lines += ["", f"Log:          {self.log_path}"]
+        if report.changed_while_reading:
+            lines += [
+                "",
+                f"{len(report.changed_while_reading)} file(s) were being written while "
+                "they were copied, so their contents may be mid-change. Closing your "
+                "browser and Outlook first, or letting the shadow copy run, avoids it.",
+            ]
         if report.vanished:
             lines += [
                 "",

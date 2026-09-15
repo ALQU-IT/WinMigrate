@@ -1071,3 +1071,25 @@ def test_scanning_a_different_profile_looks_at_that_profile_s_browsers(
 
     assert wizard.password_rows == {}
     assert "No browser" in wizard.passwords_intro.cget("text")
+
+
+def test_files_caught_mid_write_are_mentioned_on_the_last_page(
+    monkeypatch, profile: Path, tmp_path: Path
+):
+    """They are in the bundle and their digest matches what was written, so
+    nothing else about the run looks wrong. The console version has always said
+    so; the window did not."""
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    wizard.use_vss.set(False)
+    wizard._show(Step.SCANNING)
+    assert pump(wizard) == "scanned"
+    wizard.output_var.set(str(tmp_path / "out.dat"))
+    wizard.passphrase.insert(0, "hunter2")
+    wizard.passphrase2.insert(0, "hunter2")
+    wizard._show(Step.WORKING)
+    assert pump(wizard) == "captured"
+
+    wizard.capture_report.changed_while_reading = [r"C:\Users\a\AppData\app.log"]
+    wizard.done_text.configure(text=wizard._done_summary())
+
+    assert "being written while they were copied" in wizard.done_text.cget("text")

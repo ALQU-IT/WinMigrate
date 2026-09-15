@@ -191,12 +191,22 @@ class BundleWriter:
         with open(pathutil.extended(source_path), "rb") as handle:
             reader = _ExactSizeReader(handle, info.size)
             self._tar.addfile(info, reader)
-        if reader.padded:
-            # The file shrank while it was being read. The member is still the
-            # declared length, so the bundle stays readable, but this file's
-            # contents are not what was on disk when the scan sized it.
-            log.warning("%s changed while being captured; %d byte(s) padded",
-                        source_path, reader.padded)
+            # One byte past the declared size: present means the file grew
+            # while it was being read, so what is in the bundle is the start of
+            # it and not the whole. The shrinking case was already reported and
+            # this one was not -- a log that is being appended to is the usual
+            # example, and silently keeping its first half is worse than saying
+            # so, because the digest matches and nothing looks wrong.
+            grew = bool(handle.read(1))
+        if reader.padded or grew:
+            # Either way the contents are not what was on disk when the scan
+            # sized it. The member is still the declared length, so the bundle
+            # stays readable and the digest describes what was written.
+            log.warning(
+                "%s changed while being captured (%s)",
+                source_path,
+                f"{reader.padded} byte(s) padded" if reader.padded else "it grew",
+            )
             self.result.changed_while_reading.append(str(source_path))
         digest = reader.hexdigest()
         self.result.file_digests[archive_name] = digest
