@@ -423,8 +423,16 @@ def test_a_resumed_restore_does_not_report_corruption_that_is_not_there(captured
     assert resumed.ok
 
 
-def test_a_file_corrupted_on_disk_is_caught_even_when_it_is_skipped(captured, tmp_path: Path):
-    """Skipping by size alone used to mean a same-size corruption was invisible."""
+def test_a_file_of_the_same_size_is_not_assumed_to_be_the_same_file(captured, tmp_path: Path):
+    """Two files of one length are not one file.
+
+    Deciding "already restored" on the size alone meant a note edited on the new
+    machine without changing its length was never written -- not even with
+    --overwrite -- and was then reported as a digest mismatch, which accuses the
+    backup of corruption for a file that never left it. A file that differs is
+    the user's, kept and reported as kept, exactly as it already was when the
+    sizes happened to differ.
+    """
     report, _scan = captured
     destination = tmp_path / "restored"
     restore_mod.restore(
@@ -434,11 +442,25 @@ def test_a_file_corrupted_on_disk_is_caught_even_when_it_is_skipped(captured, tm
     original = target.read_bytes()
     target.write_bytes(b"X" * len(original))  # same size, different content
 
-    checked = restore_mod.restore(
+    kept = restore_mod.restore(
         RestoreOptions(bundle=report.bundle_path, passphrase=PASSPHRASE, destination=destination)
     )
-    assert "files:documents" in checked.digest_mismatches
-    assert not checked.ok
+    assert kept.kept_existing == 1
+    assert target.read_bytes() == b"X" * len(original)
+    # Not a mismatch: the bundle is fine, this file is simply not from it.
+    assert kept.digest_mismatches == []
+    assert any("notes.txt" in note.message for note in kept.notes)
+
+    replaced = restore_mod.restore(
+        RestoreOptions(
+            bundle=report.bundle_path,
+            passphrase=PASSPHRASE,
+            destination=destination,
+            overwrite=True,
+        )
+    )
+    assert target.read_bytes() == original
+    assert replaced.digest_mismatches == [] and replaced.ok
 
 
 def test_a_file_the_user_kept_is_partially_verified_not_a_mismatch(captured, tmp_path: Path):
@@ -796,3 +818,48 @@ def test_choosing_fewer_items_needs_less_room(captured, tmp_path: Path, monkeypa
                 bundle=report.bundle_path, passphrase=PASSPHRASE, destination=tmp_path / "all"
             )
         )
+
+
+def test_a_resumed_restore_still_skips_what_is_genuinely_there(captured, tmp_path: Path):
+    """The reason the size check existed. Reading the file to be sure costs
+    nothing overall -- a skipped file was hashed from disk at verification time
+    anyway -- and now the digest is known, so it is not read twice."""
+    report, _scan = captured
+    destination = tmp_path / "restored"
+    first = restore_mod.restore(
+        RestoreOptions(bundle=report.bundle_path, passphrase=PASSPHRASE, destination=destination)
+    )
+    before = digests(destination)
+
+    second = restore_mod.restore(
+        RestoreOptions(bundle=report.bundle_path, passphrase=PASSPHRASE, destination=destination)
+    )
+
+    assert second.restored_files == 0
+    assert second.skipped_existing == first.restored_files
+    assert second.digest_mismatches == [] and second.ok
+    # Nothing was rewritten, and no part-files were left behind.
+    assert digests(destination) == before
+    assert not list(destination.rglob("*.winmigrate-part"))
+
+
+def test_a_failed_write_leaves_no_part_file_behind(captured, tmp_path: Path, monkeypatch):
+    """Litter in someone's Documents folder, with a name that means nothing to
+    them, left by the one run that also told them something went wrong."""
+    report, _scan = captured
+    destination = tmp_path / "restored"
+    real_replace = restore_mod.os.replace
+
+    def failing_replace(source, target, *args, **kwargs):
+        if str(target).endswith("report.docx"):
+            raise OSError(13, "Permission denied")
+        return real_replace(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(restore_mod.os, "replace", failing_replace)
+
+    result = restore_mod.restore(
+        RestoreOptions(bundle=report.bundle_path, passphrase=PASSPHRASE, destination=destination)
+    )
+
+    assert any("report.docx" in path for path, _reason in result.failures)
+    assert not list(destination.rglob("*.winmigrate-part"))

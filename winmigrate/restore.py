@@ -284,14 +284,6 @@ def _restore_member(info, stream, destination: Path, options: RestoreOptions,
         return
 
     existing = _existing_state(target, info.size)
-    if existing == "same":
-        # Re-running an interrupted restore must not redo finished work. The
-        # file still counts towards the item's digest, so it is recorded and
-        # hashed from disk during verification -- otherwise a resumed restore
-        # would compare a partial tree and report corruption that is not there.
-        report.skipped_existing += 1
-        already_present[info.name] = target
-        return
     if existing == "differs" and not options.overwrite:
         # The user's own version was kept, so it deliberately differs from the
         # bundle and cannot be verified against it.
@@ -306,21 +298,57 @@ def _restore_member(info, stream, destination: Path, options: RestoreOptions,
         )
         return
 
+    temporary = target.with_name(target.name + ".winmigrate-part")
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         digest = hashlib.sha256()
         # Written to a temporary name first: an interrupted write must not leave
-        # a half-file that the next run would mistake for finished work.
-        temporary = target.with_name(target.name + ".winmigrate-part")
+        # a half-file that the next run would mistake for finished work. When
+        # something of the same length is already there, its bytes are read
+        # alongside so that "already restored" is something established rather
+        # than assumed -- see _CompareAlong.
+        compare = _CompareAlong(target) if existing == "same" else None
         with open(pathutil.extended(temporary), "wb") as handle:
             while True:
                 block = stream.read(COPY_CHUNK)
                 if not block:
                     break
                 digest.update(block)
+                if compare is not None:
+                    compare.feed(block)
                 handle.write(block)
+        if compare is not None:
+            compare.close()
+        if compare is not None and compare.identical:
+            # Byte for byte what is already on disk. Nothing to write, and the
+            # digest is known, so verification need not read the file again.
+            temporary.unlink(missing_ok=True)
+            report.skipped_existing += 1
+            written[info.name] = digest.hexdigest()
+            return
+        if compare is not None and not options.overwrite:
+            # Same size, different contents -- the case a size check calls
+            # "already restored". It is the user's own file, so it is kept.
+            temporary.unlink(missing_ok=True)
+            unverifiable.add(info.name)
+            report.kept_existing += 1
+            report.notes.append(
+                Note(
+                    Severity.WARNING,
+                    f"kept the existing {target.name}",
+                    f"{target} is the same size as the backup's copy but not the same "
+                    "file; pass --overwrite to replace it",
+                )
+            )
+            return
         os.replace(pathutil.extended(temporary), pathutil.extended(target))
     except OSError as exc:
+        # A part-file left in someone's Documents folder is litter, and the next
+        # run would write over it anyway.
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:  # pragma: no cover -- nothing more to do about it
+            pass
         report.failures.append((str(target), exc.strerror or str(exc)))
         unverifiable.add(info.name)
         log.warning("could not restore %s: %s", target, exc)
@@ -466,12 +494,64 @@ _read_manifest_only = read_manifest
 
 
 def _existing_state(target: Path, size: int) -> str:
-    """``missing``, ``same`` (size matches) or ``differs``."""
+    """``missing``, ``same`` (the size matches) or ``differs``.
+
+    Only ever the first question. A file of the same length is a *candidate*
+    for having been restored already; whether it actually is gets decided by
+    reading it, because two files of one length are not one file. Deciding it
+    here, on the size alone, meant a file edited on the new machine without
+    changing its length was recorded as already restored, never written even
+    with --overwrite, and then reported as a digest mismatch -- the backup
+    accused of corruption for a file that had never left it.
+    """
     try:
         stat_result = os.stat(pathutil.extended(target))
     except OSError:
         return "missing"
     return "same" if stat_result.st_size == size else "differs"
+
+
+class _CompareAlong:
+    """Reads a file alongside an incoming stream, saying whether they match.
+
+    The bytes are read once either way: a file skipped as already-present is
+    hashed from disk during verification, so comparing it now moves that read
+    earlier rather than adding one -- and saves it entirely when the answer is
+    yes, because the digest is then known.
+    """
+
+    def __init__(self, target: Path) -> None:
+        self.identical = True
+        self._handle = None
+        try:
+            self._handle = open(pathutil.extended(target), "rb")
+        except OSError:  # unreadable: treat it as different and write ours
+            self.identical = False
+
+    def feed(self, block: bytes) -> None:
+        if not self.identical or self._handle is None:
+            return
+        try:
+            theirs = self._handle.read(len(block))
+        except OSError:
+            self.identical = False
+            return
+        if theirs != block:
+            self.identical = False
+
+    def close(self) -> None:
+        if self._handle is None:
+            return
+        try:
+            # Anything left over means their file is longer than the member,
+            # whatever the size said a moment ago.
+            if self.identical and self._handle.read(1):
+                self.identical = False
+        except OSError:
+            self.identical = False
+        finally:
+            self._handle.close()
+            self._handle = None
 
 
 def _target_for(archive_name: str, destination: Path) -> Path | None:
