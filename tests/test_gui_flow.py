@@ -1164,3 +1164,37 @@ def test_unticking_the_check_skips_it(monkeypatch, profile: Path, tmp_path: Path
 
     assert wizard.verify_report is None
     assert "read back and matched" not in wizard.done_text.cget("text")
+
+
+def test_a_check_that_cannot_run_does_not_hide_the_backup_that_was_written(
+    monkeypatch, profile: Path, tmp_path: Path
+):
+    """The bundle is on disk by then. Sharing one try block with the capture
+    meant a failed check threw the window back to the choosing page with an
+    integrity error, as though nothing had been written -- and the file was
+    sitting there all along."""
+    from winmigrate import verify as verify_mod
+    from winmigrate.errors import IntegrityError
+
+    output = tmp_path / "out.dat"
+    monkeypatch.setattr(
+        verify_mod,
+        "verify",
+        lambda *a, **k: (_ for _ in ()).throw(IntegrityError("the drive went away")),
+    )
+
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    wizard.use_vss.set(False)
+    wizard._show(Step.SCANNING)
+    assert pump(wizard) == "scanned"
+    wizard.output_var.set(str(output))
+    wizard.passphrase.insert(0, "hunter2")
+    wizard.passphrase2.insert(0, "hunter2")
+    wizard._show(Step.WORKING)
+    assert pump(wizard) == "captured"
+
+    assert wizard.step is Step.DONE
+    assert output.is_file()
+    text = wizard.done_text.cget("text")
+    assert "the check could not be completed" in text
+    assert "the drive went away" in text

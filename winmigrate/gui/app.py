@@ -166,6 +166,7 @@ class WinMigrateWizard:
         self.scan_result: ScanResult | None = None
         self.capture_report: Any = None
         self.verify_report: Any = None
+        self.verify_failure: str = ""
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.elevation_attempted = bool(options.get("elevation_attempted"))
         self.log_path = Path(options["log_path"]) if options.get("log_path") else None
@@ -1494,6 +1495,13 @@ class WinMigrateWizard:
             lines += ["", line]
         if self.log_path is not None:
             lines += ["", f"Log:          {self.log_path}"]
+        if self.verify_failure:
+            lines += [
+                "",
+                "⚠ The backup was written, but the check could not be completed: "
+                f"{self.verify_failure}",
+                "  Run 'winmigrate verify' on it before relying on it.",
+            ]
         checked = self.verify_report
         if checked is not None:
             if checked.ok:
@@ -1942,10 +1950,19 @@ class WinMigrateWizard:
                 env,
                 lambda title, size: self.events.put(("bytes", (title, size))),
             )
-            if verify_after:
-                from .. import verify as verify_mod  # noqa: PLC0415
+        except Exception as exc:  # noqa: BLE001 -- surfaced in the window
+            self.events.put(("error", (str(exc), traceback.format_exc())))
+            return
 
-                self.events.put(("verifying", str(report.bundle_path)))
+        if verify_after:
+            # Past this point the backup exists. A check that fails, or cannot
+            # run at all, is news about the backup -- not a reason to throw the
+            # window back to the choosing page as though nothing had been
+            # written, which is what a shared try block did.
+            from .. import verify as verify_mod  # noqa: PLC0415
+
+            self.events.put(("verifying", str(report.bundle_path)))
+            try:
                 # Its own event rather than an attribute on the capture report,
                 # which is a slotted dataclass and rightly refuses to grow one.
                 self.events.put(
@@ -1958,9 +1975,10 @@ class WinMigrateWizard:
                         ),
                     )
                 )
-            self.events.put(("captured", report))
-        except Exception as exc:  # noqa: BLE001 -- surfaced in the window
-            self.events.put(("error", (str(exc), traceback.format_exc())))
+            except Exception as exc:  # noqa: BLE001 -- reported on the last page
+                log.error("the check could not be completed", exc_info=True)
+                self.events.put(("check-failed", str(exc)))
+        self.events.put(("captured", report))
 
     def _recovery_step(self) -> Step:
         """Where to land after an error: the last page the user could act on.
@@ -2056,6 +2074,8 @@ class WinMigrateWizard:
             )
         elif kind == "checking":
             self.capture_detail.configure(text=f"Checking {Path(str(payload)).name}")
+        elif kind == "check-failed":
+            self.verify_failure = str(payload)
         elif kind == "checked":
             self.verify_report = payload
             log.info(
