@@ -1093,3 +1093,74 @@ def test_files_caught_mid_write_are_mentioned_on_the_last_page(
     wizard.done_text.configure(text=wizard._done_summary())
 
     assert "being written while they were copied" in wizard.done_text.cget("text")
+
+
+# --- checking the backup ----------------------------------------------------
+def test_the_window_can_read_the_backup_back_and_say_it_matched(
+    monkeypatch, profile: Path, tmp_path: Path
+):
+    """The command line has --verify; the window had nothing, so after an
+    hour-long backup there was no way to find out whether it opens without
+    going to the console tool. It is the question asked just before a machine
+    is wiped."""
+    output = tmp_path / "out.dat"
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    wizard.use_vss.set(False)
+    wizard._show(Step.SCANNING)
+    assert pump(wizard) == "scanned"
+    wizard.output_var.set(str(output))
+    wizard.passphrase.insert(0, "hunter2")
+    wizard.passphrase2.insert(0, "hunter2")
+    assert wizard.verify_after.get() is True  # on by default
+
+    wizard._show(Step.WORKING)
+    assert pump(wizard) == "captured"
+
+    assert wizard.verify_report is not None and wizard.verify_report.ok
+    assert wizard.verify_report.files_checked > 0
+    assert "every file read back and matched" in wizard.done_text.cget("text")
+
+
+def test_a_backup_that_does_not_check_out_says_so_in_as_many_words(
+    monkeypatch, profile: Path, tmp_path: Path
+):
+    """The one result that must not be quiet: the file exists, it is the right
+    size, and it cannot be trusted."""
+    from winmigrate.verify import VerifyReport
+
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    wizard.use_vss.set(False)
+    wizard._show(Step.SCANNING)
+    assert pump(wizard) == "scanned"
+    wizard.output_var.set(str(tmp_path / "out.dat"))
+    wizard.passphrase.insert(0, "hunter2")
+    wizard.passphrase2.insert(0, "hunter2")
+    wizard.verify_after.set(False)
+    wizard._show(Step.WORKING)
+    assert pump(wizard) == "captured"
+
+    wizard.verify_report = VerifyReport(
+        bundle=tmp_path / "out.dat", mismatches=["files:documents"], missing=["files:desktop"]
+    )
+    wizard.done_text.configure(text=wizard._done_summary())
+
+    text = wizard.done_text.cget("text")
+    assert "Do not rely on this backup" in text
+
+
+def test_unticking_the_check_skips_it(monkeypatch, profile: Path, tmp_path: Path):
+    """It takes about as long again as writing the backup."""
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    wizard.use_vss.set(False)
+    wizard._show(Step.SCANNING)
+    assert pump(wizard) == "scanned"
+    wizard.output_var.set(str(tmp_path / "out.dat"))
+    wizard.passphrase.insert(0, "hunter2")
+    wizard.passphrase2.insert(0, "hunter2")
+    wizard.verify_after.set(False)
+
+    wizard._show(Step.WORKING)
+    assert pump(wizard) == "captured"
+
+    assert wizard.verify_report is None
+    assert "read back and matched" not in wizard.done_text.cget("text")

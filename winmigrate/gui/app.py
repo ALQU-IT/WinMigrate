@@ -165,6 +165,7 @@ class WinMigrateWizard:
         self.restore_report: Any = None
         self.scan_result: ScanResult | None = None
         self.capture_report: Any = None
+        self.verify_report: Any = None
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.elevation_attempted = bool(options.get("elevation_attempted"))
         self.log_path = Path(options["log_path"]) if options.get("log_path") else None
@@ -994,6 +995,27 @@ class WinMigrateWizard:
             justify="left",
         ).pack(anchor="w", pady=(10, 0))
 
+        # The command line has --verify and the window had nothing: after an
+        # hour-long backup there was no way to find out whether it opens,
+        # short of running the console tool. The question it answers is the
+        # one asked just before a machine is wiped.
+        self.verify_after = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            page,
+            text="Check the backup afterwards",
+            variable=self.verify_after,
+            style="Wizard.TCheckbutton",
+        ).pack(anchor="w", pady=(16, 0))
+        ttk.Label(
+            page,
+            text="     Reads the whole backup back and compares every file against "
+            "what was recorded. It takes about as long again as writing it, and it "
+            "is what earns the right to wipe this machine.",
+            style="Hint.TLabel",
+            wraplength=620,
+            justify="left",
+        ).pack(anchor="w")
+
     def _page_confirm(self, page: Any) -> None:
         self.confirm_text = self.ttk.Label(
             page, text="", style="Body.TLabel", justify="left", wraplength=640
@@ -1472,6 +1494,22 @@ class WinMigrateWizard:
             lines += ["", line]
         if self.log_path is not None:
             lines += ["", f"Log:          {self.log_path}"]
+        checked = self.verify_report
+        if checked is not None:
+            if checked.ok:
+                lines += [
+                    "",
+                    f"Checked:      every file read back and matched "
+                    f"({checked.files_checked:,} files, "
+                    f"{humanize.bytes_(checked.bytes_checked)}).",
+                ]
+            else:
+                lines += [
+                    "",
+                    f"⚠ The check found problems: {len(checked.mismatches)} item(s) did "
+                    f"not match and {len(checked.missing)} were missing. Do not rely on "
+                    "this backup — make another one before wiping anything.",
+                ]
         if report.changed_while_reading:
             lines += [
                 "",
@@ -1878,12 +1916,21 @@ class WinMigrateWizard:
         )
         threading.Thread(
             target=self._capture_worker,
-            args=(options, self._config(), set(self.data.selected)),
+            args=(
+                options,
+                self._config(),
+                set(self.data.selected),
+                self.verify_after.get(),
+            ),
             daemon=True,
         ).start()
 
     def _capture_worker(
-        self, options: CaptureOptions, config: ScanConfig, chosen: set[str]
+        self,
+        options: CaptureOptions,
+        config: ScanConfig,
+        chosen: set[str],
+        verify_after: bool = False,
     ) -> None:
         try:
             env = self._environment(config)
@@ -1895,6 +1942,22 @@ class WinMigrateWizard:
                 env,
                 lambda title, size: self.events.put(("bytes", (title, size))),
             )
+            if verify_after:
+                from .. import verify as verify_mod  # noqa: PLC0415
+
+                self.events.put(("verifying", str(report.bundle_path)))
+                # Its own event rather than an attribute on the capture report,
+                # which is a slotted dataclass and rightly refuses to grow one.
+                self.events.put(
+                    (
+                        "checked",
+                        verify_mod.verify(
+                            report.bundle_path,
+                            options.passphrase,
+                            lambda name, _size: self.events.put(("checking", name)),
+                        ),
+                    )
+                )
             self.events.put(("captured", report))
         except Exception as exc:  # noqa: BLE001 -- surfaced in the window
             self.events.put(("error", (str(exc), traceback.format_exc())))
@@ -1985,6 +2048,22 @@ class WinMigrateWizard:
                 f"{humanize.bytes_(self._capture_total)}"
             )
             self.capture_detail.configure(text=str(title))
+        elif kind == "verifying":
+            self.capture_bar.configure(value=1000)
+            self.capture_status.configure(text="Checking the backup")
+            self.capture_detail.configure(
+                text="Reading it back and comparing every file against what was recorded."
+            )
+        elif kind == "checking":
+            self.capture_detail.configure(text=f"Checking {Path(str(payload)).name}")
+        elif kind == "checked":
+            self.verify_report = payload
+            log.info(
+                "check finished: %s file(s), %s mismatch(es), %s missing",
+                payload.files_checked,
+                len(payload.mismatches),
+                len(payload.missing),
+            )
         elif kind == "scanned":
             # A new scan is a new plan, and nothing staged against the old one
             # is in it. Chief among them the password exports: keeping those

@@ -106,6 +106,15 @@ profile it inspects, and cannot trigger a cloud download.
 * which cloud-sync folders were found, and which account owns each;
 * what you will still have to do yourself once the restore is done.
 
+### Checking a backup
+
+`winmigrate verify BUNDLE` reads a backup back and compares every file against
+what the manifest recorded when it was written — the restore's verification
+pass without the restore. `capture --verify` does it in the same run, and the
+window offers it as a tick box on the page where the backup is named (on by
+default). It is what earns the right to wipe the old machine: `inspect` only
+checks the file arrived intact, which is a different question.
+
 ### The log
 
 Every run writes one. The command line writes it where `--log-file` says; the
