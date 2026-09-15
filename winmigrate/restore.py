@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import shutil
 import time
 from collections.abc import Callable
 from typing import Any
@@ -33,7 +34,7 @@ from . import keepawake
 from . import manifest as manifest_mod
 from .errors import IntegrityError, WinMigrateError
 from .models import Followup, Note, Severity
-from .util import paths as pathutil
+from .util import humanize, paths as pathutil
 
 log = logging.getLogger(__name__)
 
@@ -65,6 +66,8 @@ class RestoreOptions:
     #: mapped drives, environment variables. On by default: re-adding eleven
     #: printers by hand is not consent, it is tedium.
     apply_settings: bool = True
+    #: Check the destination has room before writing anything.
+    space_check: bool = True
 
 
 @dataclass(slots=True)
@@ -163,6 +166,8 @@ def restore(options: RestoreOptions, progress: ProgressCallback | None = None) -
 
     destination = Path(os.fspath(options.destination)) if options.destination else _default_profile()
     report.destination = destination
+    if not options.dry_run and options.space_check:
+        _check_room(bundle_path, destination, options, report)
     written: dict[str, str] = {}
     already_present: dict[str, Path] = {}
     unverifiable: set[str] = set()
@@ -326,6 +331,57 @@ def _restore_member(info, stream, destination: Path, options: RestoreOptions,
     report.restored_bytes += info.size
     if progress is not None:
         progress(target.name, info.size)
+
+
+#: Headroom left free after a restore, matching what capture keeps. Filling a
+#: Windows system disk to the last byte does not merely fail the copy: the
+#: machine stops being usable while it is happening.
+FREE_SPACE_MARGIN = 512 * 1024 * 1024
+
+
+def _check_room(
+    bundle_path: Path, destination: Path, options: RestoreOptions, report: RestoreReport
+) -> None:
+    """Refuse a restore that cannot fit, before a byte of it is written.
+
+    Capture has always checked this and restore never did, which is the wrong
+    way round: a capture that runs out of space wastes an hour, and a restore
+    that runs out fills the disk of a machine someone is standing in front of
+    -- usually the new one, mid-migration, with the old one already wiped.
+
+    Sizes come from the plaintext sidecar, which carries them even for the
+    secret items it redacts. Without a sidecar there is nothing to add up and
+    the restore goes ahead: a check that cannot be made is not a reason to
+    refuse.
+    """
+    sidecar = load_sidecar(bundle_path)
+    if not sidecar:
+        return
+    wanted = set(options.items)
+    needed = 0
+    for item in sidecar.get("items", []):
+        if not isinstance(item, dict) or item.get("action") != "capture":
+            continue
+        if wanted and item.get("id") not in wanted:
+            continue
+        needed += int(item.get("size_bytes") or 0)
+    if needed <= 0:
+        return
+    target = destination if destination.is_dir() else destination.parent
+    while not target.exists() and target != target.parent:
+        target = target.parent
+    try:
+        free = shutil.disk_usage(target).free
+    except OSError:  # a path this machine cannot measure is not a reason to stop
+        return
+    if free >= needed + FREE_SPACE_MARGIN:
+        return
+    raise RestoreError(
+        f"not enough free space at {destination}: putting this back needs about "
+        f"{humanize.bytes_(needed)} and only {humanize.bytes_(free)} is free. "
+        f"Free some space, restore somewhere else, choose fewer items, or pass "
+        f"--no-space-check to try anyway."
+    )
 
 
 def _selected_prefixes(options: RestoreOptions, bundle_path: Path) -> list[str] | None:

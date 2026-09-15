@@ -269,6 +269,12 @@ def _add_restore_arguments(parser: argparse.ArgumentParser) -> None:
         help="do not re-add Wi-Fi networks, printers, mapped drives or environment "
         "variables; list them for you to do by hand instead",
     )
+    parser.add_argument(
+        "--no-space-check",
+        dest="space_check",
+        action="store_false",
+        help="write even if the destination looks too small",
+    )
 
 
 def _add_scan_arguments(parser: argparse.ArgumentParser) -> None:
@@ -755,6 +761,7 @@ def cmd_restore(args: argparse.Namespace, console: Console) -> int:
         overwrite=args.overwrite,
         items=tuple(args.item),
         apply_settings=getattr(args, "apply_settings", True),
+        space_check=getattr(args, "space_check", True),
     )
     with console.status("[cyan]restoring…"):
         restore_report = restore_mod.restore(options)

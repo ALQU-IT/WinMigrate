@@ -998,3 +998,29 @@ def test_the_sidecar_counts_as_a_backup_being_there(monkeypatch, profile: Path, 
     wizard._show(Step.DESTINATION)
 
     assert wizard.next_button.state == "disabled"
+
+
+def test_the_restore_page_says_when_there_is_no_room(monkeypatch, bundle: Path, tmp_path: Path):
+    """Being told before pressing Start is the difference between unticking a
+    few items and finding out at the end of a page you have already left."""
+    import shutil
+    from collections import namedtuple
+
+    Usage = namedtuple("Usage", "total used free")
+    monkeypatch.setattr(shutil, "disk_usage", lambda path: Usage(1_000, 999, 1))
+
+    wizard, _ = open_window(monkeypatch, {})
+    wizard.mode_var.set(Mode.RESTORE.value)
+    wizard.bundle_var.set(str(bundle))
+    wizard.bundle_passphrase.insert(0, "pw")
+    wizard._show(Step.OPENING)
+    assert pump(wizard) == "opened"
+    wizard.destination_var.set(str(tmp_path))
+    wizard._show(Step.RESTORE_CONFIRM)
+
+    assert "Not enough room" in wizard.restore_summary.cget("text")
+
+    # A practice run writes nothing, so a full disk is no reason to warn.
+    wizard.dry_run_var.set(True)
+    wizard._refresh_restore_summary()
+    assert "Not enough room" not in wizard.restore_summary.cget("text")

@@ -89,6 +89,8 @@ Restore flags:
 | `--overwrite` | Replace existing files that differ (default: keep yours) |
 | `--item ID` | Restore only one item, e.g. `--item files:documents` |
 | `-d`, `--destination` | Restore somewhere other than the current profile |
+| `--no-apply-settings` | Do not re-add Wi-Fi, printers, mapped drives or environment variables |
+| `--no-space-check` | Write even if the destination looks too small |
 
 An interrupted restore can simply be re-run: files already present and matching
 are skipped.

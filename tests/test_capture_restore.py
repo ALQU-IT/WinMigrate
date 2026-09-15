@@ -707,3 +707,92 @@ def test_a_stray_sidecar_also_counts_as_a_backup_being_there(
         capture_mod.capture(
             scan, CaptureOptions(output=output, passphrase=PASSPHRASE, use_vss=False), config, env
         )
+
+
+def test_a_restore_that_cannot_fit_is_refused_before_it_writes(
+    captured, tmp_path: Path, monkeypatch
+):
+    """Capture has always checked for room and restore never did, which is the
+    wrong way round: a capture that runs out of space wastes an hour, and a
+    restore that runs out fills the disk of the machine someone is standing in
+    front of -- usually the new one, mid-migration, with the old one wiped."""
+    import shutil as _shutil
+    from collections import namedtuple
+
+    report, _scan = captured
+    destination = tmp_path / "restored"
+    Usage = namedtuple("Usage", "total used free")
+    monkeypatch.setattr(_shutil, "disk_usage", lambda path: Usage(1_000, 999, 1))
+
+    with pytest.raises(RestoreError, match="not enough free space"):
+        restore_mod.restore(
+            RestoreOptions(
+                bundle=report.bundle_path, passphrase=PASSPHRASE, destination=destination
+            )
+        )
+    assert not destination.exists() or not any(destination.rglob("*"))
+
+    # And it is a check, not a rule: --no-space-check still goes ahead.
+    result = restore_mod.restore(
+        RestoreOptions(
+            bundle=report.bundle_path,
+            passphrase=PASSPHRASE,
+            destination=destination,
+            space_check=False,
+        )
+    )
+    assert result.restored_files > 0
+
+
+def test_a_practice_run_needs_no_room_at_all(captured, tmp_path: Path, monkeypatch):
+    """It writes nothing, so a full disk is no reason to refuse to report."""
+    import shutil as _shutil
+    from collections import namedtuple
+
+    report, _scan = captured
+    Usage = namedtuple("Usage", "total used free")
+    monkeypatch.setattr(_shutil, "disk_usage", lambda path: Usage(1_000, 999, 1))
+
+    result = restore_mod.restore(
+        RestoreOptions(
+            bundle=report.bundle_path,
+            passphrase=PASSPHRASE,
+            destination=tmp_path / "dry",
+            dry_run=True,
+        )
+    )
+    assert result.restored_files > 0
+
+
+def test_choosing_fewer_items_needs_less_room(captured, tmp_path: Path, monkeypatch):
+    """The check counts what was selected, not the whole bundle -- otherwise
+    "restore just my Desktop onto this small laptop" is refused for the size of
+    everything the user did not ask for."""
+    import shutil as _shutil
+    from collections import namedtuple
+
+    report, _scan = captured
+    sidecar = json.loads(report.manifest_path.read_text(encoding="utf-8"))
+    desktop = next(
+        item for item in sidecar["items"] if item.get("id") == "files:desktop"
+    )
+    Usage = namedtuple("Usage", "total used free")
+    room = desktop["size_bytes"] + restore_mod.FREE_SPACE_MARGIN + 1
+    monkeypatch.setattr(_shutil, "disk_usage", lambda path: Usage(room, 0, room))
+
+    result = restore_mod.restore(
+        RestoreOptions(
+            bundle=report.bundle_path,
+            passphrase=PASSPHRASE,
+            destination=tmp_path / "one",
+            items=("files:desktop",),
+        )
+    )
+    assert result.restored_files == 1
+
+    with pytest.raises(RestoreError, match="not enough free space"):
+        restore_mod.restore(
+            RestoreOptions(
+                bundle=report.bundle_path, passphrase=PASSPHRASE, destination=tmp_path / "all"
+            )
+        )

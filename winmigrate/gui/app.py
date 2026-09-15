@@ -1625,6 +1625,9 @@ class WinMigrateWizard:
             f"{len(self.data.restore_selected)} item(s), "
             f"{humanize.bytes_(total_bytes)} in {total_files:,} files",
         ]
+        short = self._room_shortfall(total_bytes)
+        if short:
+            lines += ["", short]
         if self.apply_settings_var.get() and not self.dry_run_var.get():
             lines += [
                 "",
@@ -1639,6 +1642,35 @@ class WinMigrateWizard:
             lines += ["", "Files already here that differ will be kept, not replaced."]
         self.restore_summary.configure(text="\n".join(lines))
         self._refresh_buttons()
+
+    def _room_shortfall(self, needed: int) -> str:
+        """Say on the page, not in an error afterwards, when there is no room.
+
+        The restore refuses either way; being told before pressing Start is the
+        difference between choosing fewer items and finding out at the end of a
+        page you have already left.
+        """
+        import shutil  # noqa: PLC0415
+
+        raw = self.destination_var.get().strip()
+        if not raw or self.dry_run_var.get() or needed <= 0:
+            return ""
+        target = Path(raw)
+        while not target.exists() and target != target.parent:
+            target = target.parent
+        try:
+            free = shutil.disk_usage(target).free
+        except OSError:
+            return ""
+        from ..restore import FREE_SPACE_MARGIN  # noqa: PLC0415
+
+        if free >= needed + FREE_SPACE_MARGIN:
+            return ""
+        return (
+            f"⚠ Not enough room: this needs about {humanize.bytes_(needed)} and "
+            f"{humanize.bytes_(free)} is free. Untick some items, or restore to "
+            "another drive."
+        )
 
     def _start_restore(self) -> None:
         from ..restore import RestoreOptions  # noqa: PLC0415
