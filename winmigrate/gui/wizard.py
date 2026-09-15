@@ -203,6 +203,9 @@ class WizardData:
     rows: list = field(default_factory=list)
     selected: set[str] = field(default_factory=set)
     output_path: str = ""
+    #: None when nothing is at the output path; otherwise whether the user has
+    #: agreed to replace what is there.
+    replace_output: bool | None = None
     #: Exports the user completed, by profile key. One record per profile, so
     #: choosing a second file for the same one replaces the first rather than
     #: leaving it behind in a list of files to delete.
@@ -348,6 +351,15 @@ def check(step: Step, data: WizardData) -> Check:
         parent = Path(data.output_path).parent
         if not parent.is_dir():
             return Check(False, f"{parent} does not exist.")
+        if data.replace_output is False:
+            # Something is already at that name. Refusing here rather than
+            # asking at the end: by the time a capture starts, the old backup
+            # is gone whatever the answer.
+            return Check(
+                False,
+                f"{Path(data.output_path).name} is already there. Choose another "
+                "name, or tick the box to replace it.",
+            )
         if not data.passphrase:
             return Check(False, "A passphrase is required — the backup is always encrypted.")
         if data.passphrase != data.passphrase_confirm:

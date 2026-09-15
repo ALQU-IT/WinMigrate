@@ -64,6 +64,10 @@ class CaptureOptions:
     passphrase: str
     use_vss: bool = True
     skip_space_check: bool = False
+    #: Write over a backup that is already at this path. Off, because the file
+    #: it would destroy is a backup: the one kind of file whose whole purpose is
+    #: being there when something else is not.
+    overwrite: bool = False
     #: "auto" | "none" | "fast" | "best"; see winmigrate.compression.
     compression: str = "auto"
 
@@ -133,6 +137,16 @@ def capture(
                 f"it cannot be relied on for media or disk images. Free some space, "
                 f"choose another destination, or pass --no-space-check to try anyway."
             )
+
+    if not options.overwrite and (output.exists() or manifest_path.exists()):
+        # A bundle written to a name that is already taken destroys the backup
+        # that was there, and nothing about the process says so afterwards: the
+        # new file has the same name, the same shape, and none of the old data.
+        raise CaptureError(
+            f"{output.name} is already there. Writing over it would destroy that "
+            f"backup, and it cannot be recovered afterwards. Choose another name, "
+            f"or pass --overwrite if replacing it is what you meant."
+        )
 
     report = CaptureReport(bundle_path=output, manifest_path=manifest_path)
 

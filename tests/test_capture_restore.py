@@ -512,7 +512,15 @@ def test_recapturing_over_last_weeks_bundle_does_not_swallow_it(tmp_path: Path):
     assert scan.totals().capture_files == 3  # the plan does count the old pair
 
     capture_mod.capture(
-        scan, CaptureOptions(output=output, passphrase=PASSPHRASE, use_vss=False), config, env
+        scan,
+        # Replacing last week's bundle is the point of this run, and saying so
+        # is now required: without it capture refuses rather than destroying a
+        # backup because a name was reused.
+        CaptureOptions(
+            output=output, passphrase=PASSPHRASE, use_vss=False, overwrite=True
+        ),
+        config,
+        env,
     )
     destination = tmp_path / "restored"
     result = restore_mod.restore(
@@ -659,3 +667,43 @@ def _header() -> dict:
         "compression": "none",
         "kdf": crypto.kdf_params_to_json(crypto.default_kdf_params()),
     }
+
+
+def test_capture_refuses_to_write_over_a_backup_unless_told_to(
+    profile: Path, env: Environment, tmp_path: Path
+):
+    """The file it would destroy is a backup: the one kind of file whose whole
+    purpose is being there when something else is not. Afterwards nothing says
+    what was lost -- same name, same shape, none of the old data."""
+    config = ScanConfig(profile_root=profile)
+    scan = run_scan(config, env)
+    output = tmp_path / "backup.dat"
+    output.write_bytes(b"LAST WEEK'S BUNDLE")
+
+    with pytest.raises(CaptureError, match="already there"):
+        capture_mod.capture(
+            scan, CaptureOptions(output=output, passphrase=PASSPHRASE, use_vss=False), config, env
+        )
+    assert output.read_bytes() == b"LAST WEEK'S BUNDLE"
+
+    capture_mod.capture(
+        scan,
+        CaptureOptions(output=output, passphrase=PASSPHRASE, use_vss=False, overwrite=True),
+        config,
+        env,
+    )
+    assert output.read_bytes() != b"LAST WEEK'S BUNDLE"
+
+
+def test_a_stray_sidecar_also_counts_as_a_backup_being_there(
+    profile: Path, env: Environment, tmp_path: Path
+):
+    config = ScanConfig(profile_root=profile)
+    scan = run_scan(config, env)
+    output = tmp_path / "backup.dat"
+    output.with_suffix(".manifest.json").write_text('{"old": true}', encoding="utf-8")
+
+    with pytest.raises(CaptureError, match="already there"):
+        capture_mod.capture(
+            scan, CaptureOptions(output=output, passphrase=PASSPHRASE, use_vss=False), config, env
+        )

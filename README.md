@@ -78,6 +78,7 @@ Useful flags:
 | `--fast` | Do not measure the size of what is being skipped |
 | `--exclude PATTERN` / `--include PATTERN` | Adjust the exclusion rules (repeatable) |
 | `--exclude-preset NAME` | Apply a named preset, e.g. `device-backups`, `vm-images` (see `winmigrate presets`) |
+| `--overwrite` | Replace a backup already at the output path (refused by default) |
 | `--log-file PATH` | Write a detailed log |
 
 Restore flags:

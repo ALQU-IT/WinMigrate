@@ -964,6 +964,17 @@ class WinMigrateWizard:
         )
         self.output_hint = ttk.Label(page, text="", style="Hint.TLabel", wraplength=620)
         self.output_hint.pack(anchor="w", pady=(0, 20))
+        # Shown only when a file of that name is already there. A backup is the
+        # one kind of file whose whole purpose is being there when something
+        # else is not, so replacing one is a decision, not a default.
+        self.replace_var = tk.BooleanVar(value=False)
+        self.replace_check = ttk.Checkbutton(
+            page,
+            text="Replace the backup that is already there",
+            variable=self.replace_var,
+            style="Wizard.TCheckbutton",
+            command=self._refresh_buttons,
+        )
 
         ttk.Label(page, text="Passphrase", style="Body.TLabel").pack(anchor="w")
         self.passphrase = ttk.Entry(page, show="•")
@@ -1126,6 +1137,7 @@ class WinMigrateWizard:
         self.data.mode = Mode(self.mode_var.get())
         self.data.profile_root = self.profile_var.get()
         self.data.output_path = self.output_var.get()
+        self.data.replace_output = self.replace_var.get() if self._output_exists() else None
         self.data.passphrase = self.passphrase.get()
         self.data.passphrase_confirm = self.passphrase2.get()
         self.data.bundle_path = self.bundle_var.get()
@@ -1188,11 +1200,17 @@ class WinMigrateWizard:
             self.root.destroy()
             return
         if self.step in (Step.WORKING, Step.RESTORING):
-            if messagebox.askyesno(
-                "WinMigrate",
-                "Stop the backup?\n\nThe part written so far will not be a usable "
-                "backup and should be deleted.",
-            ):
+            # The two jobs leave very different things half-done, and telling
+            # someone stopping a restore that their "backup" is unusable is
+            # alarming and untrue.
+            question = (
+                "Stop the restore?\n\nThe files put back so far stay where they are. "
+                "Running the restore again finishes the rest; nothing is written twice."
+                if self.step is Step.RESTORING
+                else "Stop the backup?\n\nThe part written so far will not be a usable "
+                "backup and should be deleted."
+            )
+            if messagebox.askyesno("WinMigrate", question):
                 self.root.destroy()
             return
         self.root.destroy()
@@ -1337,6 +1355,16 @@ class WinMigrateWizard:
     def _update_output_hint(self) -> None:
         output = self.output_var.get()
         drive = defaults.program_drive()
+        if output and self._output_exists():
+            self.output_hint.configure(
+                text=f"There is already a backup called {Path(output).name} there. "
+                "Writing over it destroys it, and nothing afterwards says what it "
+                "held. Choose another name, or tick the box to replace it."
+            )
+            self.replace_check.pack(anchor="w", pady=(0, 16))
+            return
+        self.replace_var.set(False)
+        self.replace_check.pack_forget()
         if output and defaults.same_drive(output, self.profile_var.get()):
             self.output_hint.configure(
                 text="This is the same drive the profile is on, so it needs as much "
@@ -1346,6 +1374,24 @@ class WinMigrateWizard:
             self.output_hint.configure(
                 text=f"Defaults to {drive}, the drive WinMigrate is running from."
             )
+
+    def _output_exists(self) -> bool:
+        """Is there already a backup at the chosen path?
+
+        The sidecar counts as well as the bundle: half of a pair left behind is
+        still someone's backup, and overwriting one of the two leaves a bundle
+        and a manifest that describe different things.
+        """
+        raw = self.output_var.get().strip()
+        if not raw:
+            return False
+        output = Path(raw)
+        if output.suffix.lower() != ".dat":
+            output = output.with_suffix(".dat")
+        try:
+            return output.exists() or output.with_suffix(".manifest.json").exists()
+        except OSError:
+            return False
 
     # --- summaries ---------------------------------------------------------
     def _confirm_summary(self) -> str:
@@ -1369,6 +1415,8 @@ class WinMigrateWizard:
             "The backup is encrypted with the passphrase you typed. Nothing is",
             "uploaded anywhere; the file stays where you put it.",
         ]
+        if self.replace_var.get():
+            lines.insert(2, "Replaces:     the backup already at that name")
         if self.data.passwords_added:
             lines.insert(
                 6,
@@ -1773,6 +1821,7 @@ class WinMigrateWizard:
             passphrase=self.passphrase.get(),
             use_vss=self.use_vss.get(),
             compression=self.options.get("compression", "auto"),
+            overwrite=self.replace_var.get(),
         )
         log.info(
             "capture started: %s items, %s, shadow copy=%s, rights=%s, to %s",

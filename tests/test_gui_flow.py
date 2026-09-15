@@ -952,3 +952,49 @@ def test_a_capture_warning_reaches_the_last_page(monkeypatch, profile: Path, tmp
     wizard.done_text.configure(text=wizard._done_summary())
 
     assert "shadow copy could not be read" in wizard.done_text.cget("text")
+
+
+# --- not writing over a backup ----------------------------------------------
+def test_a_name_that_is_already_a_backup_blocks_the_button(
+    monkeypatch, profile: Path, tmp_path: Path
+):
+    """A bundle written to a name that is taken destroys the backup that was
+    there, and nothing afterwards says so: the new file has the same name, the
+    same shape, and none of the old data."""
+    taken = tmp_path / "backup.dat"
+    taken.write_bytes(b"LAST WEEK'S BUNDLE")
+
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    wizard._show(Step.SCANNING)
+    assert pump(wizard) == "scanned"
+    wizard.output_var.set(str(taken))
+    wizard.passphrase.insert(0, "hunter2")
+    wizard.passphrase2.insert(0, "hunter2")
+    wizard._show(Step.DESTINATION)
+
+    assert wizard.next_button.state == "disabled"
+    assert "already there" in wizard.hint.cget("text")
+    assert "already a backup" in wizard.output_hint.cget("text")
+
+    # Ticking the box is the decision, and the confirmation page repeats it.
+    wizard.replace_var.set(True)
+    wizard._refresh_buttons()
+    assert wizard.next_button.state == "normal"
+    wizard._show(Step.CONFIRM)
+    assert "Replaces:" in wizard.confirm_text.cget("text")
+
+
+def test_the_sidecar_counts_as_a_backup_being_there(monkeypatch, profile: Path, tmp_path: Path):
+    """Half a pair left behind is still someone's backup, and replacing one of
+    the two leaves a bundle and a manifest describing different things."""
+    (tmp_path / "backup.manifest.json").write_text("{}", encoding="utf-8")
+
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    wizard._show(Step.SCANNING)
+    assert pump(wizard) == "scanned"
+    wizard.output_var.set(str(tmp_path / "backup.dat"))
+    wizard.passphrase.insert(0, "hunter2")
+    wizard.passphrase2.insert(0, "hunter2")
+    wizard._show(Step.DESTINATION)
+
+    assert wizard.next_button.state == "disabled"

@@ -199,6 +199,11 @@ def _add_capture_arguments(parser: argparse.ArgumentParser) -> None:
         help="do not create a shadow copy; files held open by programs may be unreadable",
     )
     parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="replace a backup that is already at the output path",
+    )
+    parser.add_argument(
         "--no-space-check",
         dest="space_check",
         action="store_false",
@@ -511,6 +516,7 @@ def cmd_capture(args: argparse.Namespace, console: Console) -> int:
         use_vss=args.use_vss,
         skip_space_check=not args.space_check,
         compression=getattr(args, "compression", "auto"),
+        overwrite=getattr(args, "overwrite", False),
     )
 
     with Progress(
