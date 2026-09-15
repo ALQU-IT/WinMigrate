@@ -739,6 +739,31 @@ def test_the_export_address_goes_on_the_clipboard_either_way(monkeypatch, profil
     assert "Open it yourself" in wizard.password_status["chrome"].cget("text")
 
 
+def test_the_window_does_not_claim_a_page_the_browser_never_opened(
+    monkeypatch, profile: Path
+):
+    """Chromium ignores an internal address handed to it by another program, so
+    the browser comes up on its settings and not on the password page. Saying
+    "Chrome should now be showing chrome://password-manager/settings" sends the
+    user hunting for a tab that was never opened; the window says where it
+    really is and what the remaining hop is."""
+    from winmigrate import passwords as passwords_mod
+
+    chrome_with_local_passwords(profile)
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    wizard._show(Step.SCANNING)
+    assert pump(wizard) == "scanned"
+    wizard._show(Step.PASSWORDS)
+
+    monkeypatch.setattr(passwords_mod, "open_export_page", lambda target, env=None: True)
+    wizard._open_export_page("chrome")
+
+    said = wizard.password_status["chrome"].cget("text")
+    assert "should now be showing" not in said
+    assert "settings" in said and "chrome://password-manager/settings" in said
+    assert "Export passwords" in said
+
+
 def test_the_page_offers_every_profile_that_has_local_passwords(
     monkeypatch, profile: Path, tmp_path: Path
 ):

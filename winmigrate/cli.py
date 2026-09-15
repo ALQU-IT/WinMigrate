@@ -637,15 +637,19 @@ def _collect_browser_passwords(args, result, env, console) -> list[Path]:
             ).strip().lower() not in {"y", "yes"}:
                 continue
             opened = passwords_mod.open_export_page(target, env)
-            # The address is printed either way. These are internal browser URLs
-            # that differ between versions, so if the browser lands somewhere
-            # other than the export screen the user needs to know where to go --
-            # and finding that out after the browser opened is too late.
-            lead = (
-                f"{target.label} should have opened here:"
-                if opened
-                else f"Could not launch {target.label} here. Open it yourself and go to:"
-            )
+            # The address is printed in every case. These are internal browser
+            # URLs that differ between versions, and a Chromium ignores its own
+            # when another program passes it -- so the user needs to know where
+            # to go, and finding that out after the browser opened is too late.
+            if not opened:
+                lead = f"Could not launch {target.label}. Open it yourself and go to:"
+            elif passwords_mod.opens_directly(target):
+                lead = f"{target.label} should have opened here:"
+            else:
+                lead = (
+                    f"{target.label} is open at its settings; a browser will not let "
+                    "another program open its password page. Go here:"
+                )
             console.print(
                 f"[dim]{lead}[/dim]\n    [bold]{target.export_page}[/bold]\n"
                 "[dim]Use 'Export passwords' (it will ask for Windows Hello), save the "

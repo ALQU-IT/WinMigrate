@@ -161,7 +161,11 @@ browser's own export and re-import — on its own page in the window, and with
 browser *profile*, because that is how browsers keep passwords: a Brave with a
 work profile and a personal one is offered two exports, opened in the right
 profile (`--profile-directory`), and each lands in the bundle under its own
-name. What the
+name. The button opens that profile at the browser's settings rather than at
+the password page itself: Chromium ignores an internal address handed to it by
+another program, and that restriction is a good one — so the address is put on
+your clipboard for a single paste, and the window says which of the two
+happened instead of naming a page that is not on screen. What the
 browser writes is plaintext, so it is staged as encrypted-only material: inside
 the bundle it is encrypted, in the plaintext sidecar it is a redacted stub, on
 restore it lands in `WinMigrate-Passwords\` with an import-then-delete

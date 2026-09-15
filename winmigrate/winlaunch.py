@@ -10,8 +10,12 @@ already has open. Chromium keeps one instance per profile, and the running one
 is theirs at medium integrity; the elevated launch cannot hand its command line
 across that boundary, cannot take the profile lock either, and the visible
 result is a browser window that comes to the front **without going anywhere**.
-Which is exactly what it looked like: "it opens the browser, but it doesn't go
-to the link".
+
+That was half of "it opens the browser, but it doesn't go to the link". The
+other half is not a privilege problem at all and is not solved here: Chromium
+refuses to navigate to its own internal pages on another program's say-so, so
+the address has to be one it accepts. See
+:data:`winmigrate.passwords.LANDING_PAGES`.
 
 The fix is to launch it as the user rather than as the administrator, which is
 a step *down* in privilege and the right way round in every sense: the browser

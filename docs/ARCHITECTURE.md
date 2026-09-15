@@ -246,6 +246,17 @@ the rows. The CSV is captured as encrypted-only material, restored into a named
 plaintext source is shredded (best effort) once it is in the bundle. A browser
 with sync on is not offered at all: its passwords return on sign-in.
 
+"Opens the browser at its password page" is as close as a browser permits.
+Chromium filters the addresses another program hands it at startup down to
+web-safe schemes, `file:`, and -- of its own pages -- the settings root alone;
+everything below it is dropped silently, on the reasoning that a program able to
+steer someone's browser into its password settings from outside is the start of
+an attack. That reasoning is right, so WinMigrate works inside it rather than
+around it: the browser is launched (de-elevated, in the correct profile) at its
+settings root, the real address goes on the clipboard, and both front ends say
+which of the two happened. Defeating that filter would be the same kind of move
+as decrypting the password store, and is refused for the same reason.
+
 ## Skip accounting
 
 A migration tool that quietly drops data is worse than one that copies too much,

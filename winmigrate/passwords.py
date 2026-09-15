@@ -69,6 +69,37 @@ EXPORT_PAGES: dict[str, str] = {
     "firefox": "about:logins",
 }
 
+#: What a browser will actually accept from *us*, which is rarely the page
+#: above.
+#:
+#: A browser does not navigate to its own internal pages on the say-so of
+#: another program. Chromium filters the addresses it is handed at startup down
+#: to web-safe schemes, ``file:`` -- and, of its own pages, the settings root
+#: and nothing below it; "exposing other settings pages is a security risk" is
+#: how its source puts it. So ``brave.exe brave://password-manager/settings``
+#: starts Brave, drops the address on the floor and shows the new tab page.
+#: Which is exactly what it looked like: it opens the browser, but it does not
+#: go to the link.
+#:
+#: That filter is right, and not something to defeat. A program that could
+#: steer somebody's browser into its password settings from outside is the
+#: beginning of an attack, not a feature -- and this tool asking Windows for
+#: the right to do it would be the same tool that promises it never touches the
+#: password store. So the browser is sent to the one page it will accept, its
+#: settings root, which is one click from Passwords; the real address goes on
+#: the clipboard for a single paste; and the screen says which of the two
+#: happened rather than claiming a page that is not there.
+#:
+#: Firefox has no such filter and goes straight to ``about:logins``.
+LANDING_PAGES: dict[str, str] = {
+    "chrome": "chrome://settings/",
+    "edge": "edge://settings/",
+    "brave": "brave://settings/",
+    "vivaldi": "vivaldi://settings/",
+    "chromium": "chrome://settings/",
+    "firefox": "about:logins",
+}
+
 
 @dataclass(slots=True)
 class ExportTarget:
@@ -479,7 +510,10 @@ def browser_executable(target: ExportTarget, env: Environment) -> Path | None:
 
 
 def open_export_page(target: ExportTarget, env: Environment | None = None) -> bool:
-    """Open the browser at its own password page. True when it was launched.
+    """Start the browser as close to its password page as it allows.
+
+    True when it was launched -- which is not the same as it having navigated.
+    Ask :func:`opens_directly` which of the two the user is about to see.
 
     The page is an *internal* browser URL -- ``brave://password-manager``,
     ``edge://wallet``, ``about:logins``. Those schemes are not registered with
@@ -495,6 +529,10 @@ def open_export_page(target: ExportTarget, env: Environment | None = None) -> bo
     the administrator. An elevated launch cannot hand its command line to the
     browser the user already has open, and what that looks like is a window
     coming to the front without going anywhere. See :mod:`winmigrate.winlaunch`.
+
+    Where it lands is :func:`landing_page`: for the Chromium family, the
+    settings root, because Chromium refuses an internal address that came from
+    another program. The caller says so and puts the real one on the clipboard.
 
     When the executable cannot be found this returns False rather than opening
     anything, and the caller tells the user the address to go to instead -- a
@@ -521,7 +559,56 @@ def launch_arguments(target: ExportTarget) -> list[str]:
     profile. Firefox picks its profile at startup and will not switch while it
     is running, so there is nothing honest to pass and the page says which
     profile to be in instead.
+
+    The page is :func:`landing_page`, not ``export_page``: a Chromium handed
+    its own password address on a command line starts up and ignores it. See
+    :data:`LANDING_PAGES`.
     """
+    pages = landing_pages(target)
     if target.engine == "chromium" and target.profile_id:
-        return [f"--profile-directory={target.profile_id}", target.export_page]
-    return [target.export_page]
+        return [f"--profile-directory={target.profile_id}", *pages]
+    return pages
+
+
+def landing_page(target: ExportTarget) -> str:
+    """The address to hand the browser, which is not always the one we want.
+
+    A Chromium fork nobody has heard of gets the same treatment as the ones
+    listed, by taking its scheme from the page we would have liked to open --
+    so it lands in its settings rather than on a blank tab.
+    """
+    known = LANDING_PAGES.get(target.browser_key)
+    if known:
+        return known
+    if target.engine == "chromium" and "://" in target.export_page:
+        return f"{target.export_page.split('://', 1)[0]}://settings/"
+    return target.export_page
+
+
+def landing_pages(target: ExportTarget) -> list[str]:
+    """Every address worth handing the browser, because at most one is taken.
+
+    Chromium compares what it was given against exactly one address of its own,
+    and every fork rebrands that address differently: Brave answers to
+    ``brave://settings/``, Edge to ``edge://settings/``, and Chromium itself to
+    ``chrome://settings/``. Which one a given fork kept is not knowable from out
+    here, and guessing wrong is a browser that opens on a blank tab again --
+    the symptom this is fixing. Passing both costs nothing, because the one that
+    does not match is discarded before it can become a tab: the user gets one
+    settings window either way, never a stray search for "chrome://settings/".
+    """
+    primary = landing_page(target)
+    alternate = "chrome://settings/"
+    if target.engine != "chromium" or primary == alternate:
+        return [primary]
+    return [primary, alternate]
+
+
+def opens_directly(target: ExportTarget) -> bool:
+    """True when the browser lands on the export page itself, not merely near it.
+
+    What the window and the command line say next hangs on this. Being told a
+    page "should now be showing" when it is not is worse than being told where
+    to go: it sends the user looking for a tab that was never opened.
+    """
+    return bool(target.export_page) and landing_page(target) == target.export_page

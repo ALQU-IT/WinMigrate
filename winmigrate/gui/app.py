@@ -809,30 +809,43 @@ class WinMigrateWizard:
         if target is None or status is None:
             return
         opened = passwords_mod.open_export_page(target, self._environment(self._config()))
+        direct = passwords_mod.opens_directly(target)
         copied = self._copy_address(target.export_page)
-        log.info("export page for %s: %s", key, "opened" if opened else "could not open")
-        # The address goes on the clipboard either way. A browser that was
-        # already open can come to the front on the page it was last showing,
-        # and being told to type "brave://password-manager/settings" by hand is
-        # exactly the fiddling this button exists to remove.
-        paste = (
-            " The address is on your clipboard — paste it into the address bar."
-            if copied
-            else ""
+        log.info(
+            "export page for %s: %s (%s)",
+            key,
+            "opened" if opened else "could not open",
+            "on the page" if direct else f"at {passwords_mod.landing_page(target)}",
         )
-        if opened:
-            status.configure(
-                text=f"{target.label} should now be showing {target.export_page}."
-                + paste
-                + " Use 'Export passwords' there — it will ask for Windows Hello — "
-                "then choose the file you saved."
+        # The address goes on the clipboard in all three cases. A browser that
+        # was already open can come to the front on the page it was last
+        # showing, and a Chromium ignores an internal address handed to it from
+        # outside — so being told to type "brave://password-manager/settings" by
+        # hand is exactly the fiddling this button exists to remove.
+        paste = " The address is on your clipboard." if copied else ""
+        if not opened:
+            where = (
+                f"Could not start {target.label}. Open it yourself and go to "
+                f"{target.export_page}."
             )
+        elif direct:
+            where = f"{target.label} should now be showing {target.export_page}."
         else:
-            status.configure(
-                text=f"Could not start {target.label}. Open it yourself and go to "
-                f"{target.export_page}." + paste + " Export there, then choose the "
-                "file you saved."
+            # Saying the browser is on a page it is not sends the user hunting
+            # for a tab that was never opened. It is on its settings, because
+            # that is the only one of its own pages Chromium will accept from
+            # another program, and the last hop is theirs.
+            where = (
+                f"{target.label} is open at its settings — a browser will not let "
+                f"another program open its password page. Paste {target.export_page} "
+                "into the address bar, or find Passwords in settings."
             )
+        status.configure(
+            text=where
+            + paste
+            + " Use 'Export passwords' there — it will ask for Windows Hello — "
+            "then choose the file you saved."
+        )
 
     def _copy_address(self, address: str) -> bool:
         """Put the export page's address on the clipboard. True when it went.

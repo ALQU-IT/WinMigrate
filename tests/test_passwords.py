@@ -509,11 +509,11 @@ def test_the_browser_is_opened_in_the_profile_the_passwords_are_in(tmp_path: Pat
 
     assert passwords.launch_arguments(work) == [
         "--profile-directory=Profile 2",
-        "chrome://password-manager/settings",
+        "chrome://settings/",
     ]
     assert passwords.launch_arguments(personal) == [
         "--profile-directory=Default",
-        "chrome://password-manager/settings",
+        "chrome://settings/",
     ]
 
     # Firefox picks its profile at startup and will not switch while running,
@@ -526,3 +526,90 @@ def test_the_browser_is_opened_in_the_profile_the_passwords_are_in(tmp_path: Pat
         profile_id="abc.default-release",
     )
     assert passwords.launch_arguments(firefox) == ["about:logins"]
+
+
+def test_a_chromium_is_sent_to_the_one_page_of_its_own_it_will_accept(tmp_path: Path):
+    """Chromium drops an internal address that came from another program --
+    every one of them except the settings root. Handing it
+    "chrome://password-manager/settings" therefore starts the browser, ignores
+    the address and shows the new tab page, which is what "it opens the browser
+    but it doesn't go to the link" looked like. So it is sent one click short,
+    to settings, and the real address goes on the clipboard."""
+    env = chrome_profiles(tmp_path, {"Default": ("Personal", False, None)})
+    (target,) = passwords.export_targets(env)
+
+    assert passwords.landing_page(target) == "chrome://settings/"
+    assert passwords.launch_arguments(target)[-1] == "chrome://settings/"
+    assert passwords.opens_directly(target) is False
+    # The address we show, copy and write into the restore instructions is
+    # still the page the user actually needs.
+    assert target.export_page == "chrome://password-manager/settings"
+
+
+def test_firefox_goes_to_its_password_page_because_firefox_allows_it():
+    """The restriction is Chromium's, not every browser's, and pretending
+    otherwise would add a step Firefox does not need."""
+    firefox = passwords.ExportTarget(
+        browser_key="firefox",
+        title="Mozilla Firefox",
+        engine="firefox",
+        export_page="about:logins",
+    )
+
+    assert passwords.landing_page(firefox) == "about:logins"
+    assert passwords.opens_directly(firefox) is True
+
+
+def test_a_rebranded_chromium_is_given_both_spellings_of_the_one_page():
+    """Chromium matches the address against a single constant its fork rebrands
+    -- "brave://settings/" in Brave, "chrome://settings/" upstream -- and which
+    one a build kept cannot be known from out here. The one that does not match
+    is discarded before it becomes a tab, so offering both costs a user
+    nothing and getting it wrong costs them the whole feature."""
+    brave = passwords.ExportTarget(
+        browser_key="brave",
+        title="Brave",
+        engine="chromium",
+        export_page="brave://password-manager/settings",
+        profile_id="Default",
+    )
+
+    assert passwords.launch_arguments(brave) == [
+        "--profile-directory=Default",
+        "brave://settings/",
+        "chrome://settings/",
+    ]
+    # Chrome's two spellings are the same one, so it is passed once.
+    chrome = passwords.ExportTarget(
+        browser_key="chrome",
+        title="Google Chrome",
+        engine="chromium",
+        export_page="chrome://password-manager/settings",
+    )
+    assert passwords.launch_arguments(chrome) == ["chrome://settings/"]
+
+    # Firefox has no such filter and no such fork; it gets its own page, once.
+    firefox = passwords.ExportTarget(
+        browser_key="firefox", title="Mozilla Firefox", engine="firefox",
+        export_page="about:logins",
+    )
+    assert passwords.launch_arguments(firefox) == ["about:logins"]
+
+
+def test_a_chromium_fork_we_have_never_heard_of_still_lands_in_its_settings():
+    """Every Chromium rebrands the scheme and keeps the page. Taking the scheme
+    from the address we wanted beats sending a fork to a blank tab."""
+    fork = passwords.ExportTarget(
+        browser_key="arc",
+        title="Arc",
+        engine="chromium",
+        export_page="arc://password-manager/settings",
+        profile_id="Default",
+    )
+
+    assert passwords.landing_page(fork) == "arc://settings/"
+    assert passwords.launch_arguments(fork) == [
+        "--profile-directory=Default",
+        "arc://settings/",
+        "chrome://settings/",
+    ]
