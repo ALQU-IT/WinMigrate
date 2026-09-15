@@ -158,6 +158,13 @@ Microsoft's Office Deployment Tool.
 
 ## What it will not do
 
+Your user PATH is merged rather than copied or dropped: this machine's entries
+stay, in order and first, the old machine's join them where the folder actually
+exists here, and the ones pointing at software that did not travel are named in
+the report. Copying it wholesale would break every tool that is not in the same
+place on the new machine; leaving it out means re-adding from memory the entries
+you put there on purpose.
+
 WinMigrate does **not** decrypt browsers' saved-password stores, and will not:
 that routine is an infostealer payload regardless of who runs it. Instead it
 detects sign-in and sync state from configuration files only, and either tells

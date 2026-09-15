@@ -139,18 +139,67 @@ def test_the_users_own_variables_are_written():
     assert env.registry["HKCU\\Environment"] == {"EDITOR": "code", "JAVA_HOME": "C:\\jdk"}
 
 
-def test_path_is_never_overwritten():
-    """PATH reads like a user setting and is really a list of places software
-    was installed on the *old* computer. Replacing the new machine's copy breaks
-    every tool that is not in the same place, and the breakage looks nothing
-    like a backup restore."""
-    env = Environment.fixture(Path("/tmp/p"), {})
-    record = {"variables": {"PATH": "C:\\old\\bin", "EDITOR": "code"}}
-    results = {r.name: r for r in apply_mod.apply_environment(record, env)}
+def test_path_is_never_overwritten_only_added_to(tmp_path: Path):
+    """PATH reads like a user setting and is really two things: where software
+    happened to live on the old disk, and entries somebody added on purpose.
+    Replacing this machine's copy breaks every tool that is not in the same
+    place; leaving it out means re-adding the deliberate ones from memory. So
+    this machine's entries stay, in order and first, and the old ones join them
+    where the folder actually exists here."""
+    travelled = tmp_path / "tools"
+    travelled.mkdir()
+    env = Environment.fixture(
+        tmp_path, {"HKCU\\Environment": {"Path": r"C:\mine\bin"}}, environ={"PATH": ""}
+    )
+    record = {"variables": {"PATH": f"C:\\old\\gone;{travelled}", "EDITOR": "code"}}
 
-    assert results["PATH"].outcome is Outcome.SKIPPED
-    assert "PATH" not in env.registry.get("HKCU\\Environment", {})
-    assert results["EDITOR"].outcome is Outcome.APPLIED
+    results = apply_mod.apply_environment(record, env)
+    by_name = {r.name: r for r in results}
+
+    assert env.registry["HKCU\\Environment"]["Path"] == f"C:\\mine\\bin;{travelled}"
+    assert by_name["PATH"].outcome is Outcome.APPLIED
+    assert str(travelled) in by_name["PATH"].detail
+    # And the one that could not come is named, because that is the part nobody
+    # can recover from memory.
+    dropped = [r for r in results if r.name == "PATH entry"]
+    assert len(dropped) == 1
+    assert dropped[0].outcome is Outcome.SKIPPED
+    assert r"C:\old\gone" in dropped[0].detail
+    assert by_name["EDITOR"].outcome is Outcome.APPLIED
+
+
+def test_an_entry_this_machine_already_has_is_not_added_twice(tmp_path: Path):
+    """Once from its own registry, and once from the machine half of PATH that
+    the user's own copy does not contain."""
+    mine = tmp_path / "mine"
+    mine.mkdir()
+    system = tmp_path / "system32"
+    system.mkdir()
+    env = Environment.fixture(
+        tmp_path,
+        {"HKCU\\Environment": {"Path": str(mine)}},
+        environ={"PATH": f"{system};{mine}"},
+    )
+
+    apply_mod.apply_environment({"variables": {"Path": f"{mine};{system}"}}, env)
+
+    assert env.registry["HKCU\\Environment"]["Path"] == str(mine)
+
+
+def test_a_path_with_nothing_worth_adding_is_left_exactly_as_it_was(tmp_path: Path):
+    """Writing the same value back is still a write, and a restore that says it
+    applied something it did not change is the noise this is trying to remove."""
+    env = Environment.fixture(
+        tmp_path, {"HKCU\\Environment": {"Path": r"C:\mine\bin"}}, environ={"PATH": ""}
+    )
+
+    (result,) = [
+        r for r in apply_mod.apply_environment({"variables": {"Path": r"C:\gone"}}, env)
+        if r.name == "Path"
+    ]
+
+    assert result.outcome is Outcome.SKIPPED
+    assert env.registry["HKCU\\Environment"]["Path"] == r"C:\mine\bin"
 
 
 def test_every_machine_owned_variable_is_refused():

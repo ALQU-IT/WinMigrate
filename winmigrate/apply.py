@@ -30,7 +30,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from .util import process
+from .util import paths as pathutil, process
 
 log = logging.getLogger(__name__)
 
@@ -232,11 +232,26 @@ def apply_mapped_drives(record: dict[str, Any], runner=process.run) -> list[Resu
 #: Variables that describe the machine rather than the user, and must not be
 #: carried across.
 #:
-#: PATH is the dangerous one. It reads like a user setting and is really a list
-#: of places software was installed on the *old* computer -- replacing the new
-#: machine's copy with it breaks every tool that is not in the same place, and
-#: the breakage looks nothing like a backup restore. It is reported instead, so
-#: the user can copy across the entries they actually want.
+#: PATH is the dangerous one, and it is handled above by :data:`MERGED_VARS`
+#: before this set is ever consulted. It stays listed here as well: if that
+#: merge is ever bypassed, the fallback must be to leave PATH alone rather than
+#: to overwrite the new machine's copy with the old machine's.
+#: The one machine-owned variable worth merging rather than leaving behind.
+#:
+#: A user PATH is two things at once: entries that describe where software was
+#: installed on the old disk, and entries somebody added on purpose. Copying it
+#: wholesale breaks every tool that is not in the same place on the new machine;
+#: leaving it out means re-adding the deliberate ones from memory, which is no
+#: better if you cannot remember them.
+#:
+#: So it is merged. This machine's entries stay, in order and first; the old
+#: ones are appended where they are not already there and the folder actually
+#: exists here -- the restore has already put the files back by this point, so
+#: a directory that travelled is a directory that exists. Entries pointing at
+#: folders this machine does not have are dropped and named, which is the part
+#: that could not be recovered from memory anyway.
+MERGED_VARS = frozenset({"path"})
+
 MACHINE_OWNED_VARS = frozenset(
     {"path", "temp", "tmp", "windir", "systemroot", "systemdrive", "username",
      "userprofile", "userdomain", "computername", "homedrive", "homepath",
@@ -265,6 +280,9 @@ def apply_environment(record: dict[str, Any], env=None) -> list[Result]:
     for name, value in sorted(variables.items()):
         if not isinstance(name, str) or not isinstance(value, str):
             continue
+        if name.lower() in MERGED_VARS:
+            results.extend(_merge_variable(env, name, value))
+            continue
         if name.lower() in MACHINE_OWNED_VARS:
             results.append(
                 Result("env", name, Outcome.SKIPPED,
@@ -284,6 +302,77 @@ def apply_environment(record: dict[str, Any], env=None) -> list[Result]:
     if any(r.outcome is Outcome.APPLIED for r in results):
         _broadcast_environment_change()
     return results
+
+
+def _merge_variable(env, name: str, incoming: str) -> list[Result]:
+    """Add the old machine's PATH entries that make sense here, and say which did not.
+
+    Directory names travel into the report and the log the way every other path
+    in a restore does. Values of *other* variables never do: that is the line,
+    and it is why this is a named set of one rather than a general merge.
+    """
+    spelling, existing = _current_variable(env, name)
+    present = {entry.lower() for entry in _split_path(existing)}
+    # The process PATH carries the machine half as well, so an entry already
+    # provided system-wide is not worth adding to the user's own.
+    present |= {entry.lower() for entry in _split_path(env.environ.get("PATH", ""))}
+
+    added: list[str] = []
+    dropped: list[str] = []
+    for entry in _split_path(incoming):
+        expanded = pathutil.expand(entry, env.environ)
+        if entry.lower() in present or expanded.lower() in present:
+            continue
+        if not Path(pathutil.to_posix(expanded)).is_dir():
+            dropped.append(entry)
+            continue
+        added.append(entry)
+        present.add(entry.lower())
+
+    results = [
+        Result("env", f"{name} entry", Outcome.SKIPPED, f"{entry} is not on this machine")
+        for entry in dropped
+    ]
+    if not added:
+        results.append(
+            Result("env", name, Outcome.SKIPPED,
+                   "nothing from the old one was missing here" if not dropped
+                   else f"none of the {len(dropped)} old entr(ies) exist here")
+        )
+        return results
+
+    merged = ";".join([*_split_path(existing), *added])
+    try:
+        # Written under the spelling this machine already uses. Windows compares
+        # value names without case, so "PATH" would land on "Path" there and
+        # nowhere near it in a fixture -- and a test that cannot see the write
+        # is a test that cannot see a mistake.
+        written = env.write_registry_value("HKCU", "Environment", spelling, merged)
+    except Exception as exc:  # noqa: BLE001
+        results.append(Result("env", name, Outcome.FAILED, str(exc)))
+        return results
+    results.append(
+        Result(
+            "env", name,
+            Outcome.APPLIED if written else Outcome.FAILED,
+            f"kept this machine's, added {len(added)}: {', '.join(added)}",
+        )
+    )
+    return results
+
+
+def _current_variable(env, name: str) -> tuple[str, str]:
+    """This machine's own spelling and value for ``name``, or the incoming one."""
+    values = env.read_registry_key("HKCU", "Environment") or {}
+    for key, value in values.items():
+        if isinstance(key, str) and key.lower() == name.lower() and isinstance(value, str):
+            return key, value
+    return name, ""
+
+
+def _split_path(value: str) -> list[str]:
+    """PATH entries, in order, without the empties a trailing ';' leaves."""
+    return [entry.strip() for entry in (value or "").split(";") if entry.strip()]
 
 
 def _broadcast_environment_change() -> None:
