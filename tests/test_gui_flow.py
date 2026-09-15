@@ -1024,3 +1024,50 @@ def test_the_restore_page_says_when_there_is_no_room(monkeypatch, bundle: Path, 
     wizard.dry_run_var.set(True)
     wizard._refresh_restore_summary()
     assert "Not enough room" not in wizard.restore_summary.cget("text")
+
+
+def test_the_summary_keeps_its_order_when_both_extra_lines_appear(
+    monkeypatch, profile: Path, tmp_path: Path
+):
+    """Two optional lines addressed by counted index is a summary that reorders
+    itself the first time both of them show up."""
+    taken = tmp_path / "backup.dat"
+    taken.write_bytes(b"LAST WEEK")
+    wizard, export = staged_export(monkeypatch, profile, tmp_path)
+    wizard.output_var.set(str(taken))
+    wizard.replace_var.set(True)
+
+    lines = [line for line in wizard._confirm_summary().splitlines() if line]
+
+    assert lines[1].startswith("To:")
+    assert lines[2].startswith("Replaces:")
+    assert lines[3].startswith("Items:")
+    assert [line.split(":")[0] for line in lines[3:8]] == [
+        "Items", "Size", "Encrypted-only items", "Passwords", "Shadow copy"
+    ]
+
+
+def test_scanning_a_different_profile_looks_at_that_profile_s_browsers(
+    monkeypatch, profile: Path, tmp_path: Path
+):
+    """The browsers found belong to the profile that was scanned. Held from the
+    first scan, the page went on describing the profile the user had just
+    changed away from."""
+    chrome_with_local_passwords(profile)
+    other = tmp_path / "Users" / "bob"
+    (other / "Documents").mkdir(parents=True)
+    (other / "Documents" / "f.bin").write_bytes(b"x" * 100)
+
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    wizard._show(Step.SCANNING)
+    assert pump(wizard) == "scanned"
+    wizard._show(Step.PASSWORDS)
+    assert list(wizard.password_rows) == ["chrome"]
+
+    wizard.profile_var.set(str(other))
+    wizard._show(Step.SCANNING)
+    assert pump(wizard) == "scanned"
+    wizard._show(Step.PASSWORDS)
+
+    assert wizard.password_rows == {}
+    assert "No browser" in wizard.passwords_intro.cget("text")

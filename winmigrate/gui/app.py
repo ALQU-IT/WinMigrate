@@ -1403,27 +1403,33 @@ class WinMigrateWizard:
         )
         elevated = elevate.is_windows() and elevate.is_elevated()
         shadow = "yes" if (self.use_vss.get() and elevated) else "no"
+        # Built in order rather than inserted at counted positions: two
+        # optional lines addressed by index is a summary that reorders itself
+        # the first time both of them appear.
         lines = [
             f"From:         {self.profile_var.get()}",
             f"To:           {self.output_var.get()}",
+        ]
+        if self.replace_var.get():
+            lines.append("Replaces:     the backup already at that name")
+        lines += [
             "",
             f"Items:        {len(self.data.selected)} selected",
             f"Size:         {humanize.bytes_(total_bytes)} in {total_files:,} files",
             f"Encrypted-only items: {secret}",
+        ]
+        if self.data.passwords_added:
+            lines.append(
+                "Passwords:    exported from "
+                + ", ".join(sorted(e.label for e in self.data.passwords_added.values()))
+                + " (encrypted only)"
+            )
+        lines += [
             f"Shadow copy:  {shadow}",
             "",
             "The backup is encrypted with the passphrase you typed. Nothing is",
             "uploaded anywhere; the file stays where you put it.",
         ]
-        if self.replace_var.get():
-            lines.insert(2, "Replaces:     the backup already at that name")
-        if self.data.passwords_added:
-            lines.insert(
-                6,
-                "Passwords:    exported from "
-                + ", ".join(sorted(e.label for e in self.data.passwords_added.values()))
-                + " (encrypted only)",
-            )
         if self.use_vss.get() and not elevated:
             lines.append("")
             lines.append(
@@ -1978,6 +1984,13 @@ class WinMigrateWizard:
             # records would have the last page claim they travelled and offer
             # to delete the only plaintext copy of passwords that are not in
             # the bundle at all.
+            # The browsers found belong to the profile that was scanned. Looking
+            # them up again costs a few file reads and is the difference between
+            # a page describing this profile and one describing the last.
+            self.password_state_known = False
+            self.password_targets = []
+            self.password_targets_by_key = {}
+            self.password_cloud_accounts = []
             if self.data.passwords_added:
                 log.info(
                     "dropping %s staged password export(s): the profile was scanned again",
