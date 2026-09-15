@@ -203,11 +203,10 @@ class WizardData:
     rows: list = field(default_factory=list)
     selected: set[str] = field(default_factory=set)
     output_path: str = ""
-    #: Browsers whose export the user completed, by browser key. Only ever ids
-    #: and titles -- the CSV itself goes straight into the encrypted bundle.
+    #: Exports the user completed, by profile key. One record per profile, so
+    #: choosing a second file for the same one replaces the first rather than
+    #: leaving it behind in a list of files to delete.
     passwords_added: dict = field(default_factory=dict)
-    #: CSVs to offer to shred once the bundle is written.
-    passwords_to_shred: list = field(default_factory=list)
     passphrase: str = ""
     passphrase_confirm: str = ""
     capture_done: bool = False
@@ -222,6 +221,22 @@ class WizardData:
     dry_run: bool = False
     overwrite: bool = False
     restore_done: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class PasswordExport:
+    """One browser profile's export: what it is, and where it came from.
+
+    The path is kept for one purpose -- offering to delete the plaintext file
+    once the bundle holds it -- and the item id for the check that makes that
+    offer safe: a file that did not end up in the backup must never be deleted
+    from the machine, whatever the box says.
+    """
+
+    key: str
+    label: str
+    item_id: str
+    csv_path: Path
 
 
 @dataclass(frozen=True, slots=True)

@@ -40,7 +40,7 @@ from ..platform_win import Environment
 from ..scan import run_scan
 from ..util import humanize, paths as pathutil
 from . import defaults, elevate, runlog, selection, theme
-from .wizard import Mode, Step, WizardData
+from .wizard import Mode, PasswordExport, Step, WizardData
 
 log = logging.getLogger(__name__)
 
@@ -719,8 +719,12 @@ class WinMigrateWizard:
             status.pack(anchor="w", pady=(6, 0))
             self.password_rows[key] = frame
             self.password_status[key] = status
-            if key in self.data.passwords_added:
-                status.configure(text=f"Added — {target.label} passwords travel encrypted only.")
+            added = self.data.passwords_added.get(key)
+            if added is not None:
+                status.configure(
+                    text=f"Added — {added.label} passwords travel encrypted only "
+                    f"(from {added.csv_path.name})."
+                )
 
         self.passwords_cloud.configure(
             text=(
@@ -738,7 +742,7 @@ class WinMigrateWizard:
         self._refresh_shred_box()
 
     def _refresh_shred_box(self) -> None:
-        if self.data.passwords_to_shred:
+        if self.data.passwords_added:
             self.shred_check.pack(anchor="w", pady=(16, 0))
             self.shred_hint.pack(anchor="w")
         else:
@@ -861,9 +865,15 @@ class WinMigrateWizard:
         log.info("password export for %s: %s", key, "accepted" if outcome.ok else "refused")
         if not outcome.ok:
             return
-        self.data.passwords_added[key] = target.label
-        if csv_path not in self.data.passwords_to_shred:
-            self.data.passwords_to_shred.append(csv_path)
+        # Keyed by profile, so choosing a second file for the same one replaces
+        # the first. The old record going away is the point: the file it names
+        # is no longer in the bundle, and nothing may offer to delete it.
+        self.data.passwords_added[key] = PasswordExport(
+            key=key,
+            label=target.label,
+            item_id=outcome.item.id if outcome.item is not None else "",
+            csv_path=csv_path,
+        )
         # The item arrived after the choosing page was built. Without this it
         # would be marked "deselected" at capture time and silently left out --
         # the one item the user went furthest out of their way to include.
@@ -874,29 +884,53 @@ class WinMigrateWizard:
         self._refresh_buttons()
 
     def _shred_exported_csvs(self) -> list[str]:
-        """Delete the plaintext exports, once they are safely in the bundle.
+        """Delete the plaintext exports, once the bundle really holds them.
 
-        Only files the user handed to this run, only when they left the box
-        ticked, and only ones the capture actually read -- a file that failed to
-        be captured is the one file that must not be deleted.
+        Deleting a file that did not reach the backup is the worst thing this
+        page could do: what the browser wrote is the only copy, and the user
+        exported it precisely because it is not in the cloud. So the box being
+        ticked is not enough on its own. Three ways a staged export can fail to
+        be in the bundle, all of which happened:
+
+        * the user went back and scanned again, which builds a new plan the
+          export was never added to (the records are dropped then, so this
+          sees nothing);
+        * they unticked the row on the choosing page, leaving the item in the
+          plan but marked as skipped;
+        * the capture could not read the file.
+
+        Each is checked against what the capture actually did, not against what
+        was asked for.
         """
+        from ..models import Action  # noqa: PLC0415
         from .. import passwords as passwords_mod  # noqa: PLC0415
 
-        if not self.data.passwords_to_shred or not self.shred_after.get():
+        if not self.data.passwords_added or not self.shred_after.get():
             return []
+        captured = {
+            item.id
+            for item in (self.scan_result.items if self.scan_result else [])
+            if item.action is Action.CAPTURE
+        }
         failed = {
             pathutil.normalize_key(Path(path)) for path, _reason in
             (self.capture_report.failures if self.capture_report else [])
         }
         done: list[str] = []
-        for path in self.data.passwords_to_shred:
-            if pathutil.normalize_key(path) in failed:
-                done.append(f"{path.name} was not captured, so it was left alone")
+        seen: set[str] = set()
+        for export in self.data.passwords_added.values():
+            path = export.csv_path
+            key = pathutil.normalize_key(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            if export.item_id not in captured or key in failed:
+                log.info("not shredding %s: it is not in the backup", path.name)
+                done.append(f"{path.name} is not in the backup, so it was left alone")
                 continue
             ok = passwords_mod.shred(path)
             log.info("shred %s: %s", path.name, "done" if ok else "failed")
             done.append(f"{path.name} deleted" if ok else f"{path.name} could not be deleted")
-        self.data.passwords_to_shred = []
         return done
 
     def _page_destination(self, page: Any) -> None:
@@ -1320,7 +1354,7 @@ class WinMigrateWizard:
             lines.insert(
                 6,
                 "Passwords:    exported from "
-                + ", ".join(sorted(self.data.passwords_added.values()))
+                + ", ".join(sorted(e.label for e in self.data.passwords_added.values()))
                 + " (encrypted only)",
             )
         if self.use_vss.get() and not elevated:
@@ -1351,7 +1385,7 @@ class WinMigrateWizard:
             lines += [
                 "",
                 "Exported passwords travelled encrypted only, from "
-                + ", ".join(sorted(self.data.passwords_added.values()))
+                + ", ".join(sorted(e.label for e in self.data.passwords_added.values()))
                 + ". Import them on the new machine and delete the file afterwards.",
             ]
         for line in getattr(self, "shred_results", []):
@@ -1800,6 +1834,17 @@ class WinMigrateWizard:
             )
             self.capture_detail.configure(text=str(title))
         elif kind == "scanned":
+            # A new scan is a new plan, and nothing staged against the old one
+            # is in it. Chief among them the password exports: keeping those
+            # records would have the last page claim they travelled and offer
+            # to delete the only plaintext copy of passwords that are not in
+            # the bundle at all.
+            if self.data.passwords_added:
+                log.info(
+                    "dropping %s staged password export(s): the profile was scanned again",
+                    len(self.data.passwords_added),
+                )
+                self.data.passwords_added.clear()
             totals = payload.totals()
             log.info(
                 "scan finished: %s items, %s to capture",

@@ -777,3 +777,74 @@ def test_the_page_offers_every_profile_that_has_local_passwords(
         "browser:passwords-csv:chrome:profile-2",
     ]
     assert all(item in wizard.data.selected for item in staged)
+
+
+# --- never delete what is not in the backup ---------------------------------
+def staged_export(monkeypatch, profile: Path, tmp_path: Path, name: str = "pw.csv"):
+    """A window with a password export staged, one step from the capture."""
+    chrome_with_local_passwords(profile)
+    export = tmp_path / name
+    export.write_text("url,username,password\nhttps://x,me,pw\n", encoding="utf-8")
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    wizard.use_vss.set(False)
+    wizard._show(Step.SCANNING)
+    assert pump(wizard) == "scanned"
+    wizard._show(Step.PASSWORDS)
+    wizard._ingest_password_csv("chrome", export)
+    return wizard, export
+
+
+def capture_to(wizard, output: Path) -> None:
+    wizard.output_var.set(str(output))
+    wizard.passphrase.insert(0, "hunter2")
+    wizard.passphrase2.insert(0, "hunter2")
+    wizard._show(Step.WORKING)
+    assert pump(wizard) == "captured"
+
+
+def test_scanning_again_drops_the_staged_export_rather_than_deleting_it(
+    monkeypatch, profile: Path, tmp_path: Path
+):
+    """A second scan builds a new plan that the export was never added to. The
+    window kept the record anyway: the last page claimed the passwords had
+    travelled, and then deleted the only plaintext copy of passwords that were
+    not in the bundle at all."""
+    wizard, export = staged_export(monkeypatch, profile, tmp_path)
+
+    wizard._show(Step.SCANNING)  # back to the options, and scan again
+    assert pump(wizard) == "scanned"
+    capture_to(wizard, tmp_path / "out.dat")
+
+    assert export.is_file()
+    assert "Exported passwords" not in wizard.done_text.cget("text")
+    assert wizard.data.passwords_added == {}
+
+
+def test_unticking_the_export_leaves_the_file_where_it_is(
+    monkeypatch, profile: Path, tmp_path: Path
+):
+    """Still in the plan, but marked skipped, so it is not in the bundle. The
+    box asks about deleting a file that has been backed up; this one has not."""
+    wizard, export = staged_export(monkeypatch, profile, tmp_path)
+
+    wizard.data.selected.discard("browser:passwords-csv:chrome")
+    capture_to(wizard, tmp_path / "out.dat")
+
+    assert export.is_file()
+    assert any("not in the backup" in line for line in wizard.shred_results)
+
+
+def test_choosing_a_second_file_forgets_the_first_completely(
+    monkeypatch, profile: Path, tmp_path: Path
+):
+    """The usual reason to choose again is having picked the wrong file. The
+    wrong one is not in the bundle, so it is not this tool's to delete."""
+    wizard, first = staged_export(monkeypatch, profile, tmp_path, "wrong.csv")
+    second = tmp_path / "right.csv"
+    second.write_text("url,username,password\nhttps://x,me,pw\n", encoding="utf-8")
+    wizard._ingest_password_csv("chrome", second)
+
+    capture_to(wizard, tmp_path / "out.dat")
+
+    assert first.is_file()
+    assert not second.exists()
