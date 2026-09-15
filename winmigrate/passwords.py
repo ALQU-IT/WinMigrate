@@ -58,11 +58,16 @@ PASSWORDS_RESTORE_DIR = "WinMigrate-Passwords"
 #: sidebar first, which is exactly the fiddling this is meant to remove. The
 #: same page serves the restore direction, so one address covers both.
 #:
+#: Edge is the exception: it never adopted Chromium's separate password manager
+#: and keeps saved passwords under autofill in its own settings, so its address
+#: is ``edge://settings/autofill/passwords`` and nothing else reaches the
+#: export.
+#:
 #: Firefox keeps both behind the "..." menu on ``about:logins``; there is no
 #: deeper URL to aim at.
 EXPORT_PAGES: dict[str, str] = {
     "chrome": "chrome://password-manager/settings",
-    "edge": "edge://settings/passwords",
+    "edge": "edge://settings/autofill/passwords",
     "brave": "brave://password-manager/settings",
     "vivaldi": "vivaldi://settings/passwords",
     "chromium": "chrome://password-manager/settings",
@@ -516,8 +521,9 @@ def open_export_page(target: ExportTarget, env: Environment | None = None) -> bo
     Ask :func:`opens_directly` which of the two the user is about to see.
 
     The page is an *internal* browser URL -- ``brave://password-manager``,
-    ``edge://wallet``, ``about:logins``. Those schemes are not registered with
-    Windows: they mean something only inside the browser that defines them.
+    ``edge://settings/autofill``, ``about:logins``. Those schemes are not
+    registered with Windows: they mean something only inside the browser that
+    defines them.
     Handing one to the shell (``start "" brave://...``) therefore does not open
     Brave; it makes Windows hunt for an app that handles a "brave" protocol,
     find none, and offer the Microsoft Store. That went for every browser here,

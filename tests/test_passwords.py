@@ -226,15 +226,17 @@ def test_each_browser_lands_on_the_page_that_has_the_export_control():
     ``.../password-manager/settings``. Aiming at the list means the user still
     has to find Settings in the sidebar -- the exact step opening the page for
     them was meant to remove. Firefox has no deeper URL: both sit behind the
-    "..." menu on about:logins.
+    "..." menu on about:logins. Edge went its own way again and keeps both under
+    autofill in its ordinary settings.
     """
     from winmigrate import passwords as passwords_mod
 
+    endings = ("/settings", "/settings/passwords", "/settings/autofill/passwords")
     for key, page in passwords_mod.EXPORT_PAGES.items():
         if key == "firefox":
             assert page == "about:logins"
             continue
-        assert page.endswith("/settings") or page.endswith("/settings/passwords"), (
+        assert page.endswith(endings), (
             f"{key} points at {page}, which is not where the export control is"
         )
         # And it must use a scheme that browser actually resolves.
@@ -613,3 +615,29 @@ def test_a_chromium_fork_we_have_never_heard_of_still_lands_in_its_settings():
         "arc://settings/",
         "chrome://settings/",
     ]
+
+
+def test_edge_keeps_its_passwords_under_autofill_not_in_a_password_manager():
+    """Edge never adopted Chromium's separate password manager: its saved
+    passwords live under autofill in its own settings. An address that is one
+    page off is as useless as no address at all -- it is pasted into the bar,
+    shown on screen, and written into the restore instructions the user reads
+    on a machine this tool is no longer running on."""
+    assert passwords.EXPORT_PAGES["edge"] == "edge://settings/autofill/passwords"
+
+    edge = passwords.ExportTarget(
+        browser_key="edge",
+        title="Microsoft Edge",
+        engine="chromium",
+        export_page=passwords.EXPORT_PAGES["edge"],
+        profile_id="Default",
+    )
+
+    # It is still sent to the settings root, which is all Chromium accepts.
+    assert passwords.landing_page(edge) == "edge://settings/"
+    assert passwords.opens_directly(edge) is False
+    # And the address the user is given -- here and on the far machine months
+    # later -- is the real one.
+    assert "edge://settings/autofill/passwords" in " ".join(
+        passwords.import_followup(edge).steps
+    )
