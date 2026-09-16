@@ -1502,10 +1502,12 @@ def test_a_machine_without_winget_is_told_so_rather_than_left_guessing(
     assert "App Installer" in text
 
 
-def test_the_uac_cost_is_named_before_the_install_starts_not_during(
+def test_a_restore_without_the_rights_says_so_rather_than_offering_a_dead_button(
     monkeypatch, bundle: Path, tmp_path: Path
 ):
-    """Ninety-seven permission prompts is a thing to learn beforehand."""
+    """winget installs programs for the whole machine, which needs permission.
+    Saying "Windows will ask" invites somebody to press a button that cannot
+    work; saying what to do instead costs the same line."""
     from winmigrate.gui import elevate
 
     monkeypatch.setattr(elevate, "is_windows", lambda: True)
@@ -1516,7 +1518,9 @@ def test_the_uac_cost_is_named_before_the_install_starts_not_during(
     wizard._show(Step.SOFTWARE)
 
     note = wizard.software_note.cget("text")
-    assert "administrator" in note and "once instead of once per program" in note
+    assert "cannot" in note and "administrator" in note
+    # And it says the part that stops this reading as a failed migration.
+    assert "already back" in note
 
 
 # --- saved Windows sign-ins -------------------------------------------------
@@ -1779,3 +1783,103 @@ def test_a_page_is_never_skipped_because_its_check_had_not_finished(
 
     assert wizard._page_is_empty(Step.CREDENTIALS) is False
     assert asked == ["yes"]
+
+
+# --- opting in to administrator rights, for the restore ---------------------
+def _relaunches(monkeypatch) -> list:
+    """Record what the window asks Windows to relaunch, instead of relaunching."""
+    from winmigrate.gui import elevate
+
+    asked: list = []
+    monkeypatch.setattr(elevate, "is_windows", lambda: True)
+    monkeypatch.setattr(elevate, "is_elevated", lambda: False)
+    monkeypatch.setattr(
+        elevate, "relaunch_as_admin", lambda args: asked.append(args) or True
+    )
+    return asked
+
+
+def test_the_restore_asks_for_rights_on_the_first_page_or_not_at_all(monkeypatch):
+    """Agreeing restarts the program. Asked on the page that collects the
+    backup's password, that would throw the password away along with
+    everything else typed there -- so the question comes first, before anything
+    has been entered."""
+    asked = _relaunches(monkeypatch)
+    wizard, _ = open_window(monkeypatch, {})
+    wizard.mode_var.set(Mode.RESTORE.value)
+    wizard.restore_as_admin.set(True)
+
+    wizard._go_next()
+
+    assert len(asked) == 1
+    # The relaunched copy must come back on the restore branch, still ticked.
+    assert "--mode" in asked[0] and "restore" in asked[0]
+    assert "--restore-as-admin" in asked[0]
+    assert elevate_flag_present(asked[0])
+
+
+def elevate_flag_present(arguments: list) -> bool:
+    from winmigrate.gui.elevate import ALREADY_TRIED_FLAG
+
+    return ALREADY_TRIED_FLAG in arguments
+
+
+def test_leaving_it_unticked_asks_for_nothing(monkeypatch):
+    """It is an opt-in. Somebody who only wants their files back should never
+    see a permission prompt."""
+    asked = _relaunches(monkeypatch)
+    wizard, _ = open_window(monkeypatch, {})
+    wizard.mode_var.set(Mode.RESTORE.value)
+    wizard.restore_as_admin.set(False)
+
+    wizard._go_next()
+
+    assert asked == []
+    assert wizard.step is Step.SOURCE
+
+
+def test_declining_the_prompt_carries_on_rather_than_stopping(monkeypatch):
+    """The files, the settings and the taskbar all come back without the
+    rights. Only the installing needs them."""
+    from winmigrate.gui import elevate
+
+    monkeypatch.setattr(elevate, "is_windows", lambda: True)
+    monkeypatch.setattr(elevate, "is_elevated", lambda: False)
+    monkeypatch.setattr(elevate, "relaunch_as_admin", lambda args: False)
+    wizard, _ = open_window(monkeypatch, {})
+    wizard.mode_var.set(Mode.RESTORE.value)
+    wizard.restore_as_admin.set(True)
+
+    wizard._go_next()
+
+    assert wizard.step is Step.SOURCE
+    assert wizard.elevation_attempted is True
+
+
+def test_the_relaunched_copy_comes_back_on_the_branch_it_left(monkeypatch):
+    """Reopening on the other one, to somebody halfway through a restore, reads
+    as the program having forgotten -- and the only thing worse than that is
+    their agreeing to it."""
+    wizard, _ = open_window(
+        monkeypatch, {"mode": "restore", "restore_as_admin": True,
+                      "elevation_attempted": True}
+    )
+
+    assert wizard.mode_var.get() == Mode.RESTORE.value
+    assert wizard.restore_as_admin.get() is True
+    # And it does not ask a second time.
+    asked = _relaunches(monkeypatch)
+    wizard._go_next()
+    assert asked == []
+
+
+def test_a_backup_is_not_asked_the_restore_question(monkeypatch):
+    asked = _relaunches(monkeypatch)
+    wizard, _ = open_window(monkeypatch, {})
+    wizard.mode_var.set(Mode.BACKUP.value)
+    wizard.restore_as_admin.set(True)
+
+    wizard._go_next()
+
+    assert asked == []
+    assert wizard.step is Step.WELCOME

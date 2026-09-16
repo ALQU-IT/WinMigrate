@@ -122,6 +122,12 @@ def build_parser() -> argparse.ArgumentParser:
     # throw that scan away -- so the first page's choices ride across on the
     # command line. Nothing secret is ever among them: the passphrase is
     # collected pages later, in the process that will use it.
+    gui_parser.add_argument(
+        "--mode", choices=("backup", "restore"), default="", help=argparse.SUPPRESS
+    )
+    gui_parser.add_argument(
+        "--restore-as-admin", action="store_true", help=argparse.SUPPRESS
+    )
     gui_parser.add_argument("--profile-root", type=Path, help=argparse.SUPPRESS)
     gui_parser.add_argument("--files-only", action="store_true", help=argparse.SUPPRESS)
     gui_parser.add_argument("--include-wifi", action="store_true", help=argparse.SUPPRESS)
@@ -149,6 +155,8 @@ def cmd_gui(args: argparse.Namespace, _console: Console) -> int:
 
     return gui.run(
         {
+            "mode": args.mode,
+            "restore_as_admin": args.restore_as_admin,
             "profile_root": str(args.profile_root) if args.profile_root else "",
             "files_only": args.files_only,
             "include_wifi": args.include_wifi,

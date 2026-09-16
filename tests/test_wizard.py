@@ -490,3 +490,24 @@ def test_every_page_says_what_it_is_for_before_what_it_is_safe_from():
         # The first sentence is the one that gets read.
         first = subtitle.split(".")[0].lower()
         assert not first.startswith("nothing here"), step.value
+
+
+def test_the_relaunch_carries_the_branch_and_the_tick_and_nothing_secret():
+    """Nothing typed later goes on a command line: the backup's password is
+    collected pages after this, in the process that will use it."""
+    from winmigrate.gui.elevate import ALREADY_TRIED_FLAG, forward_arguments
+
+    arguments = forward_arguments(mode="restore", restore_as_admin=True)
+
+    assert arguments[:2] == ["gui", ALREADY_TRIED_FLAG]
+    assert "--mode" in arguments and "restore" in arguments
+    assert "--restore-as-admin" in arguments
+    assert not any("pass" in part.lower() for part in arguments)
+
+
+def test_the_offer_is_made_for_either_reason_and_never_twice():
+    """A shadow copy on the way out, installing programs on the way in."""
+    from winmigrate.gui import elevate
+
+    assert elevate.should_offer(False, False) is False   # nothing asked for it
+    assert elevate.should_offer(True, True) is False     # this is the relaunched copy

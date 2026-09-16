@@ -186,6 +186,18 @@ made yourself** are reported and never re-created: a scheduled task is a command
 a computer runs unattended, and adding one quietly from a file it was handed is
 not something this tool does.
 
+Administrator rights are asked for twice, both times as a question and never
+as a requirement. Backing up asks because a shadow copy is what copies the
+files your browser and Outlook are holding open. Restoring asks on the first
+page, as a tick box — *Also install my programs* — because winget installs
+programs for the whole machine and cannot do that without permission. It is on
+the first page because agreeing restarts the program, and asking on the page
+that collects the backup's password would throw that password away with
+everything else typed there. Declining either one is not a failure: the files,
+the settings, the taskbar and the background all come back without it, and the
+software page says plainly what it cannot do rather than offering a button that
+will not work.
+
 The window is meant to be the way this is used, so it behaves like a Windows
 program rather than a script: it declares itself DPI-aware (without which, on
 the 125% and 150% displays most laptops now ship with, every letter is drawn

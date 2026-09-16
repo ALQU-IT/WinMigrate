@@ -41,14 +41,21 @@ def is_elevated() -> bool:
     return vss.is_elevated()
 
 
-def should_offer(want_shadow_copy: bool, already_tried: bool) -> bool:
+def should_offer(wanted: bool, already_tried: bool) -> bool:
     """Is there any point showing a UAC prompt?
 
-    Not when the user does not want a shadow copy, not when they already have
-    the rights, not when this is the copy that was just relaunched, and not on
-    a platform with no such thing.
+    Not when the user has not asked for anything that needs it, not when they
+    already have the rights, not when this is the copy that was just
+    relaunched, and not on a platform with no such thing.
+
+    Two things ask. Backing up wants a shadow copy, so files a program is
+    holding open are copied rather than skipped. Restoring wants to install
+    the software: winget can install for the machine rather than for one
+    account, and without the rights it either refuses or asks once per
+    program, which for ninety-seven of them is not a migration, it is an
+    afternoon of clicking Yes.
     """
-    if not want_shadow_copy or already_tried:
+    if not wanted or already_tried:
         return False
     if not is_windows():
         return False
@@ -113,6 +120,8 @@ def relaunch_as_admin(arguments: list[str]) -> bool:
 
 def forward_arguments(
     *,
+    mode: str = "",
+    restore_as_admin: bool = False,
     profile_root: str = "",
     files_only: bool = False,
     include_wifi: bool = False,
@@ -127,6 +136,15 @@ def forward_arguments(
     path: those are collected afterwards, in the process that will use them.
     """
     arguments = ["gui", ALREADY_TRIED_FLAG]
+    # The relaunched copy has to come back on the same branch. Without this it
+    # reopens on the first page and offers to back this machine up, which to
+    # somebody halfway through a restore reads as the program having forgotten
+    # what they asked for -- and the one thing worse than that is their
+    # agreeing to it.
+    if mode:
+        arguments += ["--mode", mode]
+    if restore_as_admin:
+        arguments.append("--restore-as-admin")
     if profile_root:
         arguments += ["--profile-root", profile_root]
     if files_only:

@@ -365,6 +365,11 @@ class WinMigrateWizard:
         # the wrong guess, and the wrong guess is the one that writes files.
         self.found_bundles = defaults.bundles_beside_program()
         opening = Mode.RESTORE.value if self.found_bundles else Mode.BACKUP.value
+        # A copy relaunched for administrator rights says which branch it was
+        # on. Reopening on the other one, to somebody halfway through a
+        # restore, reads as the program having forgotten -- and the only thing
+        # worse than that is their agreeing to it.
+        opening = str(self.options.get("mode") or opening)
         self.mode_var = tk.StringVar(value=opening)
         for value, heading, blurb in (
             (
@@ -390,6 +395,31 @@ class WinMigrateWizard:
             ).pack(anchor="w", pady=(14, 0))
             ttk.Label(page, text="     " + blurb, style="Hint.TLabel", wraplength=600,
                       justify="left").pack(anchor="w")
+            if value == Mode.RESTORE.value:
+                # Ticked before anything has been typed, because agreeing to it
+                # restarts the program: asking later would throw away the
+                # backup's password along with everything else on the page.
+                self.restore_as_admin = tk.BooleanVar(
+                    value=bool(self.options.get("restore_as_admin"))
+                )
+                self.admin_check = ttk.Checkbutton(
+                    page,
+                    text="     Also install my programs (Windows will ask for permission)",
+                    variable=self.restore_as_admin,
+                    style="Wizard.TCheckbutton",
+                )
+                self.admin_hint = ttk.Label(
+                    page,
+                    text="     Installing programs for the whole machine needs "
+                    "administrator rights. Without them the files, settings and "
+                    "taskbar still come back \u2014 the programs are listed for you "
+                    "to install yourself.",
+                    style="Hint.TLabel",
+                    wraplength=600,
+                    justify="left",
+                )
+                self.admin_check.pack(anchor="w", pady=(6, 0))
+                self.admin_hint.pack(anchor="w")
             if value == Mode.RESTORE.value and self.found_bundles:
                 found = defaults.describe_bundle_file(self.found_bundles[0])
                 extra = (
@@ -1468,6 +1498,8 @@ class WinMigrateWizard:
             return
         if self.step is Step.WELCOME and self._maybe_elevate():
             return
+        if self.step is Step.CHOOSE and self._maybe_elevate_for_restore():
+            return
         self._show_next(wizard.next_step(self.step, self.data.mode), wizard.next_step)
 
     def _go_back(self) -> None:
@@ -1575,6 +1607,7 @@ class WinMigrateWizard:
         if not elevate.should_offer(self.use_vss.get(), self.elevation_attempted):
             return False
         arguments = elevate.forward_arguments(
+            mode=Mode.BACKUP.value,
             profile_root=self.profile_var.get(),
             files_only=self.files_only.get(),
             include_wifi=self.include_wifi.get(),
@@ -1595,6 +1628,41 @@ class WinMigrateWizard:
         self.elevation_attempted = True
         self._update_elevation_note()
         return False
+
+    def _maybe_elevate_for_restore(self) -> bool:
+        """Restart elevated when the restore asked to install programs.
+
+        True means this process is going away. Nothing has been typed yet --
+        that is the whole reason the question is on the first page: agreeing
+        restarts the program, and asking on the page that collects the backup's
+        password would throw that password away along with everything else.
+
+        Declining is not a failure and does not end anything. The files, the
+        settings and the taskbar all come back without administrator rights;
+        only the installing needs them, and the software page says so plainly
+        when it gets there.
+        """
+        from . import wizard  # noqa: PLC0415
+
+        if wizard.as_mode(self.mode_var.get()) is not Mode.RESTORE:
+            return False
+        wanted = bool(getattr(self, "restore_as_admin", None) and self.restore_as_admin.get())
+        if not elevate.should_offer(wanted, self.elevation_attempted):
+            return False
+        log.info("asking Windows for administrator rights (to install programs)")
+        if elevate.relaunch_as_admin(
+            elevate.forward_arguments(mode=Mode.RESTORE.value, restore_as_admin=True)
+        ):
+            log.info("elevated copy started; this one is closing")
+            self.root.destroy()
+            return True
+        log.info("elevation declined or unavailable; programs will not be installed")
+        self.elevation_attempted = True
+        return False
+
+    def _can_install_programs(self) -> bool:
+        """Will the install step actually be able to do anything?"""
+        return not elevate.is_windows() or elevate.is_elevated()
 
     # --- the list ----------------------------------------------------------
     def _render_rows(self) -> None:
@@ -2183,13 +2251,17 @@ class WinMigrateWizard:
             self.software_box.insert("end", f"{identifier}\n")
         self.software_box.configure(state="disabled")
 
-        # Elevation is not a detail to discover halfway through. Said here,
-        # while there is still a choice about when to start.
-        if elevate.is_windows() and not elevate.is_elevated():
+        # Said here rather than discovered halfway through, and said as the
+        # thing it actually is: without the rights most of these will not
+        # install at all, and saying "Windows will ask permission" invites
+        # somebody to press a button that cannot work.
+        if not self._can_install_programs():
             self.software_note.configure(
-                text="This is not running as administrator, so Windows will ask "
-                "for permission for some of these as they install. Installing from an "
-                "administrator window asks once instead of once per program."
+                text="This is not running as administrator, so most of these cannot "
+                "be installed \u2014 winget installs programs for the whole machine, "
+                "which needs permission. Close this, start it again as administrator, "
+                "and tick 'Also install my programs' on the first page. Your files, "
+                "settings and taskbar are already back and stay back."
             )
         else:
             self.software_note.configure(
