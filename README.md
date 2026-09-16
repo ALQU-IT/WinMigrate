@@ -160,6 +160,19 @@ Microsoft's Office Deployment Tool.
 
 ## What it will not do
 
+Program data under `AppData` travels for a named list of programs. Excluding
+AppData wholesale is the right default -- it is where everything on the machine
+keeps its caches, its half-downloaded updates and its machine-bound tokens --
+but it is also where Thunderbird keeps entire mailboxes, where Word keeps the
+templates you built and the dictionary of names you taught it, and where Windows
+keeps the folders pinned to Quick Access and the VPN connections you set up by
+hand. None of that is a cache and none of it comes back from an installer. So
+the answer is a list: each entry a path, a title, and a sentence saying why
+somebody would miss it. Adding to that table is the intended way to make a
+migration more complete. Where a program stores passwords in the clear
+(FileZilla's Site Manager), the entry is marked as credential material and
+rides in the encrypted payload only.
+
 What starts when you log in travels too -- the Startup folder, which lives
 under AppData and so was excluded wholesale, and the per-user `Run` key, which
 the file scan never saw at all. Each `Run` entry is a command Windows executes

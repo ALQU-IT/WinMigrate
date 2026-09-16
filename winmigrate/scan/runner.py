@@ -112,6 +112,7 @@ def run_scan(
     _scan_wallpaper(env, result, config, progress)
     _scan_personalization(env, result, progress)
     _scan_startup(env, result, config, progress)
+    _scan_app_data(env, result, config, progress)
     _note_long_paths(result, long_paths)
 
     result.duration_seconds = time.monotonic() - started
@@ -664,6 +665,20 @@ def _scan_startup(
 
     _emit(progress, "Reading what starts when you log in")
     items, followups = startup_mod.scan_startup(env)
+    _measure_capture_items(items, config, env)
+    result.items.extend(items)
+    result.followups.extend(followups)
+
+
+def _scan_app_data(
+    env: Environment, result: ScanResult, config: ScanConfig,
+    progress: ProgressCallback | None,
+) -> None:
+    """Carry the named AppData locations -- mail, templates, pinned folders."""
+    from . import appdata as appdata_mod  # noqa: PLC0415 -- optional stage
+
+    _emit(progress, "Checking program data")
+    items, followups = appdata_mod.scan_app_data(env, files_only=config.files_only)
     _measure_capture_items(items, config, env)
     result.items.extend(items)
     result.followups.extend(followups)
