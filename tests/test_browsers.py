@@ -372,3 +372,65 @@ def test_extension_code_and_data_both_survive_a_round_trip(tmp_path: Path):
 
     names = restored_names(root, tmp_path)
     assert {"background.js", "manifest.json", "000003.log", "000005.ldb"} <= names
+
+
+# --- what the browser actually calls a profile ------------------------------
+def test_a_renamed_profile_is_called_what_the_browser_calls_it(tmp_path: Path):
+    """Chromium keeps two names and they disagree. The one inside the profile's
+    own Preferences is what it was created with; renaming it in the browser
+    does not change it. The name on screen lives in Local State beside the
+    profiles, and that is the one kept up to date.
+
+    Not cosmetic: these names are how the window asks which profile's passwords
+    to export, and how the restore says which profile to put them back into."""
+    from winmigrate.scan.browsers import _chromium_profile_name
+
+    user_data = tmp_path / "User Data"
+    profile = user_data / "Profile 1"
+    profile.mkdir(parents=True)
+    # Created as "Personal", renamed by its owner to "Demo Work".
+    (profile / "Preferences").write_text(
+        json.dumps({"profile": {"name": "Personal"}}), encoding="utf-8"
+    )
+    (user_data / "Local State").write_text(
+        json.dumps({"profile": {"info_cache": {"Profile 1": {"name": "Demo Work"}}}}),
+        encoding="utf-8",
+    )
+
+    assert _chromium_profile_name(profile) == "Demo Work"
+
+
+def test_a_browser_too_old_for_local_state_still_gets_a_name(tmp_path: Path):
+    from winmigrate.scan.browsers import _chromium_profile_name
+
+    profile = tmp_path / "User Data" / "Default"
+    profile.mkdir(parents=True)
+    (profile / "Preferences").write_text(
+        json.dumps({"profile": {"name": "Private"}}), encoding="utf-8"
+    )
+
+    assert _chromium_profile_name(profile) == "Private"
+
+
+def test_a_profile_that_names_itself_nowhere_is_called_by_its_folder(tmp_path: Path):
+    from winmigrate.scan.browsers import _chromium_profile_name
+
+    profile = tmp_path / "User Data" / "Profile 3"
+    profile.mkdir(parents=True)
+
+    assert _chromium_profile_name(profile) == "Profile 3"
+
+
+def test_local_state_that_is_not_json_does_not_cost_the_name(tmp_path: Path):
+    """It is read off a live machine, where a browser may be mid-write."""
+    from winmigrate.scan.browsers import _chromium_profile_name
+
+    user_data = tmp_path / "User Data"
+    profile = user_data / "Profile 1"
+    profile.mkdir(parents=True)
+    (user_data / "Local State").write_text("{ truncated", encoding="utf-8")
+    (profile / "Preferences").write_text(
+        json.dumps({"profile": {"name": "Personal"}}), encoding="utf-8"
+    )
+
+    assert _chromium_profile_name(profile) == "Personal"

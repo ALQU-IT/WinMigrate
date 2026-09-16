@@ -53,6 +53,7 @@ def run_scan(
 
     source = detect_source_machine(profile_path=str(env.profile_root))
     result = ScanResult(source=source, started_utc=utcnow(), files_only=config.files_only)
+    _say_whose_profile(env, result)
 
     if not env.profile_root.is_dir():
         result.add_note(
@@ -122,6 +123,50 @@ def run_scan(
     result.duration_seconds = time.monotonic() - started
     result.finished_utc = utcnow()
     return result
+
+
+def _say_whose_profile(env: Environment, result: ScanResult) -> None:
+    """Write down whose profile is being read, and object if it is the wrong one.
+
+    Everything that makes a machine somebody's -- their browsers and their
+    profiles, the programs they installed for themselves, their editor
+    sessions -- lives in one profile folder and one half of the registry, and
+    both follow the account this process is running as.
+
+    Elevating through UAC on your own account keeps them. Elevating by typing
+    *somebody else's* administrator credentials does not: the scan then reads
+    that account's empty profile and finds almost nothing, and the result is a
+    backup of the wrong person that looks exactly like a successful one. It is
+    the worst failure this tool has, because the person only discovers it on
+    the new machine, with the old one already wiped.
+
+    So it is said out loud. The log gets it every time; the report gets a
+    warning when the profile being read is not the one whose desktop this is.
+    """
+    log.info("scanning profile: %s", env.profile_root)
+    if not env.is_windows or env.registry is not None:
+        return
+    from .. import winlaunch  # noqa: PLC0415 -- Windows-only, and optional
+
+    desktop = winlaunch.shell_user_profile()
+    if desktop is None:
+        return
+    log.info("the desktop belongs to: %s", desktop)
+    if pathutil.normalize_key(desktop) == pathutil.normalize_key(env.profile_root):
+        return
+    result.add_note(
+        Severity.WARNING,
+        f"this is reading {env.profile_root}, but the person at this computer is "
+        f"{desktop}",
+        "That happens when the program is started as a different administrator: "
+        "it then reads that account's profile, so browsers, per-user programs "
+        "and settings look missing. Close this, start it again without "
+        "administrator rights (or as the account you are signed in with), and "
+        "check the list looks like your computer.",
+    )
+    log.warning(
+        "scanning %s while the desktop belongs to %s", env.profile_root, desktop
+    )
 
 
 def _environment_for(config: ScanConfig) -> Environment:

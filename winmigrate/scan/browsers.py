@@ -189,15 +189,55 @@ def _read_chromium_state(profile_dir: Path) -> SignInState:
 
 
 def _chromium_profile_name(profile_dir: Path) -> str:
-    """The friendly profile name from Preferences, falling back to the dir name."""
-    try:
-        prefs = json.loads((profile_dir / "Preferences").read_text(encoding="utf-8", errors="replace"))
-        name = prefs.get("profile", {}).get("name")
-        if isinstance(name, str) and name.strip():
-            return name.strip()
-    except (OSError, json.JSONDecodeError, AttributeError):
-        pass
+    """The name the browser itself shows for this profile.
+
+    Chromium keeps two of these and they disagree. The one inside the profile's
+    own ``Preferences`` is the name it was *created* with, and renaming a
+    profile in the browser does not change it -- so a profile somebody made
+    years ago and renamed to "Demo Work" still reads "Personal" in there. The
+    name on screen lives in the user data directory's ``Local State``, under
+    ``profile.info_cache`` keyed by the profile's folder name, and that one is
+    kept up to date.
+
+    Reading the wrong one is not cosmetic. These names are how the window asks
+    which profile's passwords to export, and how the restore instructions say
+    which profile to import them back into -- so a person following them opens
+    the wrong profile and puts their passwords in it.
+    """
+    for candidate in (
+        _name_from_local_state(profile_dir),
+        _name_from_preferences(profile_dir),
+    ):
+        if candidate:
+            return candidate
     return profile_dir.name
+
+
+def _name_from_local_state(profile_dir: Path) -> str:
+    """The display name Chromium keeps beside the profiles, or ""."""
+    try:
+        state = json.loads(
+            (profile_dir.parent / "Local State").read_text(
+                encoding="utf-8", errors="replace"
+            )
+        )
+        cache = state.get("profile", {}).get("info_cache", {})
+        name = (cache.get(profile_dir.name) or {}).get("name")
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return ""
+    return name.strip() if isinstance(name, str) and name.strip() else ""
+
+
+def _name_from_preferences(profile_dir: Path) -> str:
+    """The name the profile was created with, or "". A fallback, not the answer."""
+    try:
+        prefs = json.loads(
+            (profile_dir / "Preferences").read_text(encoding="utf-8", errors="replace")
+        )
+        name = prefs.get("profile", {}).get("name")
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return ""
+    return name.strip() if isinstance(name, str) and name.strip() else ""
 
 
 # --- Firefox ---------------------------------------------------------------

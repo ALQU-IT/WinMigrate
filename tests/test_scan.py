@@ -3,7 +3,7 @@ from pathlib import Path
 from conftest import snapshot
 
 from winmigrate.config import ScanConfig
-from winmigrate.models import Action, Category, Kind, Severity, SkipReason
+from winmigrate.models import Action, Category, Kind, ScanResult, Severity, SkipReason
 from winmigrate.platform_win import USER_SHELL_FOLDERS_KEY, Environment
 from winmigrate.scan import run_scan
 
@@ -414,3 +414,83 @@ def test_an_ordinary_folder_gets_no_cloud_warning(tmp_path: Path):
     )
     item = next(i for i in result.items if i.id == "files:other:projects")
     assert not [n for n in item.notes if n.severity is Severity.WARNING]
+
+
+# --- whose profile is this? -------------------------------------------------
+def test_the_scan_objects_when_it_is_reading_the_wrong_persons_profile(
+    tmp_path: Path, monkeypatch, caplog
+):
+    """Elevating through UAC on your own account keeps your profile. Elevating
+    by typing somebody else's administrator credentials does not: the scan then
+    reads that account's empty profile, finds almost nothing, and produces a
+    backup of the wrong person that looks exactly like a successful one. The
+    person finds out on the new machine, with the old one already wiped."""
+    import logging
+
+    from winmigrate import winlaunch
+    from winmigrate.models import Severity
+    from winmigrate.scan import runner
+
+    (tmp_path / "Documents").mkdir()
+    env = Environment(profile_root=tmp_path, registry=None, is_windows=True)
+    monkeypatch.setattr(
+        winlaunch, "shell_user_profile", lambda: Path("/home/somebody-else")
+    )
+    result = ScanResult(source=None)
+
+    with caplog.at_level(logging.INFO, logger="winmigrate.scan.runner"):
+        runner._say_whose_profile(env, result)
+
+    (warning,) = [note for note in result.notes if note.severity is Severity.WARNING]
+    assert str(tmp_path) in warning.message
+    assert "somebody-else" in warning.message
+    # And it says the thing that makes it fixable rather than only alarming.
+    assert "without administrator rights" in warning.detail
+    assert "somebody-else" in "\n".join(caplog.messages)
+
+
+def test_the_ordinary_case_says_nothing_but_still_writes_it_down(
+    tmp_path: Path, monkeypatch, caplog
+):
+    """Same account, elevated or not: the profile is the profile."""
+    import logging
+
+    from winmigrate import winlaunch
+    from winmigrate.scan import runner
+
+    env = Environment(profile_root=tmp_path, registry=None, is_windows=True)
+    monkeypatch.setattr(winlaunch, "shell_user_profile", lambda: tmp_path)
+    result = ScanResult(source=None)
+
+    with caplog.at_level(logging.INFO, logger="winmigrate.scan.runner"):
+        runner._say_whose_profile(env, result)
+
+    assert result.notes == []
+    assert str(tmp_path) in "\n".join(caplog.messages)
+
+
+def test_a_machine_that_cannot_say_whose_desktop_it_is_does_not_guess(
+    tmp_path: Path, monkeypatch
+):
+    """No shell, a service session, a locked-down machine: silence beats a
+    warning nobody can act on."""
+    from winmigrate import winlaunch
+    from winmigrate.scan import runner
+
+    env = Environment(profile_root=tmp_path, registry=None, is_windows=True)
+    monkeypatch.setattr(winlaunch, "shell_user_profile", lambda: None)
+    result = ScanResult(source=None)
+
+    runner._say_whose_profile(env, result)
+
+    assert result.notes == []
+
+
+def test_a_fixture_is_never_accused_of_being_the_wrong_profile(tmp_path: Path):
+    """Development and the tests run against made-up profiles on purpose."""
+    from winmigrate.scan import runner
+
+    result = ScanResult(source=None)
+    runner._say_whose_profile(Environment.fixture(tmp_path, {}), result)
+
+    assert result.notes == []

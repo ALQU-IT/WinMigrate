@@ -225,6 +225,81 @@ def launch_as_shell_user(executable: Path, arguments: list[str]) -> bool:
             kernel32.CloseHandle(process)
 
 
+def shell_user_profile() -> Path | None:
+    """The profile folder of whoever owns the desktop, or None.
+
+    Not the same thing as this process's ``%USERPROFILE%`` once the program is
+    running elevated. Elevating through UAC on your own account keeps the
+    profile; elevating by typing *somebody else's* administrator credentials
+    does not -- the process then runs as that account, and every per-user thing
+    this tool reads comes from their profile and their half of the registry
+    instead of yours.
+
+    That is a quiet, total failure: browsers, their profiles, per-user
+    installed programs and editor sessions all live there, so a backup taken
+    that way is a backup of the wrong person, and it looks like a successful
+    one. This exists so that can be noticed and said out loud.
+    """
+    if not is_windows():
+        return None
+    try:
+        import ctypes  # noqa: PLC0415
+        from ctypes import wintypes  # noqa: PLC0415
+    except ImportError:  # pragma: no cover -- ctypes is in the standard library
+        return None
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    userenv = ctypes.WinDLL("userenv", use_last_error=True)
+
+    advapi32.OpenProcessToken.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)
+    ]
+    advapi32.OpenProcessToken.restype = wintypes.BOOL
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    user32.GetWindowThreadProcessId.argtypes = [
+        wintypes.HWND, ctypes.POINTER(wintypes.DWORD)
+    ]
+    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    userenv.GetUserProfileDirectoryW.argtypes = [
+        wintypes.HANDLE, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)
+    ]
+    userenv.GetUserProfileDirectoryW.restype = wintypes.BOOL
+
+    shell_pid = _shell_process_id(user32, wintypes)
+    if not shell_pid:
+        return None
+
+    process = token = None
+    try:
+        process = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, shell_pid)
+        if not process:
+            return None
+        token = wintypes.HANDLE()
+        if not advapi32.OpenProcessToken(process, _TOKEN_QUERY, ctypes.byref(token)):
+            return None
+        size = wintypes.DWORD(0)
+        userenv.GetUserProfileDirectoryW(token, None, ctypes.byref(size))
+        if not size.value:
+            return None
+        buffer = ctypes.create_unicode_buffer(size.value)
+        if not userenv.GetUserProfileDirectoryW(token, buffer, ctypes.byref(size)):
+            return None
+        return Path(buffer.value)
+    except OSError as exc:  # pragma: no cover -- Windows-only failure path
+        log.info("could not read the desktop owner's profile: %s", exc)
+        return None
+    finally:
+        if token is not None and getattr(token, "value", None):
+            kernel32.CloseHandle(token)
+        if process:
+            kernel32.CloseHandle(process)
+
+
 def _shell_process_id(user32, wintypes) -> int:
     """The process that owns the desktop -- explorer.exe, normally.
 
