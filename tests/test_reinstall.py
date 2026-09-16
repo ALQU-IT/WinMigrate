@@ -263,3 +263,75 @@ def test_a_manifest_entry_with_a_newline_cannot_break_the_manual_table(tmp_path)
     ]
     assert len(rows) == 4  # header, rule, and one row per application
     assert "| Line1 Line2 \\| x | 1 | P |" in rows
+
+
+# --- installing without ninety-seven windows --------------------------------
+HELP_WITH_SILENT = """
+Downloads and installs packages from a previously exported file.
+
+usage: winget import [-i] <import-file> [<options>]
+
+The following arguments are available:
+  -i,--import-file          File describing the packages to install
+
+The following options are available:
+  --ignore-unavailable      Suppress errors for unavailable packages
+  --ignore-versions         Ignore the versions in the import file
+  --no-upgrade              Skip packages already installed
+  --accept-package-agreements
+  --accept-source-agreements
+  --disable-interactivity   Disable interactive prompts
+  --silent                  Request silent installation of packages
+"""
+
+HELP_WITHOUT_SILENT = HELP_WITH_SILENT.replace(
+    "  --silent                  Request silent installation of packages\n", ""
+)
+
+
+def helping(text: str, ok: bool = True):
+    def runner(argv, timeout=None):
+        assert argv[:2] == ["winget", "import"]
+        return CommandResult(
+            command=list(argv), returncode=0 if ok else 1, stdout=text if ok else ""
+        )
+
+    return runner
+
+
+def test_the_installers_are_asked_to_be_quiet_when_winget_allows_it(tmp_path: Path):
+    """--disable-interactivity silences winget's own prompts and nothing else:
+    every installer it runs is then free to put a window on the screen, ask
+    where to install, and offer a toolbar. Ninety-seven of those over an hour
+    is not an unattended migration."""
+    command = reinstall.import_command(tmp_path / "x.json", helping(HELP_WITH_SILENT))
+
+    assert "--silent" in command
+    assert "--disable-interactivity" in command
+
+
+def test_a_winget_that_does_not_take_the_flag_is_not_given_it(tmp_path: Path):
+    """Passing an option winget does not know is not a degraded install -- it
+    is a usage error before the first package, so nothing installs at all."""
+    command = reinstall.import_command(tmp_path / "x.json", helping(HELP_WITHOUT_SILENT))
+
+    assert "--silent" not in command
+    # And everything that made it work before is still there.
+    assert command[:4] == ["winget", "import", "-i", str(tmp_path / "x.json")]
+
+
+def test_a_winget_that_cannot_answer_gets_the_command_that_always_worked(tmp_path: Path):
+    """Missing, broken, or a version that says nothing useful: the import still
+    runs, exactly as it did before there was a flag to ask about."""
+    command = reinstall.import_command(tmp_path / "x.json", helping("", ok=False))
+
+    assert "--silent" not in command
+
+
+def test_the_flag_is_looked_for_by_name_rather_than_by_prose():
+    """Option names are not translated. Looking for the flag itself is what
+    makes this work on a machine running Windows in any language."""
+    assert reinstall.supports_silent(helping(HELP_WITH_SILENT)) is True
+    assert reinstall.supports_silent(helping(HELP_WITHOUT_SILENT)) is False
+    # Prose about silence is not the flag.
+    assert reinstall.supports_silent(helping("installs packages silently")) is False

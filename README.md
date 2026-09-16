@@ -145,6 +145,16 @@ winmigrate reinstall C:\restored\WinMigrate-Reinstall --apps     # run winget im
 winmigrate reinstall C:\restored\WinMigrate-Reinstall --office C:\ODT\setup.exe
 ```
 
+The installers are asked to be quiet. `--disable-interactivity`, which
+WinMigrate has always passed, silences winget's own prompts and nothing else --
+every installer it then runs is free to open a window, ask where to install and
+offer a toolbar, and ninety-seven of those arriving over an hour is not an
+unattended migration. `--silent` is the flag that stops it, and since it is not
+accepted by every winget, WinMigrate reads `winget import -?` and passes it only
+when the flag is there: an option winget does not know is a usage error before
+the first package, so nothing would install at all. (Office is separate and
+still shows its own installer.)
+
 The window does it for you. A restore that has software in it stops on a page
 listing every package it would fetch, and installs none of it until you press
 the button; winget's output is shown line by line while it runs, Stop takes

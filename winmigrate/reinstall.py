@@ -235,7 +235,33 @@ def office_reactivation_steps(installation: OfficeInstallation | None) -> list[s
     return list(REACTIVATION_STEPS.get(installation.activation_type, REACTIVATION_STEPS["unknown"]))
 
 
-def winget_import_command(import_file: Path) -> list[str]:
+#: What makes the *installers* quiet. ``--disable-interactivity`` silences
+#: winget's own prompts and nothing else: every installer it then runs is free
+#: to put its own window on the screen, ask where to install, and offer a
+#: toolbar. Ninety-seven of those, arriving one at a time over an hour, is not
+#: an unattended migration.
+SILENT_FLAG = "--silent"
+
+
+def supports_silent(runner=process.run) -> bool:
+    """Does this winget's ``import`` take ``--silent``? Asked, never assumed.
+
+    It is documented for ``install`` and has not always been accepted by
+    ``import``. Passing an option winget does not know is not a degraded
+    install -- it is a usage error before the first package, so nothing
+    installs at all, which is the worst outcome available here.
+
+    So the help is read first. Option names are not translated, so looking for
+    the flag itself works on a machine in any language, and a winget that is
+    missing or broken answers no and the import runs as it always did.
+    """
+    result = runner(["winget", "import", "-?"], timeout=60)
+    found = SILENT_FLAG in (result.stdout or "")
+    log.info("winget import %s --silent", "accepts" if found else "does not accept")
+    return found
+
+
+def winget_import_command(import_file: Path, silent: bool = False) -> list[str]:
     """The command that replays winget's export on this machine.
 
     ``--ignore-unavailable`` keeps one missing package from aborting the rest,
@@ -247,7 +273,7 @@ def winget_import_command(import_file: Path) -> list[str]:
     ninety-seven application install is something you can watch rather than a
     bar that moves once at the end.
     """
-    return [
+    command = [
         "winget",
         "import",
         "-i",
@@ -257,11 +283,19 @@ def winget_import_command(import_file: Path) -> list[str]:
         "--ignore-unavailable",
         "--disable-interactivity",
     ]
+    if silent:
+        command.append(SILENT_FLAG)
+    return command
+
+
+def import_command(import_file: Path, runner=process.run) -> list[str]:
+    """The import command this machine's winget will actually accept."""
+    return winget_import_command(import_file, silent=supports_silent(runner))
 
 
 def run_winget_import(import_file: Path, runner=process.run) -> process.CommandResult:
     """Replay winget's export on this machine, waiting for it to finish."""
-    return runner(winget_import_command(import_file), timeout=WINGET_IMPORT_TIMEOUT)
+    return runner(import_command(import_file, runner), timeout=WINGET_IMPORT_TIMEOUT)
 
 
 def package_identifiers(import_file: Path) -> list[str]:

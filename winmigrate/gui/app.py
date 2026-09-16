@@ -2293,7 +2293,7 @@ class WinMigrateWizard:
 
         try:
             result = process.stream(
-                reinstall_mod.winget_import_command(import_file),
+                reinstall_mod.import_command(import_file),
                 lambda line: self.events.put(("install-line", line)),
                 timeout=reinstall_mod.WINGET_IMPORT_TIMEOUT,
                 cancelled=self._install_stop.is_set,

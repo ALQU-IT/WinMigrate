@@ -1883,3 +1883,28 @@ def test_a_backup_is_not_asked_the_restore_question(monkeypatch):
 
     assert asked == []
     assert wizard.step is Step.WELCOME
+
+
+def test_the_window_asks_the_installers_to_be_quiet_too(
+    monkeypatch, bundle: Path, tmp_path: Path
+):
+    """The window is where ninety-seven installers would open ninety-seven
+    windows, so it is the path that most needs them silent."""
+    from winmigrate import reinstall as reinstall_mod
+    from winmigrate.util import process
+
+    wizard = _finished_restore(monkeypatch, bundle, tmp_path)
+    _with_software(wizard, tmp_path, ["Mozilla.Firefox"])
+    monkeypatch.setattr(reinstall_mod, "supports_silent", lambda runner=None: True)
+
+    seen: list[list[str]] = []
+
+    def fake_stream(command, on_line, timeout=0, cancelled=None):
+        seen.append(list(command))
+        return process.CommandResult(command, 0, "ok")
+
+    monkeypatch.setattr(process, "stream", fake_stream)
+    wizard._show(Step.INSTALLING)
+    assert pump(wizard, until=("installed", "install-failed")) == "installed"
+
+    assert seen and "--silent" in seen[0]
