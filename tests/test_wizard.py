@@ -70,7 +70,7 @@ def test_the_forward_button_says_what_it_will_do():
     """A wizard whose button always reads "Next" makes the user find out what it
     did by pressing it. This one commits to a backup, so it says so."""
     assert next_label(Step.WELCOME) == "Scan"
-    assert next_label(Step.CONFIRM) == "Start backup"
+    assert next_label(Step.CONFIRM) == "Start the backup"
     assert next_label(Step.DONE) == "Finish"
     assert next_label(Step.SELECT) == "Next"
 
@@ -442,3 +442,51 @@ def test_a_palette_knows_whether_it_is_dark_rather_than_being_recognised_by_iden
     recorder = Recorder()
     theme.apply(recorder, "Segoe UI", copied)
     assert recorder.used == ["clam"]
+
+
+# --- how the pages read -----------------------------------------------------
+JARGON = (
+    "passphrase",   # a security person's word for a password
+    "bundle",       # what the code calls the file; the user calls it a backup
+    "manifest",
+    "sidecar",
+    "shadow copy",
+    "item",         # a row in a list is not an "item" to anybody but a programmer
+    ".dat",         # a file extension is not a description
+    "elevation",
+)
+
+
+def test_no_page_speaks_in_jargon():
+    """Every one of these has a plain word that means the same thing, and the
+    person this is for stops reading at the first one that does not."""
+    from winmigrate.gui.wizard import TITLES
+
+    for step, (heading, subtitle) in TITLES.items():
+        text = f"{heading} {subtitle}".lower()
+        for word in JARGON:
+            assert word not in text, f"{step.value}: {word}"
+
+
+def test_no_page_says_the_programs_name_at_the_person_using_it():
+    """"WinMigrate never reads a password store" is how a README talks. A
+    window says "nothing here reads them", because there is only one thing in
+    the room that could."""
+    from winmigrate.gui.wizard import TITLES
+
+    for step, (heading, subtitle) in TITLES.items():
+        assert "winmigrate" not in f"{heading} {subtitle}".lower(), step.value
+
+
+def test_every_page_says_what_it_is_for_before_what_it_is_safe_from():
+    """The reassurance matters -- this copies somebody's whole life off a
+    computer -- but it is the answer to a question they have not asked yet."""
+    from winmigrate.gui.wizard import TITLES
+
+    for step, (heading, subtitle) in TITLES.items():
+        assert heading, step.value
+        assert not heading.endswith("."), step.value
+        assert subtitle.endswith("."), step.value
+        # The first sentence is the one that gets read.
+        first = subtitle.split(".")[0].lower()
+        assert not first.startswith("nothing here"), step.value

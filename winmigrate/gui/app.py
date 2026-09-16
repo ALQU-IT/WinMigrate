@@ -417,7 +417,9 @@ class WinMigrateWizard:
         )
         self.bundle_summary.pack(anchor="w", pady=(6, 18))
 
-        ttk.Label(page, text="Passphrase", style="Body.TLabel").pack(anchor="w")
+        ttk.Label(
+            page, text="The backup's password", style="Body.TLabel"
+        ).pack(anchor="w")
         self.bundle_passphrase = ttk.Entry(page, show="•")
         self.bundle_passphrase.pack(fill="x", pady=(4, 6))
         self.bundle_passphrase.bind("<KeyRelease>", lambda _e: self._refresh_buttons())
@@ -770,19 +772,7 @@ class WinMigrateWizard:
         self.credentials_status.pack(anchor="w", pady=(12, 0))
 
     def _render_credentials(self) -> None:
-        from .. import credentials as credentials_mod  # noqa: PLC0415
-
-        if self.credential_entries is None:
-            env = self._environment(self._config())
-            entries, error = ([], None)
-            if env.is_windows:
-                entries, error = credentials_mod.list_credentials()
-            self.credential_entries = entries
-            log.info(
-                "saved sign-ins: %s%s", len(entries), f" ({error})" if error else ""
-            )
-
-        count = len(self.credential_entries)
+        count = len(self._saved_sign_ins())
         if not count:
             self.credentials_intro.configure(
                 text="Windows has no saved sign-ins on this machine, so there is "
@@ -793,13 +783,14 @@ class WinMigrateWizard:
             return
 
         self.credentials_intro.configure(
-            text=f"Windows has {count} saved sign-in(s). They are locked to this "
-            "machine, so no backup can copy them \u2014 but Windows can export them "
-            "for you, and WinMigrate will carry what it writes.\n\n"
-            "Press the first button, choose 'Back up\u2026', and follow the prompts. "
-            "Windows asks for Ctrl+Alt+Del and then for a password of your choosing "
-            "\u2014 remember it, it is not your WinMigrate passphrase. Then press the "
-            "second button and pick the file you saved."
+            text=f"Windows has {count} saved sign-in(s). Press the first button, "
+            "choose 'Back up\u2026', and follow the prompts \u2014 then press the "
+            "second button and pick the file it saved.\n\n"
+            "Windows will ask for Ctrl+Alt+Del and then for a password of your "
+            "choosing. Write that one down: it is separate from your backup "
+            "password, and it is the only thing that opens the file.\n\n"
+            "These sign-ins are locked to this computer, so no backup can simply "
+            "copy them. Windows has to hand them over itself."
         )
         named = ", ".join(
             sorted({_credential_label(entry) for entry in self.credential_entries})[:6]
@@ -1240,7 +1231,13 @@ class WinMigrateWizard:
             command=self._refresh_buttons,
         )
 
-        ttk.Label(page, text="Passphrase", style="Body.TLabel").pack(anchor="w")
+        # "Password", not "passphrase". The second is a security person's word
+        # for the first, and somebody who does not know it is the same thing
+        # spends the page wondering what they are being asked for. Named for
+        # this backup so it is not mistaken for the Windows one.
+        ttk.Label(
+            page, text="Password for this backup", style="Body.TLabel"
+        ).pack(anchor="w")
         self.passphrase = ttk.Entry(page, show="•")
         self.passphrase.pack(fill="x", pady=(4, 10))
         self.passphrase.bind("<KeyRelease>", lambda _e: self._refresh_buttons())
@@ -1250,7 +1247,7 @@ class WinMigrateWizard:
         self.passphrase2.bind("<KeyRelease>", lambda _e: self._refresh_buttons())
         ttk.Label(
             page,
-            text="This passphrase is the only way back into the backup. Nobody can "
+            text="This password is the only way back into the backup. Nobody can "
             "recover it for you — not us, not Microsoft. Write it down somewhere "
             "that is not the machine you are replacing.",
             style="Warn.TLabel",
@@ -1471,16 +1468,60 @@ class WinMigrateWizard:
             return
         if self.step is Step.WELCOME and self._maybe_elevate():
             return
-        following = wizard.next_step(self.step, self.data.mode)
-        if following is not None:
-            self._show(following)
+        self._show_next(wizard.next_step(self.step, self.data.mode), wizard.next_step)
 
     def _go_back(self) -> None:
         from . import wizard
 
-        earlier = wizard.previous_step(self.step, self.data.mode)
-        if earlier is not None:
-            self._show(earlier)
+        self._show_next(
+            wizard.previous_step(self.step, self.data.mode), wizard.previous_step
+        )
+
+    def _show_next(self, step, walk) -> None:
+        """Move to ``step``, stepping over any page with nothing on it.
+
+        A page that says "there is nothing to do here" is a page that should
+        not have been shown. Somebody who has never had a password saved in a
+        browser should not have to read a screen about browser passwords, and
+        then another about Windows sign-ins, to get to the one asking where the
+        backup goes. Skipped in both directions, so Back does not walk into the
+        empty page Next stepped over.
+        """
+        while step is not None and self._page_is_empty(step):
+            log.info("skipping %s: nothing on it", getattr(step, "value", step))
+            step = walk(step, self.data.mode)
+        if step is not None:
+            self._show(step)
+
+    def _page_is_empty(self, step: Step) -> bool:
+        """Is there genuinely nothing for the user to do on this page?
+
+        Only ever True for the two handoff pages, and only once their own
+        detection has actually run. "Not detected yet" is not "nothing", and a
+        page skipped because a check had not finished is a feature the user
+        never learns exists.
+        """
+        if step is Step.PASSWORDS:
+            self._find_password_targets()
+            return not self.password_targets and not self.password_cloud_accounts
+        if step is Step.CREDENTIALS:
+            return not self._saved_sign_ins()
+        return False
+
+    def _saved_sign_ins(self) -> list:
+        """What Credential Manager holds, asked once and remembered."""
+        from .. import credentials as credentials_mod  # noqa: PLC0415
+
+        if self.credential_entries is None:
+            env = self._environment(self._config())
+            entries: list = []
+            if env.is_windows:
+                entries, error = credentials_mod.list_credentials()
+                if error:
+                    log.info("could not list saved sign-ins: %s", error)
+            self.credential_entries = entries
+            log.info("saved sign-ins: %s", len(entries))
+        return self.credential_entries
 
     def _cancel(self) -> None:
         from tkinter import messagebox  # noqa: PLC0415
@@ -1674,7 +1715,9 @@ class WinMigrateWizard:
             )
         else:
             self.output_hint.configure(
-                text=f"Defaults to {drive}, the drive WinMigrate is running from."
+                text=f"Suggested: {drive}. A USB stick or an external drive is "
+                "safer than this computer's own disk \u2014 a backup on the disk you "
+                "are backing up is lost with it."
             )
 
     def _output_exists(self) -> bool:
@@ -2144,7 +2187,7 @@ class WinMigrateWizard:
         # while there is still a choice about when to start.
         if elevate.is_windows() and not elevate.is_elevated():
             self.software_note.configure(
-                text="WinMigrate is not running as administrator, so Windows will ask "
+                text="This is not running as administrator, so Windows will ask "
                 "for permission for some of these as they install. Installing from an "
                 "administrator window asks once instead of once per program."
             )

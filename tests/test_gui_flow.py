@@ -54,24 +54,24 @@ def test_the_rail_follows_the_mode_rather_than_trailing_it(monkeypatch):
     "Finish" appearing twice.
     """
     wizard, _ = open_window(monkeypatch)
-    assert rail(wizard) == ["●  Scan", "○  Choose", "○  Passwords", "○  Sign-ins", "○  Destination", "○  Confirm", "○  Finish"]
+    assert rail(wizard) == ["●  Start", "○  Choose", "○  Passwords", "○  Sign-ins", "○  Where to", "○  Check", "○  Done"]
 
     # Choosing on the first page repaints immediately, without waiting for the
     # page to change.
     wizard.mode_var.set(Mode.RESTORE.value)
     wizard._refresh_buttons()
-    assert rail(wizard) == ["●  Backup", "○  Choose", "○  Confirm", "○  Software", "○  Finish"]
+    assert rail(wizard) == ["●  Backup", "○  Choose", "○  Check", "○  Programs", "○  Done"]
 
     wizard.mode_var.set(Mode.BACKUP.value)
     wizard._show(Step.CHOOSE)
-    assert rail(wizard) == ["●  Scan", "○  Choose", "○  Passwords", "○  Sign-ins", "○  Destination", "○  Confirm", "○  Finish"]
+    assert rail(wizard) == ["●  Start", "○  Choose", "○  Passwords", "○  Sign-ins", "○  Where to", "○  Check", "○  Done"]
 
 
 def test_the_rail_marks_progress_as_the_pages_advance(monkeypatch):
     wizard, _ = open_window(monkeypatch)
     wizard._show(Step.DESTINATION)
     assert rail(wizard)[:5] == [
-        "✓  Scan", "✓  Choose", "✓  Passwords", "✓  Sign-ins", "●  Destination",
+        "✓  Start", "✓  Choose", "✓  Passwords", "✓  Sign-ins", "●  Where to",
     ]
 
 
@@ -1707,3 +1707,75 @@ def test_enter_inside_a_text_box_stays_in_the_text_box(monkeypatch, profile: Pat
     wizard._on_return(InAText())
 
     assert wizard.step is Step.CHOOSE
+
+
+# --- pages with nothing on them ---------------------------------------------
+def test_a_page_with_nothing_on_it_is_not_shown(monkeypatch, profile: Path):
+    """Somebody who has never had a password saved in a browser should not have
+    to read a screen about browser passwords, and then another about Windows
+    sign-ins, to reach the one asking where the backup goes."""
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    wizard._show(Step.SCANNING)
+    assert pump(wizard) == "scanned"
+    wizard.credential_entries = []
+
+    wizard._show(Step.SELECT)
+    wizard._go_next()
+
+    assert wizard.step is Step.DESTINATION
+
+
+def test_back_does_not_walk_into_the_page_next_stepped_over(
+    monkeypatch, profile: Path
+):
+    """Skipped in both directions, or Back becomes a way into the empty page."""
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    wizard._show(Step.SCANNING)
+    assert pump(wizard) == "scanned"
+    wizard.credential_entries = []
+
+    wizard._show(Step.DESTINATION)
+    wizard._go_back()
+
+    assert wizard.step is Step.SELECT
+
+
+def test_a_page_with_something_on_it_is_still_shown(monkeypatch, profile: Path):
+    """The skip is for empty pages, not for pages somebody would rather not
+    read: a browser with local passwords is the whole reason that page exists."""
+    chrome_with_local_passwords(profile)
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    wizard._show(Step.SCANNING)
+    assert pump(wizard) == "scanned"
+    wizard.credential_entries = []
+
+    wizard._show(Step.SELECT)
+    wizard._go_next()
+
+    assert wizard.step is Step.PASSWORDS
+
+
+def test_a_page_is_never_skipped_because_its_check_had_not_finished(
+    monkeypatch, profile: Path
+):
+    """"Not detected yet" is not "nothing", and a page skipped because a check
+    had not run is a feature the user never learns exists."""
+    from winmigrate import credentials as credentials_mod
+
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    wizard._show(Step.SCANNING)
+    assert pump(wizard) == "scanned"
+
+    # Nothing cached: the page has to ask before it may be skipped.
+    assert wizard.credential_entries is None
+    asked: list[str] = []
+    monkeypatch.setattr(
+        credentials_mod, "list_credentials",
+        lambda: (asked.append("yes") or [{"target": "Domain:target=nas"}], None),
+    )
+    windows = Environment.fixture(profile, {})
+    windows.is_windows = True
+    monkeypatch.setattr(wizard, "_environment", lambda _config: windows)
+
+    assert wizard._page_is_empty(Step.CREDENTIALS) is False
+    assert asked == ["yes"]

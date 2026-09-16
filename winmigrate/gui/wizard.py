@@ -112,88 +112,110 @@ AUTOMATIC: frozenset[Step] = frozenset(
 TERMINAL: frozenset[Step] = frozenset({Step.DONE, Step.RESTORE_DONE})
 
 #: Headings, as a person would read them.
+#: Every page's heading and the sentence under it.
+#:
+#: Three rules, learned by reading the whole sequence aloud as somebody meeting
+#: it for the first time:
+#:
+#: * **Say what to do before saying what is safe.** The reassurance matters --
+#:   this program copies somebody's whole life off a computer -- but it is the
+#:   answer to a question they have not asked yet. First tell them what this
+#:   page is for.
+#: * **Never say the program's name at the person using it.** "WinMigrate never
+#:   reads a password store" is how a README talks. A window says "nothing here
+#:   reads them", because there is only one thing in the room that could.
+#: * **Use the words they use.** Not "profile", which is a Windows word for a
+#:   folder they have never opened. Not "passphrase", which is a security
+#:   person's word for a password. Not ".dat", which is a file extension.
 TITLES: dict[Step, tuple[str, str]] = {
     Step.CHOOSE: (
         "What would you like to do?",
-        "Back up this machine's profile, or put a backup onto this one.",
+        "Copy everything off this computer, or put a copy onto it.",
     ),
     Step.SOURCE: (
         "Which backup?",
-        "Choose the .dat file. Its passphrase is needed to look inside — nothing "
-        "is written until you have seen what is in it.",
+        "Choose the backup file. Its password is needed to look inside, and "
+        "nothing is written to this computer until you have seen what is in it.",
     ),
     Step.OPENING: (
         "Opening the backup",
-        "Checking it arrived intact and reading what it holds. Nothing is being "
-        "written yet.",
+        "Checking it arrived undamaged, and reading what it holds. Nothing is "
+        "being written yet.",
     ),
     Step.RESTORE_SELECT: (
         "Choose what to put back",
-        "Everything is selected. Untick anything this machine should not get.",
+        "Everything is ticked. Untick anything this computer should not get.",
     ),
     Step.RESTORE_CONFIRM: (
-        "Ready to restore",
-        "Nothing has been written yet. Check where this is going, then begin.",
+        "Ready to put it back",
+        "Nothing has been written yet. Check where it is going, then begin.",
     ),
     Step.RESTORING: (
-        "Putting your files back",
-        "Files already here and identical are skipped, so this can be re-run "
-        "safely if it is interrupted.",
+        "Putting everything back",
+        "Anything already here and identical is skipped, so this is safe to run "
+        "again if it stops part way.",
     ),
     Step.SOFTWARE: (
-        "Your files are back \u2014 now your software",
-        "Windows keeps no copy of an installed program worth carrying, so these "
-        "are fetched fresh. Nothing is installed until you say so.",
+        "Your files are back \u2014 now your programs",
+        "Windows keeps nothing of an installed program worth copying, so these "
+        "come fresh from the people who make them. Nothing installs until you "
+        "say so.",
     ),
     Step.INSTALLING: (
-        "Installing your software",
-        "This takes a while and the machine stays usable. You can stop at any "
-        "point; what is already installed stays installed.",
+        "Installing your programs",
+        "This takes a while, and you can keep using the computer. Stop whenever "
+        "you like \u2014 anything already installed stays installed.",
     ),
     Step.RESTORE_DONE: (
-        "Restored",
-        "What is left needs you rather than the tool.",
+        "All back",
+        "A few last things need you rather than the computer \u2014 signing in, "
+        "mostly.",
     ),
     Step.WELCOME: (
-        "Back up this Windows profile",
-        "Everything you keep — files, browser profiles, settings and the list of "
-        "software you have installed — goes into one encrypted file you control.",
+        "Copy everything off this computer",
+        "Your files, your browsers, the way Windows is set up, and a list of what "
+        "you have installed. All of it into one file, locked with a password only "
+        "you know.",
     ),
     Step.SCANNING: (
-        "Looking through your profile",
-        "Nothing is being copied yet. This only counts what is there so you can "
-        "choose what to keep.",
+        "Looking at what is here",
+        "Nothing is being copied yet. This is counting, so you can see what there "
+        "is before deciding.",
     ),
     Step.SELECT: (
-        "Choose what to keep",
-        "Everything is selected. Untick anything you would rather leave behind.",
+        "Choose what to take",
+        "Everything is ticked. Untick anything you would rather leave behind.",
     ),
     Step.PASSWORDS: (
         "Saved browser passwords",
-        "WinMigrate never reads a password store. Where passwords are not already "
-        "in the cloud, the browser exports them itself — behind its own Windows "
-        "Hello prompt — and WinMigrate encrypts what you hand it.",
+        "Your browser can hand its saved passwords over, and it will ask you to "
+        "prove it is you first. Nothing here reads them \u2014 the browser does "
+        "the work, and what it writes goes into the backup encrypted.",
     ),
     Step.CREDENTIALS: (
         "Saved Windows sign-ins",
-        "The passwords Windows remembered for network drives, Office and the "
-        "programs that kept you signed in. Windows exports these itself \u2014 "
-        "WinMigrate never opens its credential store.",
+        "Windows remembered passwords for network drives, Office, and anything "
+        "that kept you signed in. It can hand them over itself; it will ask for "
+        "Ctrl+Alt+Del and a password of your choosing.",
     ),
     Step.DESTINATION: (
         "Where should the backup go?",
-        "One file, encrypted with a passphrase only you hold.",
+        "One file, locked with a password only you know. A USB stick or an "
+        "external drive is the usual answer \u2014 not this computer's own disk.",
     ),
     Step.CONFIRM: (
         "Ready to start",
-        "Nothing has been written yet. Check this over, then begin.",
+        "Nothing has been written yet. Have a last look, then begin.",
     ),
     Step.WORKING: (
-        "Creating the backup",
-        "You can keep using the computer, though closing your browser and Outlook "
-        "gives a cleaner copy.",
+        "Making the backup",
+        "You can keep using the computer. Closing your browser and Outlook first "
+        "gives a cleaner copy of what they hold.",
     ),
-    Step.DONE: ("Finished", "Your backup is ready."),
+    Step.DONE: (
+        "All done",
+        "Your backup is ready to take to the new computer.",
+    ),
 }
 
 #: What the forward button says. A wizard whose button always reads "Next" makes
@@ -202,7 +224,7 @@ NEXT_LABEL: dict[Step, str] = {
     Step.CHOOSE: "Continue",
     Step.SOURCE: "Open",
     Step.RESTORE_SELECT: "Next",
-    Step.RESTORE_CONFIRM: "Start restore",
+    Step.RESTORE_CONFIRM: "Put it back",
     Step.SOFTWARE: "Install them",
     Step.RESTORE_DONE: "Finish",
     Step.WELCOME: "Scan",
@@ -210,7 +232,7 @@ NEXT_LABEL: dict[Step, str] = {
     Step.PASSWORDS: "Next",
     Step.CREDENTIALS: "Next",
     Step.DESTINATION: "Next",
-    Step.CONFIRM: "Start backup",
+    Step.CONFIRM: "Start the backup",
     Step.DONE: "Finish",
 }
 
@@ -466,16 +488,16 @@ def rail_index(step: Step, mode: Mode | str = Mode.BACKUP) -> int:
 
 #: Short labels for the rail.
 RAIL_LABELS: dict[Step, str] = {
-    Step.WELCOME: "Scan",
+    Step.WELCOME: "Start",
     Step.SELECT: "Choose",
     Step.PASSWORDS: "Passwords",
     Step.CREDENTIALS: "Sign-ins",
-    Step.DESTINATION: "Destination",
-    Step.CONFIRM: "Confirm",
-    Step.DONE: "Finish",
+    Step.DESTINATION: "Where to",
+    Step.CONFIRM: "Check",
+    Step.DONE: "Done",
     Step.SOURCE: "Backup",
     Step.RESTORE_SELECT: "Choose",
-    Step.RESTORE_CONFIRM: "Confirm",
-    Step.SOFTWARE: "Software",
-    Step.RESTORE_DONE: "Finish",
+    Step.RESTORE_CONFIRM: "Check",
+    Step.SOFTWARE: "Programs",
+    Step.RESTORE_DONE: "Done",
 }
