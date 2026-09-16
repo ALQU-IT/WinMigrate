@@ -1664,3 +1664,46 @@ def test_nothing_is_refreshed_when_there_was_no_taskbar_to_put_back(
     assert pump(wizard, until=("installed", "install-failed")) == "installed"
 
     assert refreshed == []
+
+
+# --- the keyboard -----------------------------------------------------------
+def test_enter_moves_on_and_escape_backs_out(monkeypatch, profile: Path):
+    """Somebody who fills a field and presses Enter expects to move on. A window
+    where that does nothing feels broken before anything has gone wrong."""
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    wizard.mode_var.set(Mode.BACKUP.value)
+    wizard._show(Step.CHOOSE)
+
+    wizard._on_return()
+
+    assert wizard.step is Step.WELCOME
+
+
+def test_enter_cannot_skip_a_page_whose_question_is_unanswered(monkeypatch):
+    """Inert when the button is disabled, or Enter becomes a way past the one
+    check that was in the way."""
+    wizard, _ = open_window(monkeypatch, {})
+    wizard.mode_var.set(Mode.RESTORE.value)
+    wizard._show(Step.SOURCE)
+    wizard.bundle_var.set("")
+    wizard._refresh_buttons()
+    assert wizard.next_button.cget("state") == "disabled"
+
+    wizard._on_return()
+
+    assert wizard.step is Step.SOURCE
+
+
+def test_enter_inside_a_text_box_stays_in_the_text_box(monkeypatch, profile: Path):
+    """A Text widget wants a newline of its own; stealing it would make the
+    box unusable."""
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    wizard.mode_var.set(Mode.BACKUP.value)
+    wizard._show(Step.CHOOSE)
+
+    class InAText:
+        widget = type("W", (), {"winfo_class": staticmethod(lambda: "Text")})()
+
+    wizard._on_return(InAText())
+
+    assert wizard.step is Step.CHOOSE

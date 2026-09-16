@@ -82,10 +82,21 @@ jobs:
       # expands environment variables here -- it states the opposite for POSIX
       # and says nothing for Windows -- so the step after this proves it rather
       # than trusting it.
+      # Generated rather than committed, so neither can drift from the code
+      # that describes it. The icon is why the download is not a blank
+      # PyInstaller default in Explorer; the version stamp is why right-click
+      # Properties shows a name and a description rather than nothing, which on
+      # an unsigned download is the only thing distinguishing it from an
+      # anonymous file.
+      - name: Draw the icon and write the version stamp
+        run: python build_assets.py
+
       - name: Build the window
         run: >
           pyinstaller --noconfirm --clean --onefile --windowed
           --name WinMigrate
+          --icon winmigrate.ico
+          --version-file version_info.txt
           --collect-submodules winmigrate
           --collect-all tkinter
           --hidden-import tkinter
@@ -100,6 +111,8 @@ jobs:
         run: >
           pyinstaller --noconfirm --clean --onefile --console
           --name winmigrate-cli
+          --icon winmigrate.ico
+          --version-file version_info.txt
           --collect-submodules winmigrate
           cli_entry.py
 

@@ -22,3 +22,7 @@ dist/
 .agents/
 .claude/skills/
 skills-lock.json
+
+# Build assets, drawn by build_assets.py rather than committed
+winmigrate.ico
+version_info.txt

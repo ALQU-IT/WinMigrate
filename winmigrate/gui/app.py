@@ -39,7 +39,7 @@ from ..models import ScanResult, Severity
 from ..platform_win import Environment
 from ..scan import run_scan
 from ..util import humanize, paths as pathutil
-from . import defaults, elevate, runlog, selection, theme
+from . import defaults, desktop, elevate, runlog, selection, theme
 from .wizard import Mode, PasswordExport, Step, WizardData
 
 
@@ -147,6 +147,11 @@ def run(options: dict | None = None) -> int:
             f"\n\nDetails: {exc}"
         )
         return 2
+    # Both of these have to happen before the first window exists: Windows
+    # decides how to treat a process when it first shows one, and will not be
+    # told afterwards.
+    desktop.make_dpi_aware()
+    desktop.set_taskbar_identity()
     try:
         root = tk.Tk()
     except tk.TclError as exc:
@@ -191,8 +196,12 @@ class WinMigrateWizard:
         self._capture_done = 0
 
         root.title("WinMigrate")
-        root.geometry(f"{theme.WINDOW_WIDTH}x{theme.WINDOW_HEIGHT}")
+        # Scaling first: it decides how large the window's own points are, so
+        # a size chosen before it would be a size in the wrong units.
+        self.scaling = desktop.apply_scaling(root)
+        desktop.centre(root, theme.WINDOW_WIDTH, theme.WINDOW_HEIGHT)
         root.minsize(820, 560)
+        desktop.set_icon(root)
 
         self.family = theme.font_family()
         # Windows keeps the light/dark choice in the registry; matching it is
@@ -207,6 +216,7 @@ class WinMigrateWizard:
 
         self._build_chrome()
         self._build_pages()
+        self._bind_keys()
         self._show(Step.CHOOSE)
         self.root.after(80, self._drain_events)
 
@@ -283,6 +293,31 @@ class WinMigrateWizard:
             inner, text="Cancel", style="Wizard.TButton", command=self._cancel
         )
         self.cancel_button.pack(side="right", padx=(0, 8))
+
+    def _bind_keys(self) -> None:
+        """Enter goes on, Escape backs out.
+
+        Somebody who fills a field and presses Enter expects to move on; a
+        window where that does nothing feels broken before anything has gone
+        wrong. Enter is deliberately inert when the button is disabled, so it
+        cannot skip a page whose question has not been answered, and inert in a
+        text box that wants a newline of its own.
+        """
+        self.root.bind("<Return>", self._on_return)
+        self.root.bind("<KP_Enter>", self._on_return)
+        self.root.bind("<Escape>", lambda _event: self._cancel())
+
+    def _on_return(self, event=None) -> None:
+        widget = getattr(event, "widget", None)
+        if widget is not None and getattr(widget, "winfo_class", None):
+            try:
+                if widget.winfo_class() == "Text":
+                    return
+            except Exception:  # noqa: BLE001 -- a stub widget, or one going away
+                pass
+        if str(self.next_button.cget("state")) == "disabled":
+            return
+        self._go_next()
 
     def _log_note(self) -> str:
         """One line for the rail: the log's name, not its whole path.

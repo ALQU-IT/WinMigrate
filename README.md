@@ -186,6 +186,17 @@ made yourself** are reported and never re-created: a scheduled task is a command
 a computer runs unattended, and adding one quietly from a file it was handed is
 not something this tool does.
 
+The window is meant to be the way this is used, so it behaves like a Windows
+program rather than a script: it declares itself DPI-aware (without which, on
+the 125% and 150% displays most laptops now ship with, every letter is drawn
+small and then bitmap-stretched into a blur — worst for exactly the people who
+set 150% in order to read the screen), it honours the Windows text-size setting
+in its own text, it opens in the middle of the screen, Enter moves on and Escape
+backs out, and it has its own icon in the title bar, the taskbar and the
+download. The icon is drawn in code at every size it is needed at, so the
+16-pixel one is drawn at 16 pixels rather than being a shrunken photograph of a
+bigger one.
+
 The window proposes where the backup should go before you have said anything.
 Running it from a USB stick already? That stick. Running it from the system disk
 -- which is what happens when somebody downloads the program to Downloads and
