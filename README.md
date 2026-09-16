@@ -160,6 +160,15 @@ Microsoft's Office Deployment Tool.
 
 ## What it will not do
 
+Your desktop background travels, including when it isn't a picture. A picture
+you chose is carried as the file you chose -- not the re-encoded copy Windows
+keeps in AppData -- and is set as the background on the new machine, style and
+all. Windows Spotlight is carried as *Spotlight*: it is a subscription to a new
+photograph every day, not a photograph, so the new machine subscribes rather
+than being handed yesterday's. A solid colour comes across as a colour, and a
+slideshow is named with what to do, because its pictures are a folder rather
+than a setting.
+
 Your user PATH is merged rather than copied or dropped: this machine's entries
 stay, in order and first, the old machine's join them where the folder actually
 exists here, and the ones pointing at software that did not travel are named in

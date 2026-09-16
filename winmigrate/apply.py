@@ -304,6 +304,163 @@ def apply_environment(record: dict[str, Any], env=None) -> list[Result]:
     return results
 
 
+# --- the desktop background ------------------------------------------------
+#: Windows keeps these in three places; see :mod:`winmigrate.scan.wallpaper`.
+DESKTOP_KEY = r"Control Panel\Desktop"
+COLORS_KEY = r"Control Panel\Colors"
+WALLPAPERS_KEY = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Wallpapers"
+
+#: ``BackgroundType``, the value that decides what kind of background is on.
+BACKGROUND_TYPE_NUMBERS = {"picture": 0, "solid_colour": 1, "slideshow": 2, "spotlight": 3}
+
+#: SystemParametersInfoW, which is what actually makes the desktop change.
+_SPI_SETDESKWALLPAPER = 0x0014
+_SPIF_UPDATEINIFILE = 0x01
+_SPIF_SENDCHANGE = 0x02
+
+
+def apply_wallpaper(record: dict[str, Any], image: Path | None, env=None) -> list[Result]:
+    """Put the desktop background back: the picture, or the thing instead of one.
+
+    Two cases, and the difference between them is the whole point. A background
+    someone *chose* is a file, and it is restored as that file and pointed at.
+    Windows Spotlight is not a picture at all -- it is a setting that fetches a
+    new photograph every day -- so it is restored as the setting. Copying the
+    photograph Spotlight happened to be showing would replace a background that
+    changes daily with one frozen image, which is the same mistake as restoring
+    a shortcut by copying whatever it pointed at.
+
+    The type is written first and the picture second: Windows reads them in
+    that order, and a machine told "picture" with nothing to show is a black
+    desktop.
+    """
+    if env is None:  # pragma: no cover -- the live path
+        from .platform_win import Environment  # noqa: PLC0415
+
+        env = Environment.live()
+
+    kind = str(record.get("type") or "")
+    if kind not in BACKGROUND_TYPE_NUMBERS:
+        return [Result("background", kind or "unknown", Outcome.SKIPPED,
+                       "the backup does not say what kind of background this was")]
+
+    results: list[Result] = []
+    _write_background_type(env, kind, results)
+
+    if kind == "spotlight":
+        results.append(
+            Result("background", "Windows Spotlight", Outcome.APPLIED,
+                   "a new picture every day, as before; it appears at the next sign-in "
+                   "if not straight away")
+        )
+        return results
+    if kind == "solid_colour":
+        results.extend(_apply_background_colour(env, record))
+        return results
+    if kind == "slideshow":
+        results.append(
+            Result("background", "slideshow", Outcome.SKIPPED,
+                   "a slideshow points at a folder of pictures; set it again in "
+                   "Settings > Personalisation once they are back")
+        )
+        return results
+
+    if image is None or not image.is_file():
+        results.append(
+            Result("background", str(record.get("file_name") or "picture"), Outcome.SKIPPED,
+                   "the picture is not in this backup, so the background was left alone")
+        )
+        return results
+
+    for name, value in (
+        ("WallpaperStyle", str(record.get("style") or "")),
+        ("TileWallpaper", str(record.get("tile") or "")),
+    ):
+        if value:
+            env.write_registry_value("HKCU", DESKTOP_KEY, name, value)
+    results.append(_set_desktop_picture(env, image))
+    return results
+
+
+def _write_background_type(env, kind: str, results: list[Result]) -> None:
+    """Say which kind of background this is, which is a number, not a string."""
+    try:
+        env.write_registry_dword(
+            "HKCU", WALLPAPERS_KEY, "BackgroundType", BACKGROUND_TYPE_NUMBERS[kind]
+        )
+    except Exception as exc:  # noqa: BLE001
+        results.append(Result("background", "type", Outcome.FAILED, str(exc)))
+
+
+def _apply_background_colour(env, record: dict[str, Any]) -> list[Result]:
+    """Three numbers, space separated, the way Windows stores a desktop colour."""
+    colour = str(record.get("colour") or "").strip()
+    parts = colour.split()
+    if len(parts) != 3 or not all(part.isdigit() and int(part) < 256 for part in parts):
+        return [Result("background", "colour", Outcome.SKIPPED,
+                       "the recorded colour is not three numbers")]
+    written = env.write_registry_value("HKCU", COLORS_KEY, "Background", " ".join(parts))
+    # The registry is where the colour lives; SetSysColors is what makes the
+    # desktop change now rather than at the next sign-in, and is allowed to
+    # fail without costing the setting.
+    _set_system_background_colour(parts)
+    return [
+        Result("background", f"colour {colour}",
+               Outcome.APPLIED if written else Outcome.FAILED)
+    ]
+
+
+def _set_desktop_picture(env, image: Path) -> Result:
+    """Hand the picture to Windows itself.
+
+    Writing ``Wallpaper`` into the registry sets what the desktop will be at the
+    next sign-in. SystemParametersInfoW sets what it is *now*, and writes the
+    registry on the way past, which is why it is the one that runs -- a
+    background that appears after a reboot reads as a background that did not
+    come back.
+    """
+    if not is_windows():
+        env.write_registry_value("HKCU", DESKTOP_KEY, "Wallpaper", str(image))
+        return Result("background", image.name, Outcome.APPLIED, "recorded")
+    try:
+        import ctypes  # noqa: PLC0415
+
+        ok = ctypes.windll.user32.SystemParametersInfoW(
+            _SPI_SETDESKWALLPAPER, 0, str(image),
+            _SPIF_UPDATEINIFILE | _SPIF_SENDCHANGE,
+        )
+    except Exception as exc:  # noqa: BLE001 -- a background is never worth an exception
+        return Result("background", image.name, Outcome.FAILED, str(exc))
+    if not ok:
+        # It still belongs in the registry: the next sign-in reads it from
+        # there, so a refusal now is a delay rather than a loss.
+        env.write_registry_value("HKCU", DESKTOP_KEY, "Wallpaper", str(image))
+        return Result("background", image.name, Outcome.APPLIED,
+                      "Windows would not change it now; it appears at the next sign-in")
+    return Result("background", image.name, Outcome.APPLIED)
+
+
+def _set_system_background_colour(parts: list[str]) -> None:
+    """Repaint the desktop colour now. Best effort, Windows only."""
+    if not is_windows():
+        return
+    try:
+        import ctypes  # noqa: PLC0415
+
+        red, green, blue = (int(part) for part in parts)
+        index = ctypes.c_int(1)  # COLOR_BACKGROUND
+        colour = ctypes.c_ulong(red | (green << 8) | (blue << 16))
+        ctypes.windll.user32.SetSysColors(1, ctypes.byref(index), ctypes.byref(colour))
+    except Exception as exc:  # noqa: BLE001
+        log.debug("could not repaint the desktop colour: %s", exc)
+
+
+def is_windows() -> bool:
+    import sys  # noqa: PLC0415
+
+    return sys.platform == "win32"
+
+
 def _merge_variable(env, name: str, incoming: str) -> list[Result]:
     """Add the old machine's PATH entries that make sense here, and say which did not.
 

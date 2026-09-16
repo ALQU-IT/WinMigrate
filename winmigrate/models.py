@@ -30,6 +30,7 @@ class Category(str, Enum):
     OUTLOOK = "outlook"
     NOTEPAD = "notepad"
     DISPLAYS = "displays"
+    WALLPAPER = "wallpaper"
     DEV_CONFIG = "dev_config"
     FILE_ASSOCIATIONS = "file_associations"
     SOFTWARE = "software"

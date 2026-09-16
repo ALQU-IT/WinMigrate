@@ -983,6 +983,78 @@ def test_a_restore_that_re_applied_a_setting_stops_telling_you_to(
     assert not [f for f in report.followups if f.id == "settings:mapped_drives:guided"]
 
 
+def test_the_desktop_background_comes_back_as_a_background(
+    profile: Path, env: Environment, tmp_path: Path
+):
+    """End to end: the picture has to survive the bundle *and* be pointed at.
+    A file restored into a folder nobody looks in is not a background."""
+    from winmigrate import apply as apply_mod
+    from winmigrate.models import Category, Item, Kind
+
+    picture = tmp_path / "lake.jpg"
+    picture.write_bytes(b"\xff\xd8\xff" + b"0" * 4096)
+    config = ScanConfig(profile_root=profile, include_software=False)
+    scan = run_scan(config, env)
+    scan.items.append(
+        Item(
+            id="settings:wallpaper",
+            category=Category.WALLPAPER,
+            kind=Kind.FILE,
+            title="Desktop background (lake.jpg)",
+            source_path=str(picture),
+            archive_path="WinMigrate-Wallpaper/lake.jpg",
+            record={"type": "picture", "style": "10", "tile": "0", "file_name": "lake.jpg"},
+            record_public=True,
+        )
+    )
+    bundle = tmp_path / "background.dat"
+    capture_mod.capture(
+        scan, CaptureOptions(output=bundle, passphrase=PASSPHRASE, use_vss=False), config, env
+    )
+
+    seen: list[tuple[dict, Path | None]] = []
+    original = apply_mod.apply_wallpaper
+    destination = tmp_path / "new"
+
+    def watched(record, image, env=None):
+        seen.append((record, image))
+        return original(record, image, Environment.fixture(destination, {}))
+
+    from unittest.mock import patch
+
+    with patch.object(apply_mod, "apply_wallpaper", watched):
+        report = restore_mod.restore(
+            RestoreOptions(bundle=bundle, passphrase=PASSPHRASE, destination=destination)
+        )
+
+    restored = destination / "WinMigrate-Wallpaper" / "lake.jpg"
+    assert restored.is_file()
+    assert restored.read_bytes() == picture.read_bytes()
+    # And the applier was handed that file, not the name of one.
+    (record, image) = seen[0]
+    assert record["style"] == "10"
+    assert image == restored
+    assert [r.name for r in report.applied if r.kind == "background"] == ["lake.jpg"]
+
+
+def test_a_background_image_from_a_previous_migration_is_not_mistaken_for_this_one(
+    tmp_path: Path
+):
+    """The name comes from the record, not from whatever is in the folder: a
+    destination that already holds an older WinMigrate-Wallpaper would otherwise
+    have the last migration's picture set as this one's."""
+    destination = tmp_path / "new"
+    (destination / "WinMigrate-Wallpaper").mkdir(parents=True)
+    (destination / "WinMigrate-Wallpaper" / "older.jpg").write_bytes(b"\xff\xd8\xff")
+
+    assert restore_mod._restored_wallpaper({"file_name": "lake.jpg"}, destination) is None
+    assert restore_mod._restored_wallpaper({"file_name": "older.jpg"}, destination) == (
+        destination / "WinMigrate-Wallpaper" / "older.jpg"
+    )
+    # And a name out of a bundle is data: it does not get to name a directory.
+    assert restore_mod._restored_wallpaper({"file_name": "../../evil.jpg"}, destination) is None
+
+
 def test_the_programs_holding_those_files_open_are_named(tmp_path: Path):
     """Restoring a browser profile into a running browser is the one way this
     tool can damage something: the browser holds those files open, rewrites

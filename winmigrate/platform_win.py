@@ -155,6 +155,32 @@ class Environment:
             log.warning("could not write %s\\%s\\%s: %s", hive, key, name, exc)
             return False
 
+    def write_registry_dword(self, hive: str, key: str, name: str, value: int) -> bool:
+        """Write one number. True when it was written.
+
+        The second and last write here, and it exists for one value: the
+        desktop's background *type*, which Windows keeps as a number and which
+        decides whether the machine shows a picture, a colour, or Spotlight.
+        Writing "3" as text into it leaves Windows reading a string where it
+        expects a DWORD, which it treats as no answer at all.
+        """
+        if self.registry is not None:
+            self.registry.setdefault(f"{hive}\\{key}", {})[name] = int(value)
+            return True
+        if not self.is_windows:
+            return False
+        import winreg  # noqa: PLC0415 -- Windows-only import
+
+        try:
+            with winreg.CreateKeyEx(
+                self._hive(hive), key, 0, winreg.KEY_SET_VALUE
+            ) as handle:
+                winreg.SetValueEx(handle, name, 0, winreg.REG_DWORD, int(value))
+            return True
+        except OSError as exc:
+            log.warning("could not write %s\\%s\\%s: %s", hive, key, name, exc)
+            return False
+
     def registry_subkeys(self, hive: str, key: str) -> list[str]:
         """List subkey names, empty when the key does not exist."""
         if self.registry is not None:

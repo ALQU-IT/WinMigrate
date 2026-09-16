@@ -257,6 +257,26 @@ settings root, the real address goes on the clipboard, and both front ends say
 which of the two happened. Defeating that filter would be the same kind of move
 as decrypting the password store, and is refused for the same reason.
 
+## The desktop background
+
+Three registry locations decide what a Windows desktop shows, and reading only
+the obvious one gets it wrong. `Control Panel\Desktop\Wallpaper` names a file,
+but usually `TranscodedWallpaper` -- a re-encoded copy in AppData, with no
+extension -- rather than the picture the user chose, which is kept in
+`BackgroundHistoryPath0`. `...\Explorer\Wallpapers\BackgroundType` says what
+*kind* of background is on, and it is the value that matters most: a machine
+showing Windows Spotlight looks, through the wallpaper value alone, exactly like
+a machine showing whatever photograph Spotlight last cached.
+
+So the type is read first. A picture is carried as a file, into
+`WinMigrate-Wallpaper\`, and set with `SystemParametersInfoW` so it appears at
+once rather than at the next sign-in. Spotlight is carried as the setting and
+nothing else -- copying the cached photograph would replace a background that
+changes daily with one frozen image, the same mistake as restoring a shortcut by
+copying what it points at. A solid colour is three numbers. A slideshow points
+at a folder of pictures, which is not a setting this can reproduce, so it is
+named and handed over.
+
 ## Skip accounting
 
 A migration tool that quietly drops data is worse than one that copies too much,

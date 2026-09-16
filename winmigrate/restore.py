@@ -211,6 +211,11 @@ def restore(options: RestoreOptions, progress: ProgressCallback | None = None) -
 #: Where the Wi-Fi profiles land, matching the archive prefix capture uses.
 WIFI_RESTORE_DIR = "WinMigrate-WiFi"
 
+#: And where the desktop background lands. It stays on disk after the restore
+#: rather than being set and deleted: Windows reads the file every time it
+#: draws the desktop, so deleting it is deleting the background.
+WALLPAPER_RESTORE_DIR = "WinMigrate-Wallpaper"
+
 #: Categories whose files a running program keeps open, and what to call it.
 #: A browser is named from the item's own title, which carries it.
 HELD_OPEN: dict[str, str] = {
@@ -268,6 +273,20 @@ APPLIED_KINDS: dict[str, str] = {
 }
 
 GUIDED_SUFFIX = ":guided"
+
+
+def _restored_wallpaper(record: dict[str, Any], destination: Path) -> Path | None:
+    """The background image this restore just wrote, if it wrote one.
+
+    The name comes from the record rather than from whatever is in the folder:
+    a restore into a destination that already holds an older WinMigrate-Wallpaper
+    would otherwise pick up the previous migration's picture.
+    """
+    name = str(record.get("file_name") or "").strip()
+    if not name or "/" in name or "\\" in name or name in (".", ".."):
+        return None
+    candidate = destination / WALLPAPER_RESTORE_DIR / name
+    return candidate if candidate.is_file() else None
 
 
 def _settle_followups(report: RestoreReport) -> None:
@@ -378,6 +397,13 @@ def _apply_settings(report: RestoreReport, destination: Path, wanted: tuple[str,
             report.applied.extend(apply_mod.apply_mapped_drives(records["settings:mapped_drives"]))
         if "settings:env_vars" in records:
             report.applied.extend(apply_mod.apply_environment(records["settings:env_vars"]))
+        if "settings:wallpaper" in records:
+            report.applied.extend(
+                apply_mod.apply_wallpaper(
+                    records["settings:wallpaper"],
+                    _restored_wallpaper(records["settings:wallpaper"], destination),
+                )
+            )
     except Exception as exc:  # noqa: BLE001 -- the restore itself already succeeded
         log.warning("could not re-apply settings", exc_info=True)
         report.notes.append(
