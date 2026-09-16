@@ -446,7 +446,7 @@ EXPLORER_WAIT_SECONDS = 1.0
 EXPLORER_ATTEMPTS = 5
 
 
-def _restart_explorer(env, runner=process.run, pause=None) -> Result:
+def _restart_explorer(env, runner=process.run, pause=None, starter=process.spawn) -> Result:
     """Restart Explorer so the taskbar shows what was just written.
 
     Without this none of it is visible until the next sign-in, and a migration
@@ -477,7 +477,12 @@ def _restart_explorer(env, runner=process.run, pause=None) -> Result:
         # Windows brings it back by itself in most configurations. Starting it
         # covers the ones where it does not, and is harmless when it already
         # has: the second copy exits immediately.
-        runner(["cmd", "/c", "start", "", "explorer.exe"], timeout=30)
+        #
+        # Started, not run. Explorer is the desktop -- it outlives this process
+        # by design -- so waiting for it to exit is waiting for the user to log
+        # out, and capturing its output is handing the shell a pipe nobody will
+        # ever stop reading. See process.spawn.
+        starter(["explorer.exe"])
         pause(EXPLORER_WAIT_SECONDS)
         if attempt == EXPLORER_ATTEMPTS - 1 and _explorer_is_running(runner):
             return Result("layout", "Explorer", Outcome.APPLIED,

@@ -117,3 +117,77 @@ def test_a_missing_program_is_reported_rather_than_raised():
     result = process.stream(["winmigrate-not-a-real-program"], lambda line: None, timeout=5)
 
     assert result.unavailable
+
+
+# --- starting something meant to outlive us ---------------------------------
+def test_a_long_lived_program_is_started_rather_than_waited_for(tmp_path):
+    """The bug this exists for looks like nothing at all in a log.
+
+    run() captures output, so the child gets a pipe this process reads until
+    end-of-file -- and end-of-file comes when every handle to the write end is
+    closed, not when the child exits. Start a long-lived program through a
+    launcher and the launcher exits while the program keeps the pipe, so the
+    read never ends. Then the timeout fires, subprocess.run kills the child it
+    started, and waits on that same pipe again with no timeout at all.
+
+    Restoring a backup stopped there: taskkill returned, the launcher
+    returned, Explorer held the pipe, and the log simply stopped.
+    """
+    import time
+
+    marker = tmp_path / "started"
+    # A launcher that exits at once, leaving a grandchild holding the handles.
+    grandchild = (
+        "import subprocess, sys; "
+        f"subprocess.Popen([sys.executable, '-c', "
+        f"\"import time; open(r'{marker}', 'w').close(); time.sleep(30)\"])"
+    )
+
+    began = time.monotonic()
+    error = process.spawn(_python(grandchild))
+    elapsed = time.monotonic() - began
+
+    assert error is None
+    # Back immediately, rather than in thirty seconds or never.
+    assert elapsed < 5, f"spawn waited {elapsed:.1f}s"
+
+    for _ in range(100):
+        if marker.exists():
+            break
+        time.sleep(0.05)
+    assert marker.exists(), "the program was never actually started"
+
+
+def test_starting_something_that_is_not_there_is_reported_not_raised():
+    error = process.spawn(["winmigrate-not-a-real-program"])
+    assert error and "not found" in error
+
+
+def test_stop_works_on_a_program_that_has_gone_quiet():
+    """Reading inline blocks until something arrives, so Stop is not checked,
+    the deadline is not checked, and a program that says nothing for an hour is
+    an install page with a button that does nothing."""
+    import time
+
+    began = time.monotonic()
+    result = process.stream(
+        _python("import time; print('starting', flush=True); time.sleep(60)"),
+        lambda line: None,
+        timeout=120,
+        cancelled=lambda: time.monotonic() - began > 1,
+    )
+
+    assert result.error == "stopped"
+    assert time.monotonic() - began < 15
+
+
+def test_the_deadline_is_honoured_by_a_silent_program():
+    import time
+
+    began = time.monotonic()
+    result = process.stream(
+        _python("import time; time.sleep(60)"), lambda line: None, timeout=1
+    )
+
+    assert result.error and "timed out" in result.error
+    assert time.monotonic() - began < 15

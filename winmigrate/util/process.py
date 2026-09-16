@@ -124,6 +124,44 @@ def powershell(script: str, timeout: int = DEFAULT_TIMEOUT) -> CommandResult:
     )
 
 
+def spawn(command: list[str]) -> str | None:
+    """Start a program and do not wait for it. Returns an error, or None.
+
+    For a program meant to outlive this one: a shell, a browser, a dialog.
+    :func:`run` cannot do it, and the way it fails is worth spelling out
+    because it looks like nothing at all.
+
+    ``run`` captures output, so the child is given a pipe this process reads
+    until end-of-file. End-of-file comes when every handle to the write end is
+    closed -- not when the child exits. Start a long-lived program through a
+    launcher and the launcher exits immediately while the program it started
+    keeps the pipe, so the read never ends. Worse, when the timeout fires,
+    ``subprocess.run`` kills the child it started and then waits on that same
+    pipe *again*, with no timeout, which is a hang with nothing to end it.
+
+    That is exactly how restarting Explorer stopped a restore dead: taskkill
+    returned, ``cmd /c start "" explorer.exe`` returned, Explorer held the
+    pipe, and the log simply stopped.
+
+    So: no pipes at all. Nothing to inherit, nothing to read, nothing to wait
+    for.
+    """
+    log.debug("starting: %s", " ".join(command))
+    try:
+        subprocess.Popen(  # noqa: S603 -- argument list, no shell
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+        )
+    except FileNotFoundError:
+        return f"{command[0]} not found on this machine"
+    except (OSError, ValueError) as exc:
+        return f"{command[0]} could not be started: {exc}"
+    return None
+
+
 def stream(
     command: list[str],
     on_line,
@@ -181,17 +219,51 @@ def stream(
         except Exception:  # noqa: BLE001 -- a label must never end an install
             log.debug("the output handler raised; continuing", exc_info=True)
 
+    # The read happens on its own thread and the chunks come back through a
+    # queue, so that a program which has gone quiet -- or one whose output pipe
+    # a grandchild is holding open -- cannot stall this loop. Reading inline
+    # blocks in read() until something arrives, which means Stop is not checked,
+    # the deadline is not checked, and an installer that outlives the installer
+    # that spawned it freezes the page it is reporting to. Same shape as the
+    # hang in run(); see spawn().
+    import queue  # noqa: PLC0415
+    import threading  # noqa: PLC0415
+
+    chunks: queue.Queue = queue.Queue(maxsize=256)
+
+    def read_into_queue() -> None:
+        try:
+            while True:
+                data = process.stdout.read(4096)
+                if not data:
+                    break
+                chunks.put(data)
+        except Exception:  # noqa: BLE001 -- the pipe going away is an ending
+            pass
+        finally:
+            chunks.put(None)
+
+    reader = threading.Thread(target=read_into_queue, daemon=True)
+    reader.start()
+
     timed_out = False
+    ended = False
     try:
-        while process.stdout is not None:
-            chunk = process.stdout.read(4096)
-            if not chunk:
-                break
-            pending += decoder.decode(chunk)
-            pending = pending.replace("\r\n", "\n").replace("\r", "\n")
-            while "\n" in pending:
-                line, pending = pending.split("\n", 1)
-                emit(line)
+        while not ended:
+            try:
+                chunk = chunks.get(timeout=0.2)
+            except queue.Empty:
+                chunk = b""
+            if chunk is None:
+                ended = True
+            elif chunk:
+                pending += decoder.decode(chunk)
+                pending = pending.replace("\r\n", "\n").replace("\r", "\n")
+                while "\n" in pending:
+                    line, pending = pending.split("\n", 1)
+                    emit(line)
+            # Asked every time round, whether or not anything arrived: that is
+            # the whole point of reading on another thread.
             if cancelled is not None and cancelled():
                 stopped = True
                 break

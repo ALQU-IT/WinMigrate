@@ -185,7 +185,13 @@ def test_explorer_is_not_killed_on_the_machine_running_the_tests(tmp_path: Path)
 
 # --- never leaving somebody without a desktop -------------------------------
 class FakeWindows:
-    """A machine where Explorer can be killed, and may or may not come back."""
+    """A machine where Explorer can be killed, and may or may not come back.
+
+    Starting it goes through ``start`` rather than ``__call__``, because a
+    program meant to outlive this one is spawned rather than run -- which is
+    the difference between a restore that finishes and one that hangs for ever
+    reading a pipe the shell is holding open.
+    """
 
     def __init__(self, comes_back_after: int | None = 1):
         self.comes_back_after = comes_back_after
@@ -199,14 +205,17 @@ class FakeWindows:
         self.calls.append(list(argv))
         if argv[0] == "taskkill":
             self.running = False
-        if argv[0] == "cmd":
-            self.starts += 1
-            if self.comes_back_after is not None and self.starts >= self.comes_back_after:
-                self.running = True
         if argv[0] == "tasklist":
             out = "explorer.exe   1234 Console   1   50,000 K" if self.running else ""
             return CommandResult(command=list(argv), returncode=0, stdout=out)
         return CommandResult(command=list(argv), returncode=0, stdout="")
+
+    def start(self, argv):
+        self.calls.append(list(argv))
+        self.starts += 1
+        if self.comes_back_after is not None and self.starts >= self.comes_back_after:
+            self.running = True
+        return None
 
 
 def live_env(tmp_path: Path) -> Environment:
@@ -221,11 +230,16 @@ def test_the_restart_waits_for_the_desktop_rather_than_walking_away(tmp_path: Pa
     finished did it."""
     windows = FakeWindows(comes_back_after=1)
 
-    result = apply_mod._restart_explorer(live_env(tmp_path), windows, pause=lambda _s: None)
+    result = apply_mod._restart_explorer(
+        live_env(tmp_path), windows, pause=lambda _s: None, starter=windows.start
+    )
 
     assert result.outcome is Outcome.APPLIED
     assert ["taskkill", "/f", "/im", "explorer.exe"] in windows.calls
     assert any(call[0] == "tasklist" for call in windows.calls)
+    # Started, never run: waiting for the desktop to exit is waiting for the
+    # user to log out.
+    assert ["explorer.exe"] in windows.calls
 
 
 def test_a_desktop_that_will_not_come_back_is_reported_as_the_failure_it_is(
@@ -235,7 +249,9 @@ def test_a_desktop_that_will_not_come_back_is_reported_as_the_failure_it_is(
     one instruction that fixes it, not a tick."""
     windows = FakeWindows(comes_back_after=None)
 
-    result = apply_mod._restart_explorer(live_env(tmp_path), windows, pause=lambda _s: None)
+    result = apply_mod._restart_explorer(
+        live_env(tmp_path), windows, pause=lambda _s: None, starter=windows.start
+    )
 
     assert result.outcome is Outcome.FAILED
     assert "Ctrl+Shift+Esc" in result.detail and "explorer.exe" in result.detail
@@ -256,7 +272,11 @@ def test_a_desktop_already_back_on_its_own_is_not_started_twice(tmp_path: Path):
             return CommandResult(command=list(argv), returncode=0, stdout="explorer.exe 1")
         return CommandResult(command=list(argv), returncode=0, stdout="")
 
-    result = apply_mod._restart_explorer(live_env(tmp_path), already_back, pause=lambda _s: None)
+    started: list = []
+    result = apply_mod._restart_explorer(
+        live_env(tmp_path), already_back, pause=lambda _s: None,
+        starter=lambda argv: started.append(argv),
+    )
 
     assert result.outcome is Outcome.APPLIED
-    assert not [call for call in windows.calls if call[0] == "cmd"]
+    assert started == []
