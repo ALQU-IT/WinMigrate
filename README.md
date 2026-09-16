@@ -160,6 +160,17 @@ Microsoft's Office Deployment Tool.
 
 ## What it will not do
 
+Your taskbar comes with you. It is two halves that only work together --
+shortcut files under `User Pinned`, and a `Taskband` blob saying which are
+pinned and in what order -- so both travel, and Explorer is restarted at the
+end so you can see them without signing out. Desktop icon positions travel too,
+best-effort: Windows records them per screen size, so a machine with a different
+screen keeps its own arrangement, which is the right kind of nothing. The Start
+menu layout travels with the Windows build it came from and is put back only
+onto the same release; on a different one the file is set aside, because a Start
+menu half-transplanted from another Windows version is worse than one that
+rebuilds itself.
+
 Program data under `AppData` travels for a named list of programs. Excluding
 AppData wholesale is the right default -- it is where everything on the machine
 keeps its caches, its half-downloaded updates and its machine-bound tokens --

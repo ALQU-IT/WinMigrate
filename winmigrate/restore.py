@@ -275,6 +275,20 @@ APPLIED_KINDS: dict[str, str] = {
 GUIDED_SUFFIX = ":guided"
 
 
+def _start_menu_record(record: dict[str, Any] | None, destination: Path) -> dict | None:
+    """The Start-menu record, told where the restore put its file.
+
+    The layout travels as an ordinary bundle member, so it is already on disk
+    by the time the settings are applied. The applier needs to know where, so
+    it can move it aside when it came from a different Windows release.
+    """
+    if not isinstance(record, dict):
+        return None
+    from .scan.shell import START_LAYOUT  # noqa: PLC0415
+
+    return {**record, "restored_path": str(destination.joinpath("AppData", "Local", *START_LAYOUT))}
+
+
 def _restored_wallpaper(record: dict[str, Any], destination: Path) -> Path | None:
     """The background image this restore just wrote, if it wrote one.
 
@@ -397,6 +411,15 @@ def _apply_settings(report: RestoreReport, destination: Path, wanted: tuple[str,
             report.applied.extend(apply_mod.apply_mapped_drives(records["settings:mapped_drives"]))
         if "settings:env_vars" in records:
             report.applied.extend(apply_mod.apply_environment(records["settings:env_vars"]))
+        if any(key in records for key in ("shell:taskbar", "shell:desktop_layout",
+                                          "shell:start_menu")):
+            report.applied.extend(
+                apply_mod.apply_shell_layout(
+                    records.get("shell:taskbar"),
+                    records.get("shell:desktop_layout"),
+                    _start_menu_record(records.get("shell:start_menu"), destination),
+                )
+            )
         if "settings:startup_run" in records:
             report.applied.extend(apply_mod.apply_startup(records["settings:startup_run"]))
         if "settings:personalization" in records:

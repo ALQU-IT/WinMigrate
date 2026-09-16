@@ -232,6 +232,7 @@
             "personalization",
             "startup",
             "app_data",
+            "shell",
             "dev_config",
             "file_associations",
             "software",

@@ -304,6 +304,147 @@ def apply_environment(record: dict[str, Any], env=None) -> list[Result]:
     return results
 
 
+# --- the taskbar and the desktop -------------------------------------------
+def apply_shell_layout(
+    taskbar: dict[str, Any] | None,
+    desktop: dict[str, Any] | None,
+    start_menu: dict[str, Any] | None,
+    env=None,
+) -> list[Result]:
+    """Put the taskbar and desktop layout back, and let Explorer see it.
+
+    These are opaque blobs Windows never documented, so they are written as
+    they were read. The one judgement made here is about the Start menu, whose
+    format changes between Windows releases: it is put back only onto a machine
+    of the release it came from. A Start menu that has to rebuild itself is a
+    nuisance; one half-transplanted from another Windows version is worse, and
+    the person it happens to has no way to know why their computer looks broken.
+    """
+    if env is None:  # pragma: no cover -- the live path
+        from .platform_win import Environment  # noqa: PLC0415
+
+        env = Environment.live()
+
+    from .scan.shell import (  # noqa: PLC0415
+        DESKTOP_BAG_KEY,
+        TASKBAND_KEY,
+        TASKBAND_VALUES,
+        windows_build,
+    )
+
+    results: list[Result] = []
+    if taskbar:
+        results.append(
+            _write_blobs(env, TASKBAND_KEY, taskbar, "your taskbar", TASKBAND_VALUES)
+        )
+    if desktop:
+        results.append(
+            _write_blobs(env, DESKTOP_BAG_KEY, desktop, "your desktop icons", None)
+        )
+    if start_menu is not None:
+        results.append(_check_start_menu(start_menu, windows_build(env)))
+
+    if any(result.outcome is Outcome.APPLIED for result in results):
+        results.append(_restart_explorer())
+    return results
+
+
+def _write_blobs(env, key: str, record: dict[str, Any], what: str, allowed) -> Result:
+    """Write a record of registry blobs back under ``key``.
+
+    ``allowed`` names what may be written, or is None for a key whose value
+    names are themselves data. Either way the record comes out of a bundle, so
+    what it names is checked rather than trusted.
+    """
+    from .scan.shell import decode  # noqa: PLC0415
+
+    values = record.get("values")
+    if not isinstance(values, dict):
+        return Result("layout", what, Outcome.SKIPPED, "nothing recorded")
+
+    written = 0
+    for name, raw in sorted(values.items()):
+        if not isinstance(name, str):
+            continue
+        if allowed is not None and name not in allowed:
+            continue
+        if allowed is None and not name.startswith("ItemPos"):
+            continue
+        value = decode(raw)
+        if value is None:
+            continue
+        try:
+            if isinstance(value, bytes):
+                ok = env.write_registry_binary("HKCU", key, name, value)
+            elif isinstance(value, int):
+                ok = env.write_registry_dword("HKCU", key, name, value)
+            else:
+                ok = env.write_registry_value("HKCU", key, name, str(value))
+        except Exception as exc:  # noqa: BLE001
+            return Result("layout", what, Outcome.FAILED, str(exc))
+        written += int(bool(ok))
+
+    if not written:
+        return Result("layout", what, Outcome.SKIPPED, "nothing in it could be written")
+    return Result("layout", what, Outcome.APPLIED, f"{written} value(s)")
+
+
+def _check_start_menu(record: dict[str, Any], build: str) -> Result:
+    """The Start menu layout travels as a file; this decides whether it stays.
+
+    The file has already been written by the time this runs, because it is an
+    ordinary member of the bundle. What happens here is the judgement: on a
+    different Windows release it is moved aside rather than left in place.
+    """
+    came_from = str(record.get("windows_build") or "").strip()
+    if not build or not came_from:
+        return Result("layout", "your Start menu", Outcome.SKIPPED,
+                      "cannot tell which Windows release this came from")
+    if came_from != build:
+        path = record.get("restored_path")
+        moved = _move_aside(Path(str(path))) if path else False
+        return Result(
+            "layout", "your Start menu", Outcome.SKIPPED,
+            f"it came from Windows build {came_from} and this is {build}"
+            + ("; the file was set aside" if moved else ""),
+        )
+    return Result("layout", "your Start menu", Outcome.APPLIED,
+                  f"same Windows release ({build})")
+
+
+def _move_aside(path: Path) -> bool:
+    """Rename a restored file out of the way. Never raises."""
+    try:
+        if not path.is_file():
+            return False
+        path.replace(path.with_suffix(path.suffix + ".from-other-windows"))
+        return True
+    except OSError as exc:  # noqa: BLE001
+        log.info("could not set aside %s: %s", path, exc)
+        return False
+
+
+def _restart_explorer() -> Result:
+    """Restart Explorer so the taskbar shows what was just written.
+
+    Without this none of it is visible until the next sign-in, and a migration
+    that finishes with the old taskbar still on screen reads as one that did
+    not work. Explorer restarting is something Windows does to itself routinely;
+    what is on screen flickers and comes back.
+    """
+    if not is_windows():
+        return Result("layout", "Explorer", Outcome.SKIPPED, "not Windows")
+    stopped = process.run(["taskkill", "/f", "/im", "explorer.exe"], timeout=30)
+    # Windows restarts Explorer by itself in most configurations; starting it
+    # explicitly covers the ones where it does not, and is harmless when it has
+    # already come back.
+    started = process.run(["cmd", "/c", "start", "", "explorer.exe"], timeout=30)
+    if stopped.error and started.error:
+        return Result("layout", "Explorer", Outcome.SKIPPED,
+                      "could not restart it; the taskbar appears at the next sign-in")
+    return Result("layout", "Explorer", Outcome.APPLIED, "restarted, so the taskbar shows")
+
+
 # --- what starts when you log in -------------------------------------------
 def apply_startup(record: dict[str, Any], env=None) -> list[Result]:
     """Re-add the login programs whose program is actually on this machine.

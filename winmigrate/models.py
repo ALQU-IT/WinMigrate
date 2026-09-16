@@ -34,6 +34,7 @@ class Category(str, Enum):
     PERSONALIZATION = "personalization"
     STARTUP = "startup"
     APP_DATA = "app_data"
+    SHELL = "shell"
     DEV_CONFIG = "dev_config"
     FILE_ASSOCIATIONS = "file_associations"
     SOFTWARE = "software"

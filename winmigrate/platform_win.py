@@ -130,9 +130,9 @@ class Environment:
     def write_registry_value(self, hive: str, key: str, name: str, value: str) -> bool:
         """Write one string value. True when it was written.
 
-        The only write in the whole Environment, and deliberately narrow: one
-        value at a time, strings only, and against a fixture it records the
-        write rather than performing one. Everything else here reads.
+        The first of three writes in the whole Environment, and deliberately
+        narrow: one value at a time, one type each, and against a fixture each
+        records the write rather than performing one. Everything else reads.
         """
         if self.registry is not None:
             self.registry.setdefault(f"{hive}\\{key}", {})[name] = value
@@ -176,6 +176,31 @@ class Environment:
                 self._hive(hive), key, 0, winreg.KEY_SET_VALUE
             ) as handle:
                 winreg.SetValueEx(handle, name, 0, winreg.REG_DWORD, int(value))
+            return True
+        except OSError as exc:
+            log.warning("could not write %s\\%s\\%s: %s", hive, key, name, exc)
+            return False
+
+    def write_registry_binary(self, hive: str, key: str, name: str, value: bytes) -> bool:
+        """Write one blob. True when it was written.
+
+        The third and last write here. Windows keeps the taskbar's pinned list
+        and the desktop's icon positions as opaque binary -- there is no
+        documented shape to rebuild them from, and the only honest way to carry
+        them is to carry the bytes. Nothing in this file interprets them.
+        """
+        if self.registry is not None:
+            self.registry.setdefault(f"{hive}\\{key}", {})[name] = bytes(value)
+            return True
+        if not self.is_windows:
+            return False
+        import winreg  # noqa: PLC0415 -- Windows-only import
+
+        try:
+            with winreg.CreateKeyEx(
+                self._hive(hive), key, 0, winreg.KEY_SET_VALUE
+            ) as handle:
+                winreg.SetValueEx(handle, name, 0, winreg.REG_BINARY, bytes(value))
             return True
         except OSError as exc:
             log.warning("could not write %s\\%s\\%s: %s", hive, key, name, exc)
