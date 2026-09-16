@@ -76,6 +76,8 @@ winmigrate/
   vss.py             Volume Shadow Copy lifecycle and path translation
   winlaunch.py       starting a program as the signed-in user, not as admin
   passwords.py       the browser password handoff (browser exports, we encrypt)
+  credentials.py     the Credential Manager handoff (Windows exports, we encrypt)
+  apply.py           re-applying the settings that need no identity
   presets.py         named exclusion presets (device backups, VM images, ...)
   odt.py             Office Deployment Tool configuration generation
   reinstall.py       the reinstall artifacts, and running winget/Office setup
@@ -86,7 +88,8 @@ winmigrate/
     wizard.py        which page follows which, and when the button works
     theme.py         palette, fonts, light/dark detection
     selection.py     ScanResult/manifest -> tickable rows, and back
-    defaults.py      where the bundle is proposed: the drive it was started from
+    defaults.py      where the bundle is proposed: the stick, or the drive it
+                     was started from
     elevate.py       the one UAC prompt, asked before the scan
     runlog.py        where the window's log goes, and its start banner
   util/
@@ -101,10 +104,18 @@ winmigrate/
     office.py        Click-to-Run detection and licence status (no key extraction)
     devconfig.py     developer/credential config (encrypted-only, secret items)
     browsers.py      browser profiles + sign-in/sync detection (config-read only)
+    extensions.py    browser extensions, read from the profile that carries them
     syssettings.py   env vars, mapped drives, printers, fonts, Outlook
-    wifi.py          Wi-Fi profiles (opt-in; export holds the network keys)
-    browsers.py      browser profiles + sign-in/sync detection (config-read only)
-    syssettings.py   env vars, mapped drives, printers, fonts, Outlook
+    personalization.py  how Windows looks and responds, by named registry value
+    wallpaper.py     the desktop background, Spotlight included
+    shell.py         the taskbar, desktop icon positions and the Start menu
+    startup.py       the Startup folder and the per-user Run key
+    appdata.py       the named AppData locations (mail, templates, Quick Access)
+    associations.py  which program opens which file (reported, never set)
+    tasks.py         scheduled tasks somebody made (reported, never re-created)
+    notepad.py       Notepad and Notepad++ sessions, unsaved tabs included
+    displays.py      monitor arrangements (reported; replaying them risks a
+                     machine that boots to a screen that never lights up)
     wifi.py          Wi-Fi profiles (opt-in; export holds the network keys)
 schema/manifest.schema.json   machine-readable mirror of the manifest
 docs/manifest-schema.md       prose description of the same
