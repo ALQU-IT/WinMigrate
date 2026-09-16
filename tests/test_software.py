@@ -753,3 +753,146 @@ def test_a_launcher_with_a_winget_package_stays_reinstallable_not_managed():
     assert ea.winget_id == "ElectronicArts.EADesktop"
     assert ea.managed_by is None, "the launcher app must not be listed as launcher-managed"
     assert game.managed_by == "EA app", "the game it installed still returns via the launcher"
+
+
+# --- programs winget has, but does not recognise as installed ---------------
+def confirming(*known: str):
+    """A winget that has these packages and no others."""
+    from winmigrate.util.process import CommandResult
+
+    asked: list[str] = []
+
+    def runner(argv, timeout=None):
+        assert argv[:2] == ["winget", "show"]
+        identifier = argv[argv.index("--id") + 1]
+        asked.append(identifier)
+        return CommandResult(
+            command=list(argv), returncode=0 if identifier in known else 1
+        )
+
+    runner.asked = asked  # type: ignore[attr-defined]
+    return runner
+
+
+def unrecognised(name: str) -> software.SoftwareEntry:
+    """An installed program winget listed but has no package for."""
+    entry = software.SoftwareEntry(name=name, version="1.0", sources=["registry"])
+    entry.winget_knows_no_package = True
+    return entry
+
+
+def test_a_program_winget_did_not_match_gets_its_package_back():
+    """winget only matches an installed program to a package when the manifest
+    carries AppsAndFeaturesEntries that line up with Add/Remove Programs. Plenty
+    do not, so a Brave installed by downloading its .exe is handed back a
+    synthetic ARP id -- and taking winget at its word put it on the list of
+    things to install by hand, though it has a perfectly good package."""
+    entries = [unrecognised("Brave"), unrecognised("Notepad++ (64-bit x64)")]
+    runner = confirming("Brave.Brave", "Notepad++.Notepad++")
+
+    adopted = software.adopt_known_packages(entries, None, runner)
+
+    assert adopted == ["Brave.Brave", "Notepad++.Notepad++"]
+    assert [entry.winget_id for entry in entries] == [
+        "Brave.Brave", "Notepad++.Notepad++"
+    ]
+    assert not any(entry.winget_knows_no_package for entry in entries)
+
+
+def test_an_id_this_machines_winget_does_not_have_is_dropped():
+    """What makes a table of hand-written ids safe. One that is wrong, renamed
+    or gone is dropped rather than installed, and the program goes back on the
+    by-hand list where it already was."""
+    entries = [unrecognised("Brave")]
+
+    adopted = software.adopt_known_packages(entries, None, confirming())
+
+    assert adopted == []
+    assert entries[0].winget_id is None
+    assert entries[0].winget_knows_no_package is True
+
+
+def test_winget_own_answer_is_never_second_guessed():
+    """Only entries winget said it had no package for. An id it worked out
+    itself is better than anything a fixed list can offer."""
+    matched = software.SoftwareEntry(name="Brave", version="1.0")
+    matched.winget_id = "Brave.Brave.Nightly"
+    runner = confirming("Brave.Brave")
+
+    adopted = software.adopt_known_packages([matched], None, runner)
+
+    assert adopted == []
+    assert matched.winget_id == "Brave.Brave.Nightly"
+    assert runner.asked == []  # not even asked about
+
+
+def test_the_longest_name_wins_so_opera_gx_is_not_opera():
+    assert software.known_package_for("Opera GX Stable 110") == "Opera.OperaGX"
+    assert software.known_package_for("Opera Stable 110") == "Opera.Opera"
+    assert software.known_package_for("Notepad++ (64-bit x64)") == "Notepad++.Notepad++"
+    # Windows' own Notepad is not Notepad++, and is not in the table at all.
+    assert software.known_package_for("Notepad") is None
+    assert software.known_package_for("Some Bespoke Line-of-Business Tool") is None
+    assert software.known_package_for("") is None
+
+
+def test_the_same_package_is_not_adopted_twice():
+    """Two installed entries for one product -- a stale uninstall row, or two
+    architectures -- must not both claim it."""
+    entries = [unrecognised("Brave"), unrecognised("Brave Browser")]
+
+    adopted = software.adopt_known_packages(entries, None, confirming("Brave.Brave"))
+
+    assert adopted == ["Brave.Brave"]
+    assert [bool(entry.winget_id) for entry in entries] == [True, False]
+
+
+def test_what_is_adopted_reaches_the_file_winget_import_reads():
+    """The one place the export stops being winget's own output verbatim. That
+    property was worth having and is given up knowingly: an export that omits
+    the browser somebody uses every day is faithful to winget and useless to
+    them."""
+    export = {
+        "Sources": [
+            {"Packages": [{"PackageIdentifier": "7zip.7zip"}], "SourceDetails": {}}
+        ]
+    }
+    entries = [unrecognised("Brave")]
+
+    software.adopt_known_packages(entries, export, confirming("Brave.Brave"))
+
+    identifiers = [
+        package["PackageIdentifier"] for package in export["Sources"][0]["Packages"]
+    ]
+    assert identifiers == ["7zip.7zip", "Brave.Brave"]
+
+
+def test_an_export_winget_never_wrote_still_gets_one():
+    """A machine where the export failed but the list did not."""
+    export: dict = {}
+    software.adopt_known_packages([unrecognised("Brave")], export, confirming("Brave.Brave"))
+
+    packages = export["Sources"][0]["Packages"]
+    assert packages == [{"PackageIdentifier": "Brave.Brave"}]
+    assert export["Sources"][0]["SourceDetails"]["Name"] == "winget"
+
+
+def test_checking_is_capped_so_a_crowded_machine_does_not_spend_minutes_on_it():
+    entries = [unrecognised(name) for name, _ in software.KNOWN_PACKAGES] * 3
+    runner = confirming()
+
+    software.adopt_known_packages(entries, None, runner)
+
+    assert len(runner.asked) <= software.MAX_VERIFICATIONS
+
+
+def test_every_id_in_the_table_looks_like_a_winget_id():
+    """Publisher.Package, which is the shape winget uses. A typo here costs a
+    program; a shape error would cost the whole check."""
+    seen = set()
+    for prefix, identifier in software.KNOWN_PACKAGES:
+        assert prefix == prefix.lower().strip(), prefix
+        assert "." in identifier, identifier
+        assert " " not in identifier, identifier
+        assert prefix not in seen, f"{prefix} listed twice"
+        seen.add(prefix)

@@ -824,6 +824,193 @@ def match_winget_id(entry: SoftwareEntry, packages: list[tuple[str, str]]) -> st
     return best[1] if best else None
 
 
+# --- programs winget has, but does not recognise as installed ---------------
+#: Display-name prefix -> winget package id, longest match first.
+#:
+#: winget only matches an installed program to a package when the package's
+#: manifest carries ``AppsAndFeaturesEntries`` that line up with what the
+#: installer wrote into Add/Remove Programs. Plenty of manifests do not, and a
+#: program installed by downloading its .exe rather than through winget often
+#: will not match at all -- so ``winget list`` hands back a synthetic ``ARP\...``
+#: id and this tool, taking winget at its word, put Brave and Notepad++ on the
+#: list of things to install by hand. Both have perfectly good packages.
+#:
+#: This is the second opinion. It is deliberately a fixed list of names people
+#: actually have rather than a search, because a search means parsing winget's
+#: localised column output once per unmatched program, and there are usually
+#: over a hundred of those.
+#:
+#: **Every id here is checked against the machine's own winget before it is
+#: used.** That is what makes a table of hand-written ids safe: one that is
+#: wrong, renamed, or gone is dropped rather than installed, and the entry goes
+#: back on the by-hand list where it was.
+KNOWN_PACKAGES: tuple[tuple[str, str], ...] = (
+    ("notepad++", "Notepad++.Notepad++"),
+    ("mozilla firefox", "Mozilla.Firefox"),
+    ("mozilla thunderbird", "Mozilla.Thunderbird"),
+    ("google chrome", "Google.Chrome"),
+    ("vlc media player", "VideoLAN.VLC"),
+    ("7-zip", "7zip.7zip"),
+    ("microsoft visual studio code", "Microsoft.VisualStudioCode"),
+    ("visual studio code", "Microsoft.VisualStudioCode"),
+    ("git version", "Git.Git"),
+    ("epic games launcher", "EpicGames.EpicGamesLauncher"),
+    ("ubisoft connect", "Ubisoft.Connect"),
+    ("telegram desktop", "Telegram.TelegramDesktop"),
+    ("filezilla client", "TimKosse.FileZilla.Client"),
+    ("docker desktop", "Docker.DockerDesktop"),
+    ("obs studio", "OBSProject.OBSStudio"),
+    ("opera gx", "Opera.OperaGX"),
+    ("paint.net", "dotPDNLLC.paintdotnet"),
+    ("node.js", "OpenJS.NodeJS"),
+    ("adobe acrobat", "Adobe.Acrobat.Reader.64-bit"),
+    ("libreoffice", "TheDocumentFoundation.LibreOffice"),
+    ("qbittorrent", "qBittorrent.qBittorrent"),
+    ("teamviewer", "TeamViewer.TeamViewer"),
+    ("veracrypt", "IDRIX.VeraCrypt"),
+    ("irfanview", "IrfanSkiljan.IrfanView"),
+    ("handbrake", "HandBrake.HandBrake"),
+    ("bitwarden", "Bitwarden.Bitwarden"),
+    ("nextcloud", "Nextcloud.NextcloudDesktop"),
+    ("greenshot", "Greenshot.Greenshot"),
+    ("anydesk", "AnyDeskSoftwareGmbH.AnyDesk"),
+    ("powertoys", "Microsoft.PowerToys"),
+    ("audacity", "Audacity.Audacity"),
+    ("inkscape", "Inkscape.Inkscape"),
+    ("everything", "voidtools.Everything"),
+    ("blender", "BlenderFoundation.Blender"),
+    ("vivaldi", "Vivaldi.Vivaldi"),
+    ("dropbox", "Dropbox.Dropbox"),
+    ("keepass", "DominikReichl.KeePass"),
+    ("postman", "Postman.Postman"),
+    ("calibre", "calibre.calibre"),
+    ("winscp", "WinSCP.WinSCP"),
+    ("winrar", "RARLab.WinRAR"),
+    ("discord", "Discord.Discord"),
+    ("spotify", "Spotify.Spotify"),
+    ("signal", "OpenWhisperSystems.Signal"),
+    ("hwinfo", "REALiX.HWiNFO"),
+    ("sharex", "ShareX.ShareX"),
+    ("krita", "KDE.Krita"),
+    ("putty", "PuTTY.PuTTY"),
+    ("rufus", "Rufus.Rufus"),
+    ("brave", "Brave.Brave"),
+    ("steam", "Valve.Steam"),
+    ("slack", "SlackTechnologies.Slack"),
+    ("cpu-z", "CPUID.CPU-Z"),
+    ("kodi", "XBMCFoundation.Kodi"),
+    ("opera", "Opera.Opera"),
+    ("zoom", "Zoom.Zoom"),
+    ("gimp", "GIMP.GIMP"),
+)
+
+#: Checking costs a winget call each. A machine with hundreds of unmatched
+#: programs should not spend minutes on it, and the table is not that long.
+MAX_VERIFICATIONS = 60
+
+
+def known_package_for(name: str) -> str | None:
+    """The package id this display name is known by, if it is one we know.
+
+    Matched on the start of the name, because an entry in Add/Remove Programs
+    carries its version and its architecture -- "Notepad++ (64-bit x64)",
+    "Mozilla Firefox (x64 en-US)" -- and the product is the part in front.
+    Longest first, so "opera gx" is not answered by "opera".
+    """
+    plain = (name or "").strip().lower()
+    if not plain:
+        return None
+    for prefix, identifier in sorted(KNOWN_PACKAGES, key=lambda pair: -len(pair[0])):
+        if plain.startswith(prefix):
+            return identifier
+    return None
+
+
+def package_exists(identifier: str, runner=process.run) -> bool:
+    """Does this machine's winget actually have that package?"""
+    result = runner(
+        [
+            "winget",
+            "show",
+            "--id",
+            identifier,
+            "--exact",
+            "--accept-source-agreements",
+            "--disable-interactivity",
+        ],
+        timeout=90,
+    )
+    return bool(result.ok)
+
+
+def adopt_known_packages(
+    entries: list[SoftwareEntry],
+    export: dict[str, Any] | None = None,
+    runner=process.run,
+) -> list[str]:
+    """Give a package back to the programs winget failed to recognise.
+
+    Only for entries winget itself said it had no package for, and only for
+    names in the table, and only once the machine's own winget confirms the id.
+    Returns the ids adopted.
+
+    The adopted ids are added to the export, which is what ``winget import``
+    reads -- so this is the one place the export stops being winget's own
+    output verbatim. That was a property worth having and it is being given up
+    knowingly: an export that omits the browser somebody uses every day is
+    faithful to winget and useless to them.
+    """
+    candidates: list[tuple[SoftwareEntry, str]] = []
+    claimed = {squash(entry.winget_id) for entry in entries if entry.winget_id}
+    for entry in entries:
+        if entry.winget_id or not entry.winget_knows_no_package:
+            continue
+        identifier = known_package_for(entry.name)
+        if not identifier or squash(identifier) in claimed:
+            continue
+        claimed.add(squash(identifier))
+        candidates.append((entry, identifier))
+
+    adopted: list[str] = []
+    for entry, identifier in candidates[:MAX_VERIFICATIONS]:
+        if not package_exists(identifier, runner):
+            log.info("winget does not have %s; leaving %s by hand", identifier, entry.name)
+            continue
+        entry.winget_id = identifier
+        entry.winget_knows_no_package = False
+        entry.sources.append("known-list")
+        adopted.append(identifier)
+        log.info("%s is %s, which winget did not match itself", entry.name, identifier)
+
+    if adopted and export is not None:
+        _add_to_export(export, adopted)
+    return adopted
+
+
+def _add_to_export(export: dict[str, Any], identifiers: list[str]) -> None:
+    """Put the adopted ids into the file winget import will read."""
+    sources = export.setdefault("Sources", [])
+    if not sources:
+        sources.append({
+            "Packages": [],
+            "SourceDetails": {
+                "Argument": "https://cdn.winget.microsoft.com/cache",
+                "Identifier": "Microsoft.Winget.Source_8wekyb3d8bbwe",
+                "Name": "winget",
+                "Type": "Microsoft.PreIndexed.Package",
+            },
+        })
+    packages = sources[0].setdefault("Packages", [])
+    known = {
+        str(package.get("PackageIdentifier", "")).lower()
+        for package in packages
+        if isinstance(package, dict)
+    }
+    for identifier in identifiers:
+        if identifier.lower() not in known:
+            packages.append({"PackageIdentifier": identifier})
+
+
 def merge(
     registry_entries: list[SoftwareEntry],
     appx_entries: list[SoftwareEntry],
@@ -900,6 +1087,19 @@ def scan_software(env: Environment) -> SoftwareInventory:
     inventory.entries, inventory.join_stats = merge(
         registry_entries, appx_entries, packages_from_export(export), listings
     )
+    if env.is_windows:
+        # The second opinion, after winget's own. Only for the ones it said it
+        # had no package for, and only once it confirms each id itself.
+        adopted = adopt_known_packages(inventory.entries, inventory.winget_export)
+        if adopted:
+            inventory.notes.append(
+                f"{len(adopted)} program(s) winget did not recognise as installed "
+                "have packages it does have; they will be reinstalled rather than "
+                f"listed by hand ({', '.join(adopted[:5])}"
+                + (", ..." if len(adopted) > 5 else "")
+                + ")"
+            )
+
     stats = inventory.join_stats
     if stats and stats.unjoined_rows_with_package:
         # winget knows a package for these, but its display name did not join to

@@ -145,6 +145,19 @@ winmigrate reinstall C:\restored\WinMigrate-Reinstall --apps     # run winget im
 winmigrate reinstall C:\restored\WinMigrate-Reinstall --office C:\ODT\setup.exe
 ```
 
+winget's answer about what it can reinstall is not taken as the last word.
+It only matches an installed program to a package when the package's manifest
+carries `AppsAndFeaturesEntries` lining up with what the installer wrote into
+Add/Remove Programs — so a Brave or a Notepad++ installed by downloading its
+.exe often does not match, and lands on the by-hand list despite having a
+perfectly good package. WinMigrate keeps a short table of the names people
+actually have, consulted only for programs winget said it had no package for,
+and **every id is checked against that machine's own winget before it is
+used** — one that is wrong, renamed or gone is dropped rather than installed.
+Adopted ids are added to the export, which is the one place that file stops
+being winget's own output verbatim: a faithful export that omits the browser
+somebody uses every day is useless to them.
+
 The installers are asked to be quiet. `--disable-interactivity`, which
 WinMigrate has always passed, silences winget's own prompts and nothing else --
 every installer it then runs is free to open a window, ask where to install and
