@@ -165,3 +165,19 @@ def test_explorer_is_only_restarted_when_something_was_actually_written(tmp_path
         None, None, env,
     )
     assert "Explorer" in [r.name for r in something]
+
+
+def test_explorer_is_not_killed_on_the_machine_running_the_tests(tmp_path: Path):
+    """The worst of the reach-past: a test that got this far on a Windows build
+    machine would taskkill that machine's desktop."""
+    env = env_with(tmp_path)
+    env.is_windows = True  # as a test exercising a Windows path would
+
+    results = apply_mod.apply_shell_layout(
+        {"values": {"Favorites": {"base64": base64.b64encode(b"x").decode()}}},
+        None, None, env,
+    )
+
+    (explorer,) = [r for r in results if r.name == "Explorer"]
+    assert explorer.outcome is Outcome.SKIPPED
+    assert explorer.detail == "not this machine"

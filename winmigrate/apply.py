@@ -345,7 +345,7 @@ def apply_shell_layout(
         results.append(_check_start_menu(start_menu, windows_build(env)))
 
     if any(result.outcome is Outcome.APPLIED for result in results):
-        results.append(_restart_explorer())
+        results.append(_restart_explorer(env))
     return results
 
 
@@ -424,7 +424,7 @@ def _move_aside(path: Path) -> bool:
         return False
 
 
-def refresh_shell() -> Result:
+def refresh_shell(env=None) -> Result:
     """Restart Explorer again, once the software is actually installed.
 
     The taskbar is put back during the restore, which is before the programs it
@@ -434,10 +434,14 @@ def refresh_shell() -> Result:
     back into the icons somebody recognises -- which is the entire reason the
     taskbar was carried at all.
     """
-    return _restart_explorer()
+    if env is None:  # pragma: no cover -- the live path
+        from .platform_win import Environment  # noqa: PLC0415
+
+        env = Environment.live()
+    return _restart_explorer(env)
 
 
-def _restart_explorer() -> Result:
+def _restart_explorer(env) -> Result:
     """Restart Explorer so the taskbar shows what was just written.
 
     Without this none of it is visible until the next sign-in, and a migration
@@ -445,8 +449,8 @@ def _restart_explorer() -> Result:
     not work. Explorer restarting is something Windows does to itself routinely;
     what is on screen flickers and comes back.
     """
-    if not is_windows():
-        return Result("layout", "Explorer", Outcome.SKIPPED, "not Windows")
+    if not touches_machine(env):
+        return Result("layout", "Explorer", Outcome.SKIPPED, "not this machine")
     stopped = process.run(["taskkill", "/f", "/im", "explorer.exe"], timeout=30)
     # Windows restarts Explorer by itself in most configurations; starting it
     # explicitly covers the ones where it does not, and is harmless when it has
@@ -557,7 +561,7 @@ def apply_personalization(record: dict[str, Any], env=None) -> list[Result]:
         results.append(_write_setting(env, setting, values))
 
     if any(result.outcome is Outcome.APPLIED for result in results):
-        _tell_windows_now(captured)
+        _tell_windows_now(env, captured)
     return results
 
 
@@ -630,7 +634,7 @@ def _safe_setting_value(setting, name: str, value: Any) -> bool:
     return lowered.startswith("c:\\windows\\") or lowered.startswith("%windir%\\")
 
 
-def _tell_windows_now(captured: dict) -> None:
+def _tell_windows_now(env, captured: dict) -> None:
     """Ask Windows to act on the settings it does not re-read by itself.
 
     Best effort, and deliberately quiet: everything written above is in the
@@ -638,7 +642,7 @@ def _tell_windows_now(captured: dict) -> None:
     difference between the mouse behaving correctly now and behaving correctly
     tomorrow.
     """
-    if not is_windows():
+    if not touches_machine(env):
         return
     mouse = captured.get("mouse") or {}
     keyboard = captured.get("keyboard_speed") or {}
@@ -762,7 +766,7 @@ def _apply_background_colour(env, record: dict[str, Any]) -> list[Result]:
     # The registry is where the colour lives; SetSysColors is what makes the
     # desktop change now rather than at the next sign-in, and is allowed to
     # fail without costing the setting.
-    _set_system_background_colour(parts)
+    _set_system_background_colour(env, parts)
     return [
         Result("background", f"colour {colour}",
                Outcome.APPLIED if written else Outcome.FAILED)
@@ -778,7 +782,7 @@ def _set_desktop_picture(env, image: Path) -> Result:
     background that appears after a reboot reads as a background that did not
     come back.
     """
-    if not is_windows():
+    if not touches_machine(env):
         env.write_registry_value("HKCU", DESKTOP_KEY, "Wallpaper", str(image))
         return Result("background", image.name, Outcome.APPLIED, "recorded")
     try:
@@ -799,9 +803,9 @@ def _set_desktop_picture(env, image: Path) -> Result:
     return Result("background", image.name, Outcome.APPLIED)
 
 
-def _set_system_background_colour(parts: list[str]) -> None:
-    """Repaint the desktop colour now. Best effort, Windows only."""
-    if not is_windows():
+def _set_system_background_colour(env, parts: list[str]) -> None:
+    """Repaint the desktop colour now. Best effort, and never on a fixture."""
+    if not touches_machine(env):
         return
     try:
         import ctypes  # noqa: PLC0415
@@ -814,10 +818,27 @@ def _set_system_background_colour(parts: list[str]) -> None:
         log.debug("could not repaint the desktop colour: %s", exc)
 
 
-def is_windows() -> bool:
-    import sys  # noqa: PLC0415
+def touches_machine(env) -> bool:
+    """May this call change the machine it is running on?
 
-    return sys.platform == "win32"
+    Asked of the environment, never of the platform. ``Environment.fixture()``
+    is a made-up machine -- its registry is a dict, its writes are recorded,
+    and its ``is_windows`` is False however real the Windows underneath is. A
+    function handed one must not reach past it.
+
+    Gating on ``sys.platform`` instead is how a test run on a Windows build
+    machine changed that machine's wallpaper: the registry writes went to the
+    fixture, as intended, and the SystemParametersInfoW call beside them went
+    to the actual desktop. The test failed because the fixture was missing a
+    value the real machine had just been given.
+
+    Two conditions, not one. A fixture's ``is_windows`` is False, which would
+    be enough -- except that tests exercising Windows-only paths set it True on
+    purpose, and one of those reaching this would be the same accident again
+    wearing a different hat. A fixture also answers reads from a dict, so a
+    real machine is the one whose registry is the actual registry.
+    """
+    return bool(getattr(env, "is_windows", False)) and getattr(env, "registry", 1) is None
 
 
 def _merge_variable(env, name: str, incoming: str) -> list[Result]:

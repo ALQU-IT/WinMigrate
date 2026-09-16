@@ -268,7 +268,10 @@ def open_manager(env: Environment | None = None) -> bool:
     """
     from . import winlaunch  # noqa: PLC0415
 
-    if not winlaunch.is_windows():
+    env = env or Environment.live()
+    # The environment, not the platform: handed a fixture, this must not open a
+    # dialog on the machine the tests happen to be running on.
+    if not env.is_windows or not winlaunch.is_windows():
         return False
     executable = Path(MANAGER_COMMAND[0])
     return winlaunch.launch(executable, [MANAGER_COMMAND[1]])

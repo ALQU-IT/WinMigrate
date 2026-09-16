@@ -182,9 +182,14 @@ def test_the_ico_for_the_frozen_build_holds_every_size():
 
 def test_none_of_it_is_load_bearing():
     """A machine where none of this works gets a window that is merely plain,
-    which is what it had before."""
-    assert desktop.make_dpi_aware() is False       # not Windows, here
-    assert desktop.set_taskbar_identity() is False
+    which is what it had before.
+
+    Asserted as "answers and does not raise" rather than as False: these two
+    are about the process itself rather than about a machine being migrated, so
+    on a Windows build agent they genuinely do take, and a test that demanded
+    False would fail there for being right."""
+    assert desktop.make_dpi_aware() in (True, False)
+    assert desktop.set_taskbar_identity() in (True, False)
 
 
 # --- what the download looks like before it is even opened ------------------

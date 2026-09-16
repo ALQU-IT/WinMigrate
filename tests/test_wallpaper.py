@@ -267,3 +267,43 @@ def test_a_record_from_an_unknown_future_version_is_not_guessed_at(tmp_path: Pat
 
     assert result.outcome is Outcome.SKIPPED
     assert env.registry == {}
+
+
+# --- never reaching past the environment it was given -----------------------
+def test_a_fixture_is_never_treated_as_the_machine_it_runs_on(tmp_path: Path):
+    """The bug this exists to prevent: on a Windows build machine the registry
+    writes went to the fixture, as intended, and the SystemParametersInfoW call
+    beside them went to the actual desktop -- so a test changed the wallpaper of
+    the machine running it, then failed because the fixture was missing the
+    value the real machine had just been given.
+
+    Two conditions, not one: tests that exercise Windows-only paths set a
+    fixture's is_windows True on purpose, and one of those reaching a real
+    Windows call would be the same accident in a different hat."""
+    from winmigrate.platform_win import Environment as Env
+
+    fixture = env_with({}, tmp_path)
+    assert apply_mod.touches_machine(fixture) is False
+
+    fixture.is_windows = True
+    assert apply_mod.touches_machine(fixture) is False
+
+    real = Env(profile_root=tmp_path, registry=None, is_windows=True)
+    assert apply_mod.touches_machine(real) is True
+
+
+def test_a_picture_given_a_fixture_is_recorded_rather_than_hung_on_the_wall(
+    tmp_path: Path,
+):
+    """Observable from either platform, which is the point: this is the
+    assertion that fails on Windows if the gate goes back to asking sys."""
+    image = a_picture(tmp_path)
+    env = env_with({}, tmp_path)
+    env.is_windows = True  # as a test exercising a Windows path would
+
+    (result,) = apply_mod.apply_wallpaper(
+        {"type": "picture", "style": "10", "file_name": "lake.jpg"}, image, env
+    )
+
+    assert result.detail == "recorded"
+    assert env.registry[r"HKCU\Control Panel\Desktop"]["Wallpaper"] == str(image)

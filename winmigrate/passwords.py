@@ -546,9 +546,12 @@ def open_export_page(target: ExportTarget, env: Environment | None = None) -> bo
     """
     from . import winlaunch  # noqa: PLC0415
 
-    if not winlaunch.is_windows() or not target.export_page:
+    env = env or Environment.live()
+    # The environment, not the platform: handed a fixture, this must not launch
+    # a browser on the machine the tests happen to be running on.
+    if not env.is_windows or not winlaunch.is_windows() or not target.export_page:
         return False
-    executable = browser_executable(target, env or Environment.live())
+    executable = browser_executable(target, env)
     if executable is None:
         log.info("no executable found for %s; not opening its password page", target.browser_key)
         return False
