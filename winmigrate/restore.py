@@ -634,6 +634,20 @@ def _selected_prefixes(options: RestoreOptions, bundle_path: Path) -> list[str] 
 
     sidecar = load_sidecar(bundle_path)
     entries: list[dict[str, Any]] = list(sidecar.get("items", [])) if sidecar else []
+
+    # Everything selected is not a selection. The window always names every
+    # item it is restoring -- that is how it restores records alongside files --
+    # so without this, a bundle holding any encrypted-only item sends every
+    # ordinary "put it all back" through the manifest pre-read below: a second
+    # full decrypt of the whole bundle, before a single byte is written, with
+    # no progress against it. On a large backup that is minutes of a window
+    # that looks like it has hung, and it is the common case rather than a
+    # corner of one.
+    listed = {item.get("id") for item in entries if isinstance(item, dict) and item.get("id")}
+    if listed and listed <= set(options.items):
+        log.info("every item in the bundle is selected; restoring all of it")
+        return None
+
     prefixes = _prefixes_from(entries, options.items)
     known = {item.get("id") for item in entries}
     unresolved = [i for i in options.items if i in known and i not in prefixes]

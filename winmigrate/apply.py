@@ -441,25 +441,61 @@ def refresh_shell(env=None) -> Result:
     return _restart_explorer(env)
 
 
-def _restart_explorer(env) -> Result:
+#: How long to wait for the desktop to come back before starting it again.
+EXPLORER_WAIT_SECONDS = 1.0
+EXPLORER_ATTEMPTS = 5
+
+
+def _restart_explorer(env, runner=process.run, pause=None) -> Result:
     """Restart Explorer so the taskbar shows what was just written.
 
     Without this none of it is visible until the next sign-in, and a migration
     that finishes with the old taskbar still on screen reads as one that did
-    not work. Explorer restarting is something Windows does to itself routinely;
-    what is on screen flickers and comes back.
+    not work.
+
+    **It does not return until a desktop is back.** Killing Explorer is routine
+    -- Windows does it to itself -- but the version of this that fired and
+    walked away had a failure mode this tool must not have: the taskbar, the
+    Start menu and the desktop gone, at the end of a migration, on a machine
+    whose owner has no idea what a shell is and every reason to think the
+    program that just finished did it. So the kill is followed by waiting for
+    it, starting it, and looking again, and a desktop that will not come back
+    is reported as the failure it is rather than as a job done.
     """
     if not touches_machine(env):
         return Result("layout", "Explorer", Outcome.SKIPPED, "not this machine")
-    stopped = process.run(["taskkill", "/f", "/im", "explorer.exe"], timeout=30)
-    # Windows restarts Explorer by itself in most configurations; starting it
-    # explicitly covers the ones where it does not, and is harmless when it has
-    # already come back.
-    started = process.run(["cmd", "/c", "start", "", "explorer.exe"], timeout=30)
-    if stopped.error and started.error:
-        return Result("layout", "Explorer", Outcome.SKIPPED,
-                      "could not restart it; the taskbar appears at the next sign-in")
-    return Result("layout", "Explorer", Outcome.APPLIED, "restarted, so the taskbar shows")
+    if pause is None:  # pragma: no cover -- the live path
+        import time  # noqa: PLC0415
+
+        pause = time.sleep
+
+    runner(["taskkill", "/f", "/im", "explorer.exe"], timeout=30)
+    for attempt in range(EXPLORER_ATTEMPTS):
+        if _explorer_is_running(runner):
+            return Result("layout", "Explorer", Outcome.APPLIED,
+                          "restarted, so the taskbar shows")
+        # Windows brings it back by itself in most configurations. Starting it
+        # covers the ones where it does not, and is harmless when it already
+        # has: the second copy exits immediately.
+        runner(["cmd", "/c", "start", "", "explorer.exe"], timeout=30)
+        pause(EXPLORER_WAIT_SECONDS)
+        if attempt == EXPLORER_ATTEMPTS - 1 and _explorer_is_running(runner):
+            return Result("layout", "Explorer", Outcome.APPLIED,
+                          "restarted, so the taskbar shows")
+    log.warning("the desktop did not come back after restarting Explorer")
+    return Result(
+        "layout", "Explorer", Outcome.FAILED,
+        "the desktop did not come back. Press Ctrl+Shift+Esc, then File > Run "
+        "new task, and run: explorer.exe",
+    )
+
+
+def _explorer_is_running(runner) -> bool:
+    """Is there a desktop? Asked of Windows, not assumed from an exit code."""
+    result = runner(
+        ["tasklist", "/fi", "imagename eq explorer.exe", "/nh"], timeout=30
+    )
+    return "explorer.exe" in (result.stdout or "").lower()
 
 
 # --- what starts when you log in -------------------------------------------

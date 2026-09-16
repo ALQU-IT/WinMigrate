@@ -1090,3 +1090,102 @@ def test_a_restore_of_files_only_asks_nobody_to_close_anything(captured, tmp_pat
     report, _scan = captured
     sidecar = json.loads(report.manifest_path.read_text(encoding="utf-8"))
     assert restore_mod.programs_to_close(sidecar) == []
+
+
+def test_restoring_everything_does_not_decrypt_the_bundle_twice(
+    profile: Path, env: Environment, tmp_path: Path, monkeypatch
+):
+    """The window always names every item it restores -- that is how it puts
+    records back alongside files -- so "everything" arrives as a selection. A
+    bundle holding any encrypted-only item then sent that through the manifest
+    pre-read: a second full decrypt of the whole thing, before a byte is
+    written, with no progress against it. On a large backup that is minutes of
+    a window that looks like it has hung, in the common case rather than a
+    corner of one."""
+    from winmigrate.models import Category, Item, Kind, Sensitivity
+
+    secret = tmp_path / "sign-ins.crd"
+    secret.write_bytes(b"\\x01\\x02encrypted")
+    config = ScanConfig(profile_root=profile, include_software=False)
+    scan = run_scan(config, env)
+    scan.items.append(
+        Item(
+            id="credentials:backup",
+            category=Category.CREDENTIALS,
+            kind=Kind.FILE,
+            title="Saved Windows sign-ins",
+            source_path=str(secret),
+            archive_path="secrets/WinMigrate-Credentials/sign-ins.crd",
+            sensitivity=Sensitivity.SECRET,
+        )
+    )
+    bundle = tmp_path / "with-secret.dat"
+    capture_mod.capture(
+        scan, CaptureOptions(output=bundle, passphrase=PASSPHRASE, use_vss=False), config, env
+    )
+
+    reads: list[str] = []
+    original = restore_mod.read_manifest
+    monkeypatch.setattr(
+        restore_mod, "read_manifest",
+        lambda path, phrase: reads.append("pre-read") or original(path, phrase),
+    )
+
+    every_id = tuple(item.id for item in scan.items)
+    report = restore_mod.restore(
+        RestoreOptions(
+            bundle=bundle, passphrase=PASSPHRASE,
+            destination=tmp_path / "all", items=every_id,
+        )
+    )
+
+    assert reads == []
+    # And the encrypted-only file still lands, which is the thing the pre-read
+    # existed to make possible.
+    assert (tmp_path / "all" / "WinMigrate-Credentials" / "sign-ins.crd").is_file()
+    assert report.ok
+
+
+def test_restoring_one_secret_item_still_reads_the_manifest_for_it(
+    profile: Path, env: Environment, tmp_path: Path, monkeypatch
+):
+    """The pre-read is not gone, it is no longer the default: a genuine
+    selection of a redacted item has nowhere else to learn its path from."""
+    from winmigrate.models import Category, Item, Kind, Sensitivity
+
+    secret = tmp_path / "sign-ins.crd"
+    secret.write_bytes(b"\\x01\\x02encrypted")
+    config = ScanConfig(profile_root=profile, include_software=False)
+    scan = run_scan(config, env)
+    scan.items.append(
+        Item(
+            id="credentials:backup",
+            category=Category.CREDENTIALS,
+            kind=Kind.FILE,
+            title="Saved Windows sign-ins",
+            source_path=str(secret),
+            archive_path="secrets/WinMigrate-Credentials/sign-ins.crd",
+            sensitivity=Sensitivity.SECRET,
+        )
+    )
+    bundle = tmp_path / "one-secret.dat"
+    capture_mod.capture(
+        scan, CaptureOptions(output=bundle, passphrase=PASSPHRASE, use_vss=False), config, env
+    )
+
+    reads: list[str] = []
+    original = restore_mod.read_manifest
+    monkeypatch.setattr(
+        restore_mod, "read_manifest",
+        lambda path, phrase: reads.append("pre-read") or original(path, phrase),
+    )
+
+    restore_mod.restore(
+        RestoreOptions(
+            bundle=bundle, passphrase=PASSPHRASE,
+            destination=tmp_path / "just-one", items=("credentials:backup",),
+        )
+    )
+
+    assert reads == ["pre-read"]
+    assert (tmp_path / "just-one" / "WinMigrate-Credentials" / "sign-ins.crd").is_file()

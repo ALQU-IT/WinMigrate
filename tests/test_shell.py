@@ -181,3 +181,82 @@ def test_explorer_is_not_killed_on_the_machine_running_the_tests(tmp_path: Path)
     (explorer,) = [r for r in results if r.name == "Explorer"]
     assert explorer.outcome is Outcome.SKIPPED
     assert explorer.detail == "not this machine"
+
+
+# --- never leaving somebody without a desktop -------------------------------
+class FakeWindows:
+    """A machine where Explorer can be killed, and may or may not come back."""
+
+    def __init__(self, comes_back_after: int | None = 1):
+        self.comes_back_after = comes_back_after
+        self.calls: list[list[str]] = []
+        self.starts = 0
+        self.running = True
+
+    def __call__(self, argv, timeout=None):
+        from winmigrate.util.process import CommandResult
+
+        self.calls.append(list(argv))
+        if argv[0] == "taskkill":
+            self.running = False
+        if argv[0] == "cmd":
+            self.starts += 1
+            if self.comes_back_after is not None and self.starts >= self.comes_back_after:
+                self.running = True
+        if argv[0] == "tasklist":
+            out = "explorer.exe   1234 Console   1   50,000 K" if self.running else ""
+            return CommandResult(command=list(argv), returncode=0, stdout=out)
+        return CommandResult(command=list(argv), returncode=0, stdout="")
+
+
+def live_env(tmp_path: Path) -> Environment:
+    """An environment that says it is a real Windows machine."""
+    return Environment(profile_root=tmp_path, registry=None, is_windows=True)
+
+
+def test_the_restart_waits_for_the_desktop_rather_than_walking_away(tmp_path: Path):
+    """Killing Explorer is routine. Killing it and not looking back is not: the
+    taskbar, the Start menu and the desktop gone, at the end of a migration, on
+    a machine whose owner has every reason to think the program that just
+    finished did it."""
+    windows = FakeWindows(comes_back_after=1)
+
+    result = apply_mod._restart_explorer(live_env(tmp_path), windows, pause=lambda _s: None)
+
+    assert result.outcome is Outcome.APPLIED
+    assert ["taskkill", "/f", "/im", "explorer.exe"] in windows.calls
+    assert any(call[0] == "tasklist" for call in windows.calls)
+
+
+def test_a_desktop_that_will_not_come_back_is_reported_as_the_failure_it_is(
+    tmp_path: Path,
+):
+    """Not as a job done. The person is looking at a blank screen and needs the
+    one instruction that fixes it, not a tick."""
+    windows = FakeWindows(comes_back_after=None)
+
+    result = apply_mod._restart_explorer(live_env(tmp_path), windows, pause=lambda _s: None)
+
+    assert result.outcome is Outcome.FAILED
+    assert "Ctrl+Shift+Esc" in result.detail and "explorer.exe" in result.detail
+    # It kept trying rather than giving up after one go.
+    assert windows.starts >= 2
+
+
+def test_a_desktop_already_back_on_its_own_is_not_started_twice(tmp_path: Path):
+    """Windows brings it back by itself in most configurations."""
+    windows = FakeWindows()
+    windows.running = True
+
+    def already_back(argv, timeout=None):
+        from winmigrate.util.process import CommandResult
+
+        windows.calls.append(list(argv))
+        if argv[0] == "tasklist":
+            return CommandResult(command=list(argv), returncode=0, stdout="explorer.exe 1")
+        return CommandResult(command=list(argv), returncode=0, stdout="")
+
+    result = apply_mod._restart_explorer(live_env(tmp_path), already_back, pause=lambda _s: None)
+
+    assert result.outcome is Outcome.APPLIED
+    assert not [call for call in windows.calls if call[0] == "cmd"]
