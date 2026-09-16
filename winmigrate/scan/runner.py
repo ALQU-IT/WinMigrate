@@ -114,6 +114,8 @@ def run_scan(
     _scan_startup(env, result, config, progress)
     _scan_app_data(env, result, config, progress)
     _scan_shell(env, result, config, progress)
+    _scan_associations(env, result, progress)
+    _scan_tasks(env, result, progress)
     _note_long_paths(result, long_paths)
 
     result.duration_seconds = time.monotonic() - started
@@ -695,6 +697,30 @@ def _scan_shell(
     _emit(progress, "Reading your taskbar and desktop layout")
     items, followups = shell_mod.scan_shell(env)
     _measure_capture_items(items, config, env)
+    result.items.extend(items)
+    result.followups.extend(followups)
+
+
+def _scan_associations(
+    env: Environment, result: ScanResult, progress: ProgressCallback | None
+) -> None:
+    """Write down which program opens which file. Windows will not let us set it."""
+    from . import associations as associations_mod  # noqa: PLC0415 -- optional stage
+
+    _emit(progress, "Reading which program opens which file")
+    items, followups = associations_mod.scan_associations(env)
+    result.items.extend(items)
+    result.followups.extend(followups)
+
+
+def _scan_tasks(
+    env: Environment, result: ScanResult, progress: ProgressCallback | None
+) -> None:
+    """Write down the scheduled tasks somebody made. Nothing is re-created."""
+    from . import tasks as tasks_mod  # noqa: PLC0415 -- optional stage
+
+    _emit(progress, "Reading scheduled tasks")
+    items, followups = tasks_mod.scan_tasks(env)
     result.items.extend(items)
     result.followups.extend(followups)
 

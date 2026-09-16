@@ -160,6 +160,16 @@ Microsoft's Office Deployment Tool.
 
 ## What it will not do
 
+Two things Windows deliberately will not let a program change come across as
+lists rather than as silent writes. **Which program opens which file** is
+protected by a hash over the file type, your SID and a timestamp -- the
+protection that stops software making itself your default browser also stops a
+migration tool putting your choices back -- so WinMigrate reads them off the old
+machine and hands you the list, everyday file types only. **Scheduled tasks you
+made yourself** are reported and never re-created: a scheduled task is a command
+a computer runs unattended, and adding one quietly from a file it was handed is
+not something this tool does.
+
 Your taskbar comes with you. It is two halves that only work together --
 shortcut files under `User Pinned`, and a `Taskband` blob saying which are
 pinned and in what order -- so both travel, and Explorer is restarted at the
