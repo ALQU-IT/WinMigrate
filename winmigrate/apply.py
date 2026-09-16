@@ -304,6 +304,52 @@ def apply_environment(record: dict[str, Any], env=None) -> list[Result]:
     return results
 
 
+# --- what starts when you log in -------------------------------------------
+def apply_startup(record: dict[str, Any], env=None) -> list[Result]:
+    """Re-add the login programs whose program is actually on this machine.
+
+    Each entry is named in its own result rather than being written quietly and
+    counted. A Run entry is a command Windows executes at every login, which
+    makes it the one setting here worth seeing restored one at a time -- the
+    user's own list, on screen, in a tool whose premise is showing its work.
+
+    An entry whose program is missing is left out, not restored broken. That is
+    both the safer answer and the more useful one: a dead Run entry is an error
+    box at every login, for ever, naming a path the user has never seen.
+    """
+    if env is None:  # pragma: no cover -- the live path
+        from .platform_win import Environment  # noqa: PLC0415
+
+        env = Environment.live()
+
+    from .scan.startup import RUN_KEY, executable_of  # noqa: PLC0415
+
+    entries = record.get("entries")
+    if not isinstance(entries, dict):
+        return []
+
+    results: list[Result] = []
+    for name, command in sorted(entries.items()):
+        if not isinstance(name, str) or not isinstance(command, str) or not command.strip():
+            continue
+        program = executable_of(command)
+        if not program or not Path(pathutil.to_posix(pathutil.expand(program, env.environ))).exists():
+            results.append(
+                Result("startup", name, Outcome.SKIPPED,
+                       f"{program or 'its program'} is not on this machine")
+            )
+            continue
+        try:
+            written = env.write_registry_value("HKCU", RUN_KEY, name, command)
+        except Exception as exc:  # noqa: BLE001
+            results.append(Result("startup", name, Outcome.FAILED, str(exc)))
+            continue
+        results.append(
+            Result("startup", name, Outcome.APPLIED if written else Outcome.FAILED, program)
+        )
+    return results
+
+
 # --- how Windows looks and responds ----------------------------------------
 #: Settings that only take effect once Windows is told, rather than at the next
 #: sign-in. SystemParametersInfoW takes each as an action code; passing the

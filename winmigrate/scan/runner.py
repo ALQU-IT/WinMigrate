@@ -111,6 +111,7 @@ def run_scan(
     _scan_displays(env, result, progress)
     _scan_wallpaper(env, result, config, progress)
     _scan_personalization(env, result, progress)
+    _scan_startup(env, result, config, progress)
     _note_long_paths(result, long_paths)
 
     result.duration_seconds = time.monotonic() - started
@@ -650,6 +651,20 @@ def _scan_personalization(
 
     _emit(progress, "Reading how Windows is set up")
     items, followups = personalization_mod.scan_personalization(env)
+    result.items.extend(items)
+    result.followups.extend(followups)
+
+
+def _scan_startup(
+    env: Environment, result: ScanResult, config: ScanConfig,
+    progress: ProgressCallback | None,
+) -> None:
+    """Carry what starts at login: the Startup folder and the Run key."""
+    from . import startup as startup_mod  # noqa: PLC0415 -- optional stage
+
+    _emit(progress, "Reading what starts when you log in")
+    items, followups = startup_mod.scan_startup(env)
+    _measure_capture_items(items, config, env)
     result.items.extend(items)
     result.followups.extend(followups)
 

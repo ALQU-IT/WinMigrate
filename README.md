@@ -160,6 +160,14 @@ Microsoft's Office Deployment Tool.
 
 ## What it will not do
 
+What starts when you log in travels too -- the Startup folder, which lives
+under AppData and so was excluded wholesale, and the per-user `Run` key, which
+the file scan never saw at all. Each `Run` entry is a command Windows executes
+at every login, so each is named individually in the restore report rather than
+written quietly, and one whose program is not on the new machine is left out
+rather than restored broken: a dead entry is an error box at every login, for
+ever, naming a path you have never seen.
+
 How Windows looks and responds travels with you. Ease of Access first --
 sticky keys, high contrast, the magnifier, text size, pointer size -- because
 somebody who spent an afternoon making the screen readable does not experience

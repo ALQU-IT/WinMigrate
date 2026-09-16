@@ -32,6 +32,7 @@ class Category(str, Enum):
     DISPLAYS = "displays"
     WALLPAPER = "wallpaper"
     PERSONALIZATION = "personalization"
+    STARTUP = "startup"
     DEV_CONFIG = "dev_config"
     FILE_ASSOCIATIONS = "file_associations"
     SOFTWARE = "software"
