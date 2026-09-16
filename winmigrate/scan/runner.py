@@ -114,6 +114,7 @@ def run_scan(
     _scan_startup(env, result, config, progress)
     _scan_app_data(env, result, config, progress)
     _scan_shell(env, result, config, progress)
+    _scan_credentials(env, result, config, progress)
     _scan_associations(env, result, progress)
     _scan_tasks(env, result, progress)
     _note_long_paths(result, long_paths)
@@ -697,6 +698,19 @@ def _scan_shell(
     _emit(progress, "Reading your taskbar and desktop layout")
     items, followups = shell_mod.scan_shell(env)
     _measure_capture_items(items, config, env)
+    result.items.extend(items)
+    result.followups.extend(followups)
+
+
+def _scan_credentials(
+    env: Environment, result: ScanResult, config: ScanConfig,
+    progress: ProgressCallback | None,
+) -> None:
+    """Say what Credential Manager holds. Windows exports it, not us."""
+    from .. import credentials as credentials_mod  # noqa: PLC0415 -- optional stage
+
+    _emit(progress, "Checking saved Windows sign-ins")
+    items, followups = credentials_mod.scan_credentials(env, files_only=config.files_only)
     result.items.extend(items)
     result.followups.extend(followups)
 

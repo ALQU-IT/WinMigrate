@@ -235,6 +235,12 @@ def _add_capture_arguments(parser: argparse.ArgumentParser) -> None:
         "(repeatable; skips the interactive prompt for that browser)",
     )
     parser.add_argument(
+        "--credentials",
+        metavar="CRD",
+        help="include a Credential Manager backup you exported yourself "
+        "(rundll32.exe keymgr.dll,KRShowKeyMgr -> Back up...)",
+    )
+    parser.add_argument(
         "--no-passwords",
         action="store_true",
         help="do not offer to include browser password exports",
@@ -514,6 +520,7 @@ def cmd_capture(args: argparse.Namespace, console: Console) -> int:
             return 1
 
     shred_after = _collect_browser_passwords(args, result, env, console)
+    _collect_credential_backup(args, result, console)
 
     passphrase = _read_passphrase(args, confirm=True)
     options = CaptureOptions(
@@ -584,6 +591,32 @@ def _warn_if_no_shadow_copy(args, console: Console, totals) -> None:
         f"(right-click Terminal or PowerShell, Run as administrator). About "
         f"{humanize.bytes_(totals.capture_bytes)} is planned, so this is the cheap "
         f"moment to decide.[/dim]"
+    )
+
+
+def _collect_credential_backup(args, result, console) -> None:
+    """Add a Credential Manager backup the user made, if they made one.
+
+    Never shredded afterwards, unlike a password CSV. That file is theirs: they
+    chose where to put it and what password protects it, and Windows' own
+    wizard is the only thing that can make another. Deleting it on their behalf
+    would be deleting the one copy they were told to keep until the restore.
+    """
+    from . import credentials as credentials_mod
+
+    raw = getattr(args, "credentials", None)
+    if not raw or result.files_only:
+        return
+    path = Path(str(raw).strip().strip('"'))
+    try:
+        item = credentials_mod.ingest_backup(path, result)
+    except (OSError, ValueError) as exc:
+        console.print(f"[yellow]Not including {path}: {exc}[/yellow]")
+        return
+    console.print(
+        f"[green]Including your saved Windows sign-ins[/green] "
+        f"[dim]({humanize.bytes_(item.size_bytes)}, encrypted-only). Delete "
+        f"{path.name} once the new machine has them.[/dim]"
     )
 
 

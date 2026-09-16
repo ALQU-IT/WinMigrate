@@ -160,6 +160,21 @@ Microsoft's Office Deployment Tool.
 
 ## What it will not do
 
+Saved Windows sign-ins move the way Windows itself moves them. After a
+migration the files are back, the programs are back, and everything asks you to
+sign in again -- a large share of that is Credential Manager: network shares,
+mapped drives, Office and Outlook, every "remember me" box ticked years ago.
+None of it is in a file a backup can copy, because each entry is encrypted
+against the account and machine that made it. So WinMigrate detects what is
+there by name only (`cmdkey /list` prints names and never secrets) and hands off
+to Credential Manager's own Back up wizard, which asks for Ctrl+Alt+Del and a
+password of your choosing and writes the file itself. Give that file to
+`--credentials` and it rides in the encrypted bundle; on the far side it
+restores next to the matching Restore button. WinMigrate never opens it. Reading
+the store directly would mean `CredEnumerate` and `CryptUnprotectData`, which is
+a credential dumper however politely it is described -- a test asserts those
+names appear nowhere in the module but its own explanation of why.
+
 Two things Windows deliberately will not let a program change come across as
 lists rather than as silent writes. **Which program opens which file** is
 protected by a hash over the file type, your SID and a timestamp -- the

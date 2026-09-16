@@ -257,6 +257,23 @@ settings root, the real address goes on the clipboard, and both front ends say
 which of the two happened. Defeating that filter would be the same kind of move
 as decrypting the password store, and is refused for the same reason.
 
+## Saved Windows credentials
+
+The same boundary as browser passwords, reached from the other side. Credential
+Manager holds the sign-ins for network shares, mapped drives and every program
+that remembered you; all of it is DPAPI-encrypted against the account and
+machine that created it, so nothing a backup copies will decrypt on the far
+side. Reading it properly means `CredEnumerate` plus `CryptUnprotectData` --
+which is a credential dumper, and out of scope for exactly the reason the
+browser password stores are.
+
+Windows supplies the supported path: Credential Manager backs its own store up
+to a `.crd`, behind a secure-desktop prompt and a password the user chooses.
+WinMigrate detects what is stored (`cmdkey /list`, which prints names and never
+secrets), says what would otherwise be lost, and ingests whatever the user hands
+back as encrypted-only material. It never opens the file. A test parses the
+module and asserts the credential-reading APIs appear nowhere in its code.
+
 ## The desktop background
 
 Three registry locations decide what a Windows desktop shows, and reading only

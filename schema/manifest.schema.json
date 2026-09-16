@@ -233,6 +233,7 @@
             "startup",
             "app_data",
             "shell",
+            "credentials",
             "dev_config",
             "file_associations",
             "software",
