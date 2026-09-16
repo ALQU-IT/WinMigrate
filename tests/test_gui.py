@@ -628,3 +628,62 @@ def test_the_window_recovers_onto_a_page_that_belongs_to_the_current_job(monkeyp
     assert app.WinMigrateWizard._recovery_step(wizard) is Step.WELCOME
     wizard.data.scan_done = True
     assert app.WinMigrateWizard._recovery_step(wizard) in BACKUP_ORDER
+
+
+# --- where a backup is proposed ---------------------------------------------
+def test_running_from_a_stick_still_proposes_that_stick(monkeypatch):
+    """The common case, and the one the default was written for."""
+    from winmigrate.gui import defaults
+
+    monkeypatch.setattr(defaults, "program_drive", lambda: Path("E:\\"))
+    monkeypatch.setattr(defaults, "_is_system_drive", lambda path: False)
+
+    assert defaults.proposed_drive(lister=lambda: []) == Path("E:\\")
+
+
+def test_a_stick_is_proposed_when_the_program_is_on_the_system_disk(monkeypatch):
+    """Somebody downloads the program to Downloads and plugs a stick in, which
+    is what most people do. Proposing they write the backup onto the disk they
+    are backing up is proposing the one place that cannot work as a backup."""
+    from winmigrate.gui import defaults
+
+    monkeypatch.setattr(defaults, "program_drive", lambda: Path("C:\\"))
+    monkeypatch.setattr(defaults, "_is_system_drive", lambda path: str(path) == "C:\\")
+    monkeypatch.setattr(defaults, "_free_space", lambda drive: 64 * 1024**3)
+
+    assert defaults.proposed_drive(lister=lambda: ["F:\\"]) == Path("F:\\")
+
+
+def test_a_stick_too_small_for_what_is_planned_is_not_proposed(monkeypatch):
+    """An empty 2 GB stick is not somewhere to put forty gigabytes of
+    photographs, and finding that out at ninety per cent is the whole failure
+    this avoids."""
+    from winmigrate.gui import defaults
+
+    sizes = {"F:\\": 2 * 1024**3, "G:\\": 128 * 1024**3}
+    monkeypatch.setattr(defaults, "program_drive", lambda: Path("C:\\"))
+    monkeypatch.setattr(defaults, "_is_system_drive", lambda path: str(path) == "C:\\")
+    monkeypatch.setattr(defaults, "_free_space", lambda drive: sizes[str(drive)])
+
+    chosen = defaults.proposed_drive(40 * 1024**3, lister=lambda: ["F:\\", "G:\\"])
+    assert chosen == Path("G:\\")
+
+    # And with nothing big enough plugged in, the old answer stands rather than
+    # a stick being proposed that will run out.
+    assert defaults.proposed_drive(
+        400 * 1024**3, lister=lambda: ["F:\\", "G:\\"]
+    ) == Path("C:\\")
+
+
+def test_the_proposed_name_still_carries_host_user_and_a_timestamp(monkeypatch):
+    from datetime import datetime
+
+    from winmigrate.gui import defaults
+
+    monkeypatch.setattr(defaults, "proposed_drive", lambda *a, **k: Path("F:\\"))
+    path = defaults.default_bundle_path("OMA-PC", "oma", datetime(2026, 9, 16, 8, 30, 0))
+
+    # Compared by name and parent: on the Linux this is developed on, a Windows
+    # drive root is not a root, so joining it is not the same string.
+    assert path.name == "oma-pc-oma-20260916-083000.dat"
+    assert str(path.parent).startswith("F:")

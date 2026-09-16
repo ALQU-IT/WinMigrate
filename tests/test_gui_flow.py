@@ -1603,3 +1603,64 @@ def test_a_file_that_is_not_a_credential_backup_is_refused_on_the_page(
 
     assert "cannot be used" in wizard.credentials_status.cget("text")
     assert not [i for i in wizard.scan_result.items if i.id == "credentials:backup"]
+
+
+def test_the_taskbar_is_refreshed_once_its_programs_exist(
+    monkeypatch, bundle: Path, tmp_path: Path
+):
+    """The restore puts the taskbar back before installing anything, because
+    that is the order a restore runs in. A pin is a shortcut, and a shortcut to
+    a program that is not there yet resolves to a blank icon Explorer then
+    remembers."""
+    from winmigrate.apply import Outcome, Result
+    from winmigrate import apply as apply_mod
+    from winmigrate.util import process
+
+    wizard = _finished_restore(monkeypatch, bundle, tmp_path)
+    _with_software(wizard, tmp_path, ["Mozilla.Firefox"])
+    wizard.restore_report.applied = [
+        Result("layout", "your taskbar", Outcome.APPLIED, "4 value(s)")
+    ]
+
+    refreshed: list[str] = []
+    monkeypatch.setattr(
+        apply_mod, "refresh_shell",
+        lambda: refreshed.append("yes") or Result("layout", "Explorer", Outcome.APPLIED),
+    )
+    monkeypatch.setattr(
+        process, "stream",
+        lambda command, on_line, timeout=0, cancelled=None: process.CommandResult(
+            command, 0, "ok"
+        ),
+    )
+
+    wizard._show(Step.INSTALLING)
+    assert pump(wizard, until=("installed", "install-failed")) == "installed"
+
+    assert refreshed == ["yes"]
+
+
+def test_nothing_is_refreshed_when_there_was_no_taskbar_to_put_back(
+    monkeypatch, bundle: Path, tmp_path: Path
+):
+    """A flicker for nothing is a flicker for nothing."""
+    from winmigrate import apply as apply_mod
+    from winmigrate.util import process
+
+    wizard = _finished_restore(monkeypatch, bundle, tmp_path)
+    _with_software(wizard, tmp_path, ["Mozilla.Firefox"])
+    wizard.restore_report.applied = []
+
+    refreshed: list[str] = []
+    monkeypatch.setattr(apply_mod, "refresh_shell", lambda: refreshed.append("yes"))
+    monkeypatch.setattr(
+        process, "stream",
+        lambda command, on_line, timeout=0, cancelled=None: process.CommandResult(
+            command, 0, "ok"
+        ),
+    )
+
+    wizard._show(Step.INSTALLING)
+    assert pump(wizard, until=("installed", "install-failed")) == "installed"
+
+    assert refreshed == []

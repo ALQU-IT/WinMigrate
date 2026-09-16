@@ -424,6 +424,19 @@ def _move_aside(path: Path) -> bool:
         return False
 
 
+def refresh_shell() -> Result:
+    """Restart Explorer again, once the software is actually installed.
+
+    The taskbar is put back during the restore, which is before the programs it
+    points at exist: a pin is a shortcut, and a shortcut to a program that is
+    not there yet resolves to a blank icon that Explorer then remembers. Doing
+    this once more after the install is what turns that row of blank squares
+    back into the icons somebody recognises -- which is the entire reason the
+    taskbar was carried at all.
+    """
+    return _restart_explorer()
+
+
 def _restart_explorer() -> Result:
     """Restart Explorer so the taskbar shows what was just written.
 

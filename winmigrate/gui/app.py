@@ -1602,11 +1602,22 @@ class WinMigrateWizard:
             self._refresh_buttons()
 
     def _proposed_output(self) -> Path:
+        # What the capture is planned to write, so a drive is not proposed that
+        # cannot hold it. Zero when the scan has not run, which just means no
+        # removable drive is ruled out on size.
+        needed = 0
+        if self.scan_result is not None:
+            try:
+                needed = int(self.scan_result.totals().capture_bytes)
+            except Exception:  # noqa: BLE001 -- a default must always appear
+                needed = 0
         try:
             source = detect_source_machine(self.profile_var.get())
-            return defaults.default_bundle_path(source.hostname, source.username)
+            return defaults.default_bundle_path(
+                source.hostname, source.username, needed_bytes=needed
+            )
         except Exception:  # noqa: BLE001 -- a default must always appear
-            return defaults.default_bundle_path()
+            return defaults.default_bundle_path(needed_bytes=needed)
 
     def _update_output_hint(self) -> None:
         output = self.output_var.get()
@@ -2176,6 +2187,27 @@ class WinMigrateWizard:
             ]
         return ["", "Software: winget installed everything it had a package for."]
 
+    def _refresh_taskbar_after_install(self) -> None:
+        """Make the taskbar resolve now that its programs exist.
+
+        The restore put the taskbar back before installing anything, because
+        that is the order a restore runs in. A pin is a shortcut, and a shortcut
+        to a program that is not there yet resolves to a blank icon Explorer
+        then remembers -- so once the install has finished, Explorer is asked
+        once more. Only when there was a taskbar to put back and something was
+        actually installed: a flicker for nothing is a flicker for nothing.
+        """
+        from .. import apply as apply_mod  # noqa: PLC0415
+
+        result = self.install_result
+        if result is None or result.error or not self.restore_report:
+            return
+        applied = getattr(self.restore_report, "applied", []) or []
+        if not any(entry.kind == "layout" for entry in applied):
+            return
+        self.restore_report.applied.append(apply_mod.refresh_shell())
+        log.info("taskbar refreshed after the install")
+
     def _reinstall_lines(self, report: Any) -> list[str]:
         """The software a restore prepared and deliberately did not install.
 
@@ -2538,6 +2570,7 @@ class WinMigrateWizard:
                     payload.returncode,
                     f" ({payload.error})" if payload.error else "",
                 )
+            self._refresh_taskbar_after_install()
             self._show(Step.RESTORE_DONE)
         elif kind == "install-failed":
             self.install_bar.stop()

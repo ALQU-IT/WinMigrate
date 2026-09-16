@@ -186,6 +186,14 @@ made yourself** are reported and never re-created: a scheduled task is a command
 a computer runs unattended, and adding one quietly from a file it was handed is
 not something this tool does.
 
+The window proposes where the backup should go before you have said anything.
+Running it from a USB stick already? That stick. Running it from the system disk
+-- which is what happens when somebody downloads the program to Downloads and
+plugs a stick in -- it looks for a removable drive with room for what is
+planned, because proposing you write the backup onto the disk you are backing up
+is proposing the one place that cannot work as a backup. An empty 2 GB stick is
+not offered for forty gigabytes of photographs.
+
 Your taskbar comes with you. It is two halves that only work together --
 shortcut files under `User Pinned`, and a `Taskband` blob saying which are
 pinned and in what order -- so both travel, and Explorer is restarted at the

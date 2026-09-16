@@ -46,8 +46,93 @@ def program_drive() -> Path:
     return directory
 
 
-def default_bundle_path(host: str = "", user: str = "", now: datetime | None = None) -> Path:
-    """A full proposed path: the program's drive, and a name that sorts.
+#: Windows drive types, from GetDriveTypeW.
+DRIVE_REMOVABLE = 2
+DRIVE_FIXED = 3
+
+#: A backup wants room for the profile and then some. A stick with less free
+#: space than this is not what somebody plugged in to take their files away.
+MINIMUM_STICK_BYTES = 4 * 1024 * 1024 * 1024
+
+
+def removable_drives(lister=None) -> list[Path]:
+    """Drive roots Windows calls removable, in letter order.
+
+    Asked of Windows rather than guessed at from the drive letter: a USB disk
+    can be any letter, and a fixed disk can be E:. ``lister`` exists so this is
+    exercised without plugging anything in.
+    """
+    if lister is not None:
+        return [Path(entry) for entry in lister()]
+    if sys.platform != "win32":  # pragma: no cover -- exercised through lister
+        return []
+    try:  # pragma: no cover -- Windows-only
+        import ctypes
+        import string
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        found = []
+        mask = kernel32.GetLogicalDrives()
+        for index, letter in enumerate(string.ascii_uppercase):
+            if not mask & (1 << index):
+                continue
+            root = f"{letter}:\\"
+            if kernel32.GetDriveTypeW(root) == DRIVE_REMOVABLE:
+                found.append(Path(root))
+        return found
+    except Exception:  # noqa: BLE001 -- a default must always appear
+        return []
+
+
+def proposed_drive(needed_bytes: int = 0, lister=None) -> Path:
+    """Where a backup should go, before the user has said anything.
+
+    Running from a stick already? Then that is the answer, and always was.
+    Running from the system drive is the case this adds: somebody downloaded
+    the program to their Downloads folder and plugged a stick in, which is what
+    most people do, and proposing they write the backup onto the disk they are
+    backing up is proposing the one location that cannot work as a backup.
+
+    A removable drive is only offered when it has room for what is planned --
+    an empty 2 GB stick is not somewhere to put forty gigabytes of photographs,
+    and finding that out at ninety per cent is the whole failure this avoids.
+    """
+    program = program_drive()
+    if not _is_system_drive(program):
+        return program
+    best: tuple[int, Path] | None = None
+    for drive in removable_drives(lister):
+        free = _free_space(drive)
+        if free < max(needed_bytes, MINIMUM_STICK_BYTES):
+            continue
+        if best is None or free > best[0]:
+            best = (free, drive)
+    return best[1] if best else program
+
+
+def _is_system_drive(path: Path) -> bool:
+    """Is this the drive Windows itself is on?"""
+    system = os.environ.get("SystemDrive") or "C:"
+    return PureWindowsPath(str(path)).drive.upper() == system.upper()
+
+
+def _free_space(drive: Path) -> int:
+    try:
+        import shutil
+
+        return shutil.disk_usage(drive).free
+    except OSError:
+        return 0
+
+
+def default_bundle_path(
+    host: str = "",
+    user: str = "",
+    now: datetime | None = None,
+    needed_bytes: int = 0,
+    lister=None,
+) -> Path:
+    """A full proposed path: a drive that can hold it, and a name that sorts.
 
     The name carries host and user because bundles from several machines end up
     in one folder more often than not, and a timestamp because the second
@@ -56,7 +141,7 @@ def default_bundle_path(host: str = "", user: str = "", now: datetime | None = N
     stamp = (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
     parts = [part for part in (_slug(host), _slug(user)) if part]
     parts.append(stamp)
-    return program_drive() / ("-".join(parts) + ".dat")
+    return proposed_drive(needed_bytes, lister) / ("-".join(parts) + ".dat")
 
 
 def _slug(text: str) -> str:
