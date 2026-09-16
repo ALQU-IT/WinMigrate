@@ -37,6 +37,7 @@ class Step(str, Enum):
     SCANNING = "scanning"
     SELECT = "select"
     PASSWORDS = "passwords"
+    CREDENTIALS = "credentials"
     DESTINATION = "destination"
     CONFIRM = "confirm"
     WORKING = "working"
@@ -59,6 +60,7 @@ BACKUP_ORDER: tuple[Step, ...] = (
     Step.SCANNING,
     Step.SELECT,
     Step.PASSWORDS,
+    Step.CREDENTIALS,
     Step.DESTINATION,
     Step.CONFIRM,
     Step.WORKING,
@@ -172,6 +174,12 @@ TITLES: dict[Step, tuple[str, str]] = {
         "in the cloud, the browser exports them itself — behind its own Windows "
         "Hello prompt — and WinMigrate encrypts what you hand it.",
     ),
+    Step.CREDENTIALS: (
+        "Saved Windows sign-ins",
+        "The passwords Windows remembered for network drives, Office and the "
+        "programs that kept you signed in. Windows exports these itself \u2014 "
+        "WinMigrate never opens its credential store.",
+    ),
     Step.DESTINATION: (
         "Where should the backup go?",
         "One file, encrypted with a passphrase only you hold.",
@@ -200,6 +208,7 @@ NEXT_LABEL: dict[Step, str] = {
     Step.WELCOME: "Scan",
     Step.SELECT: "Next",
     Step.PASSWORDS: "Next",
+    Step.CREDENTIALS: "Next",
     Step.DESTINATION: "Next",
     Step.CONFIRM: "Start backup",
     Step.DONE: "Finish",
@@ -341,6 +350,12 @@ def check(step: Step, data: WizardData) -> Check:
             return Check(False, f"{parent} does not exist.")
         return Check(True)
 
+    if step is Step.CREDENTIALS:
+        # Always passable. The handoff needs Windows' own wizard and a password
+        # only the user has; refusing to continue without it would block a
+        # backup on something WinMigrate cannot do for them.
+        return Check(True)
+
     if step is Step.SOFTWARE:
         # Always passable. Installing is the offer, not the requirement: the
         # page carries its own way past, and a restore is finished either way.
@@ -425,6 +440,7 @@ def progress_steps(mode: Mode | str = Mode.BACKUP) -> tuple[Step, ...]:
         Step.WELCOME,
         Step.SELECT,
         Step.PASSWORDS,
+        Step.CREDENTIALS,
         Step.DESTINATION,
         Step.CONFIRM,
         Step.DONE,
@@ -453,6 +469,7 @@ RAIL_LABELS: dict[Step, str] = {
     Step.WELCOME: "Scan",
     Step.SELECT: "Choose",
     Step.PASSWORDS: "Passwords",
+    Step.CREDENTIALS: "Sign-ins",
     Step.DESTINATION: "Destination",
     Step.CONFIRM: "Confirm",
     Step.DONE: "Finish",

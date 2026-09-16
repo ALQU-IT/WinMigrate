@@ -42,6 +42,18 @@ from ..util import humanize, paths as pathutil
 from . import defaults, elevate, runlog, selection, theme
 from .wizard import Mode, PasswordExport, Step, WizardData
 
+
+def _credential_label(entry: dict) -> str:
+    """A saved sign-in, named the way a person would recognise it.
+
+    Windows stores these as "Domain:target=fileserver" and
+    "LegacyGeneric:target=git:https://github.com". The half after the equals
+    sign is the part somebody recognises; the prefix is bookkeeping.
+    """
+    target = str(entry.get("target") or "")
+    _, _, tail = target.partition("target=")
+    return (tail or target).strip() or "an unnamed sign-in"
+
 log = logging.getLogger(__name__)
 
 TICKED = "☑"
@@ -164,6 +176,8 @@ class WinMigrateWizard:
         self.manifest: dict | None = None
         self.restore_report: Any = None
         self.install_result: Any = None
+        self.credential_entries: list | None = None
+        self.credential_backup: Path | None = None
         self.install_lines: list[str] = []
         self._install_stop = threading.Event()
         self.scan_result: ScanResult | None = None
@@ -298,6 +312,7 @@ class WinMigrateWizard:
             (Step.SCANNING, self._page_scanning),
             (Step.SELECT, self._page_select),
             (Step.PASSWORDS, self._page_passwords),
+            (Step.CREDENTIALS, self._page_credentials),
             (Step.DESTINATION, self._page_destination),
             (Step.CONFIRM, self._page_confirm),
             (Step.WORKING, self._page_working),
@@ -684,6 +699,140 @@ class WinMigrateWizard:
         )
         self.total_label = ttk.Label(row, text="", style="Body.TLabel")
         self.total_label.pack(side="right")
+
+    def _page_credentials(self, page: Any) -> None:
+        """The Credential Manager handoff, which only the command line had.
+
+        Same rule as the page before it: WinMigrate never opens the credential
+        store. Windows backs it up itself, behind a Ctrl+Alt+Del and a password
+        the user chooses, and this takes the file they saved and puts it in the
+        encrypted bundle. Reachable here because a command-line flag is not a
+        feature for the person this tool is for.
+        """
+        ttk = self.ttk
+        self.credentials_intro = ttk.Label(
+            page, text="", style="Body.TLabel", justify="left", wraplength=640
+        )
+        self.credentials_intro.pack(anchor="w", pady=(0, 10))
+
+        self.credentials_list = ttk.Label(
+            page, text="", style="Hint.TLabel", justify="left", wraplength=640
+        )
+        self.credentials_list.pack(anchor="w", pady=(0, 12))
+
+        row = ttk.Frame(page, style="Page.TFrame")
+        row.pack(fill="x")
+        ttk.Button(
+            row, text="Open Windows' backup wizard", command=self._open_credential_manager
+        ).pack(side="left")
+        ttk.Button(
+            row, text="Choose the file I saved\u2026", command=self._pick_credential_backup
+        ).pack(side="left", padx=(8, 0))
+
+        self.credentials_status = ttk.Label(
+            page, text="", style="Hint.TLabel", justify="left", wraplength=640
+        )
+        self.credentials_status.pack(anchor="w", pady=(12, 0))
+
+    def _render_credentials(self) -> None:
+        from .. import credentials as credentials_mod  # noqa: PLC0415
+
+        if self.credential_entries is None:
+            env = self._environment(self._config())
+            entries, error = ([], None)
+            if env.is_windows:
+                entries, error = credentials_mod.list_credentials()
+            self.credential_entries = entries
+            log.info(
+                "saved sign-ins: %s%s", len(entries), f" ({error})" if error else ""
+            )
+
+        count = len(self.credential_entries)
+        if not count:
+            self.credentials_intro.configure(
+                text="Windows has no saved sign-ins on this machine, so there is "
+                "nothing to carry here."
+            )
+            self.credentials_list.configure(text="")
+            self.credentials_status.configure(text="")
+            return
+
+        self.credentials_intro.configure(
+            text=f"Windows has {count} saved sign-in(s). They are locked to this "
+            "machine, so no backup can copy them \u2014 but Windows can export them "
+            "for you, and WinMigrate will carry what it writes.\n\n"
+            "Press the first button, choose 'Back up\u2026', and follow the prompts. "
+            "Windows asks for Ctrl+Alt+Del and then for a password of your choosing "
+            "\u2014 remember it, it is not your WinMigrate passphrase. Then press the "
+            "second button and pick the file you saved."
+        )
+        named = ", ".join(
+            sorted({_credential_label(entry) for entry in self.credential_entries})[:6]
+        )
+        self.credentials_list.configure(
+            text=f"They include: {named}." if named else ""
+        )
+        if not self.credentials_status.cget("text"):
+            self.credentials_status.configure(
+                text="Nothing has been exported yet. You can skip this and sign in "
+                "again on the new machine instead."
+            )
+
+    def _open_credential_manager(self) -> None:
+        from .. import credentials as credentials_mod  # noqa: PLC0415
+
+        opened = credentials_mod.open_manager(self._environment(self._config()))
+        log.info("credential manager: %s", "opened" if opened else "could not open")
+        if opened:
+            self.credentials_status.configure(
+                text="Credential Manager should now be open. Choose 'Back up\u2026', "
+                "then come back and press the second button."
+            )
+        else:
+            self.credentials_status.configure(
+                text="Could not open it. Press Windows+R and run:  "
+                "rundll32.exe keymgr.dll,KRShowKeyMgr"
+            )
+
+    def _pick_credential_backup(self) -> None:
+        from tkinter import filedialog  # noqa: PLC0415
+
+        chosen = filedialog.askopenfilename(
+            title="The file Windows saved",
+            filetypes=[("Credential backup", "*.crd"), ("All files", "*.*")],
+        )
+        if chosen:
+            self._ingest_credential_backup(Path(chosen))
+
+    def _ingest_credential_backup(self, path: Path) -> None:
+        """Stage the user's backup as encrypted-only material.
+
+        The same :func:`winmigrate.credentials.ingest_backup` the command line
+        uses, so there is one answer to what a credential backup is and where
+        it lands. The path is not logged: it names a file holding every saved
+        sign-in they have.
+        """
+        from .. import credentials as credentials_mod  # noqa: PLC0415
+        from . import selection  # noqa: PLC0415
+
+        if self.scan_result is None:
+            return
+        try:
+            item = credentials_mod.ingest_backup(path, self.scan_result)
+        except (OSError, ValueError) as exc:
+            log.info("credential backup refused: %s", exc)
+            self.credentials_status.configure(text=f"That file cannot be used: {exc}")
+            return
+        log.info("credential backup accepted (%s bytes)", item.size_bytes)
+        self.credentials_status.configure(
+            text=f"{path.name} will travel inside the encrypted backup. Delete it "
+            "from this machine once the new one has your sign-ins back."
+        )
+        # The item arrived after the choosing page was built, so the rows are
+        # rebuilt: otherwise it counts as deselected and is silently left out.
+        self.data.rows = selection.rows_for(self.scan_result)
+        self.data.selected.add(item.id)
+        self.credential_backup = path
 
     def _page_passwords(self, page: Any) -> None:
         """The browser password handoff, which only the command line had.
@@ -1205,6 +1354,8 @@ class WinMigrateWizard:
             self._render_rows()
         elif step is Step.PASSWORDS:
             self._render_passwords()
+        elif step is Step.CREDENTIALS:
+            self._render_credentials()
         elif step is Step.DESTINATION:
             if not self.output_var.get():
                 self.output_var.set(str(self._proposed_output()))

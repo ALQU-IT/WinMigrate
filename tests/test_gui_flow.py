@@ -54,7 +54,7 @@ def test_the_rail_follows_the_mode_rather_than_trailing_it(monkeypatch):
     "Finish" appearing twice.
     """
     wizard, _ = open_window(monkeypatch)
-    assert rail(wizard) == ["●  Scan", "○  Choose", "○  Passwords", "○  Destination", "○  Confirm", "○  Finish"]
+    assert rail(wizard) == ["●  Scan", "○  Choose", "○  Passwords", "○  Sign-ins", "○  Destination", "○  Confirm", "○  Finish"]
 
     # Choosing on the first page repaints immediately, without waiting for the
     # page to change.
@@ -64,13 +64,15 @@ def test_the_rail_follows_the_mode_rather_than_trailing_it(monkeypatch):
 
     wizard.mode_var.set(Mode.BACKUP.value)
     wizard._show(Step.CHOOSE)
-    assert rail(wizard) == ["●  Scan", "○  Choose", "○  Passwords", "○  Destination", "○  Confirm", "○  Finish"]
+    assert rail(wizard) == ["●  Scan", "○  Choose", "○  Passwords", "○  Sign-ins", "○  Destination", "○  Confirm", "○  Finish"]
 
 
 def test_the_rail_marks_progress_as_the_pages_advance(monkeypatch):
     wizard, _ = open_window(monkeypatch)
     wizard._show(Step.DESTINATION)
-    assert rail(wizard)[:4] == ["✓  Scan", "✓  Choose", "✓  Passwords", "●  Destination"]
+    assert rail(wizard)[:5] == [
+        "✓  Scan", "✓  Choose", "✓  Passwords", "✓  Sign-ins", "●  Destination",
+    ]
 
 
 # --- the backup branch ------------------------------------------------------
@@ -1515,3 +1517,89 @@ def test_the_uac_cost_is_named_before_the_install_starts_not_during(
 
     note = wizard.software_note.cget("text")
     assert "administrator" in note and "once instead of once per program" in note
+
+
+# --- saved Windows sign-ins -------------------------------------------------
+def test_the_window_offers_the_credential_handoff_the_command_line_had(
+    monkeypatch, profile: Path
+):
+    """A command-line flag is not a feature for the person this tool is for.
+    The handoff needs Windows' own wizard either way, but finding it should not
+    require knowing that --credentials exists."""
+    from winmigrate import credentials as credentials_mod
+
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    wizard._show(Step.SCANNING)
+    assert pump(wizard) == "scanned"
+    monkeypatch.setattr(
+        credentials_mod, "list_credentials",
+        lambda: ([{"target": "Domain:target=fileserver", "type": "Domain Password",
+                   "user": "maria"}], None),
+    )
+    wizard._environment(wizard._config()).is_windows = True
+
+    wizard.credential_entries = [
+        {"target": "Domain:target=fileserver", "type": "Domain Password", "user": "maria"}
+    ]
+    wizard._show(Step.CREDENTIALS)
+
+    intro = wizard.credentials_intro.cget("text")
+    assert "1 saved sign-in" in intro
+    assert "Ctrl+Alt+Del" in intro
+    # Named the way somebody recognises them, not as Windows spells them.
+    assert "fileserver" in wizard.credentials_list.cget("text")
+
+
+def test_a_machine_with_no_saved_sign_ins_says_so_rather_than_nothing(
+    monkeypatch, profile: Path
+):
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    wizard._show(Step.SCANNING)
+    assert pump(wizard) == "scanned"
+    wizard.credential_entries = []
+
+    wizard._show(Step.CREDENTIALS)
+
+    assert "no saved sign-ins" in wizard.credentials_intro.cget("text")
+
+
+def test_the_backup_file_is_staged_and_its_path_never_logged(
+    monkeypatch, profile: Path, tmp_path: Path, caplog
+):
+    """It names a file holding every saved sign-in they have."""
+    import logging
+
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    wizard._show(Step.SCANNING)
+    assert pump(wizard) == "scanned"
+    wizard.credential_entries = []
+    wizard._show(Step.CREDENTIALS)
+
+    backup = tmp_path / "my-sign-ins.crd"
+    backup.write_bytes(b"\x01\x02encrypted")
+    with caplog.at_level(logging.INFO, logger="winmigrate.gui.app"):
+        wizard._ingest_credential_backup(backup)
+
+    staged = [item for item in wizard.scan_result.items if item.id == "credentials:backup"]
+    assert len(staged) == 1
+    # And it is selected, or the one thing they went out of their way to include
+    # would be counted as deselected at capture time.
+    assert "credentials:backup" in wizard.data.selected
+    assert str(backup) not in "\n".join(caplog.messages)
+
+
+def test_a_file_that_is_not_a_credential_backup_is_refused_on_the_page(
+    monkeypatch, profile: Path, tmp_path: Path
+):
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    wizard._show(Step.SCANNING)
+    assert pump(wizard) == "scanned"
+    wizard.credential_entries = []
+    wizard._show(Step.CREDENTIALS)
+
+    wrong = tmp_path / "holiday.jpg"
+    wrong.write_bytes(b"\xff\xd8\xff")
+    wizard._ingest_credential_backup(wrong)
+
+    assert "cannot be used" in wizard.credentials_status.cget("text")
+    assert not [i for i in wizard.scan_result.items if i.id == "credentials:backup"]

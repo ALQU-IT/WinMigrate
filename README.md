@@ -168,8 +168,9 @@ None of it is in a file a backup can copy, because each entry is encrypted
 against the account and machine that made it. So WinMigrate detects what is
 there by name only (`cmdkey /list` prints names and never secrets) and hands off
 to Credential Manager's own Back up wizard, which asks for Ctrl+Alt+Del and a
-password of your choosing and writes the file itself. Give that file to
-`--credentials` and it rides in the encrypted bundle; on the far side it
+password of your choosing and writes the file itself. The window has a page for it, and
+`--credentials` does the same from the command line; either way the file rides
+in the encrypted bundle; on the far side it
 restores next to the matching Restore button. WinMigrate never opens it. Reading
 the store directly would mean `CredEnumerate` and `CryptUnprotectData`, which is
 a credential dumper however politely it is described -- a test asserts those

@@ -36,6 +36,7 @@ def test_the_pages_run_in_the_order_an_installer_taught_everyone():
         Step.SCANNING,
         Step.SELECT,
         Step.PASSWORDS,
+        Step.CREDENTIALS,
         Step.DESTINATION,
         Step.CONFIRM,
         Step.WORKING,
@@ -52,7 +53,8 @@ def test_back_is_not_offered_where_it_would_mean_nothing():
     assert previous_step(Step.WELCOME) is Step.CHOOSE
     assert previous_step(Step.SELECT) is Step.WELCOME
     assert previous_step(Step.PASSWORDS) is Step.SELECT
-    assert previous_step(Step.DESTINATION) is Step.PASSWORDS
+    assert previous_step(Step.CREDENTIALS) is Step.PASSWORDS
+    assert previous_step(Step.DESTINATION) is Step.CREDENTIALS
     assert previous_step(Step.CONFIRM) is Step.DESTINATION
 
 
@@ -134,7 +136,7 @@ def test_the_rail_folds_the_working_pages_into_the_step_they_belong_to():
     assert rail_index(Step.SCANNING) == rail_index(Step.WELCOME)
     assert rail_index(Step.WORKING) == rail_index(Step.CONFIRM)
     assert rail_index(Step.SELECT) == 1
-    assert len(progress_steps()) == 6
+    assert len(progress_steps()) == 7
 
 
 def test_every_page_has_a_heading_and_a_sentence_under_it():
