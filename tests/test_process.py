@@ -133,18 +133,26 @@ def test_a_long_lived_program_is_started_rather_than_waited_for(tmp_path):
     Restoring a backup stopped there: taskkill returned, the launcher
     returned, Explorer held the pipe, and the log simply stopped.
     """
+    import sys
     import time
 
     marker = tmp_path / "started"
     # A launcher that exits at once, leaving a grandchild holding the handles.
-    grandchild = (
+    #
+    # The path travels as an argument, never inside the source. Written into a
+    # string literal it breaks on Windows and nowhere else: a temp path there
+    # is C:\Users\..., and \U inside a non-raw literal starts a unicode
+    # escape, so the launcher dies of a syntax error before starting anything
+    # and the test reports the failure it was built to catch.
+    launcher = (
         "import subprocess, sys; "
-        f"subprocess.Popen([sys.executable, '-c', "
-        f"\"import time; open(r'{marker}', 'w').close(); time.sleep(30)\"])"
+        "subprocess.Popen([sys.executable, '-c', "
+        "'import sys, time; open(sys.argv[1], \"w\").close(); time.sleep(15)', "
+        "sys.argv[1]])"
     )
 
     began = time.monotonic()
-    error = process.spawn(_python(grandchild))
+    error = process.spawn([sys.executable, "-c", launcher, str(marker)])
     elapsed = time.monotonic() - began
 
     assert error is None
