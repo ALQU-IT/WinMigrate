@@ -223,3 +223,22 @@ def test_nothing_is_launched_off_windows(tmp_path):
 
     assert winlaunch.launch(Path(tmp_path / "brave.exe"), ["x"]) is False
     assert winlaunch.launch_as_shell_user(Path(tmp_path / "brave.exe"), ["x"]) is False
+
+
+# --- elevating one step, in the middle of the wizard ------------------------
+def test_one_step_can_be_elevated_without_restarting_the_program(monkeypatch):
+    """The tick on the first page restarts the whole program, which is right
+    before anything has been done and wrong afterwards: a restore that has
+    finished is exactly what the restart would throw away. So the install
+    button elevates winget alone -- the same single prompt, the same elevated
+    install, and the report still on screen behind it."""
+    monkeypatch.setattr(elevate, "is_windows", lambda: False)
+    assert elevate.start_elevated("winget", ["import", "-i", "x.json"]) is None
+    assert elevate.wait_for(4242) is None
+
+
+def test_waiting_on_nothing_is_not_an_error(monkeypatch):
+    """A refused prompt hands back no handle. Waiting on it must return rather
+    than reach into ctypes with a zero."""
+    monkeypatch.setattr(elevate, "is_windows", lambda: True)
+    assert elevate.wait_for(0) is None

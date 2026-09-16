@@ -2257,11 +2257,11 @@ class WinMigrateWizard:
         # somebody to press a button that cannot work.
         if not self._can_install_programs():
             self.software_note.configure(
-                text="This is not running as administrator, so most of these cannot "
-                "be installed \u2014 winget installs programs for the whole machine, "
-                "which needs permission. Close this, start it again as administrator, "
-                "and tick 'Also install my programs' on the first page. Your files, "
-                "settings and taskbar are already back and stay back."
+                text="Windows will ask for permission once when you press Install, "
+                "and then nothing else will interrupt: the installers run with "
+                "administrator rights, in their own window, without asking again "
+                "for each program. Your files, settings and taskbar are already "
+                "back either way."
             )
         else:
             self.software_note.configure(
@@ -2292,22 +2292,67 @@ class WinMigrateWizard:
         from ..util import process  # noqa: PLC0415
 
         try:
-            result = process.stream(
-                reinstall_mod.import_command(import_file),
-                lambda line: self.events.put(("install-line", line)),
-                timeout=reinstall_mod.WINGET_IMPORT_TIMEOUT,
-                cancelled=self._install_stop.is_set,
-            )
+            command = reinstall_mod.import_command(import_file)
+            if self._can_install_programs():
+                result = process.stream(
+                    command,
+                    lambda line: self.events.put(("install-line", line)),
+                    timeout=reinstall_mod.WINGET_IMPORT_TIMEOUT,
+                    cancelled=self._install_stop.is_set,
+                )
+            else:
+                result = self._install_elevated(command)
             self.events.put(("installed", result))
         except Exception as exc:  # noqa: BLE001 -- surfaced in the window
             log.warning("the install could not be run", exc_info=True)
             self.events.put(("install-failed", str(exc)))
 
+    def _install_elevated(self, command: list[str]):
+        """Install with administrator rights, asked for here rather than earlier.
+
+        The tick on the first page is the tidy way: agree before anything has
+        been done, and the whole program comes back elevated. But somebody who
+        did not tick it -- or did not know yet that there was software to
+        install -- reaches this button and presses it, and restarting the
+        program now would throw away the restore that just finished.
+
+        So winget alone is elevated. Windows asks, winget runs in its own
+        window, and this waits for it. Its own window rather than this one's
+        output is not a compromise: winget showing its own progress beats a bar
+        somebody has to trust, and there is no pipe for it to inherit.
+        """
+        from ..util import process  # noqa: PLC0415
+
+        self.events.put(
+            ("install-line", "Asking Windows for permission to install\u2026")
+        )
+        handle = elevate.start_elevated(command[0], command[1:])
+        if handle is None:
+            log.info("elevation declined; nothing was installed")
+            return process.CommandResult(command, None, error="declined")
+        self.events.put(
+            ("install-line",
+             "Installing with administrator rights, in its own window. "
+             "This one will say when it has finished.")
+        )
+        code = elevate.wait_for(handle, waiting=lambda: not self._install_stop.is_set())
+        if code is None:
+            return process.CommandResult(command, None, error="stopped")
+        return process.CommandResult(command, code, "")
+
     def _stop_install(self) -> None:
-        """Stop at the next line. What is installed stays installed."""
+        """Stop at the next line. What is installed stays installed.
+
+        When the install is running with administrator rights, in its own
+        window, this stops *watching* it -- a program without those rights
+        cannot stop one that has them. Saying so beats a button that looks like
+        it did something.
+        """
         self._install_stop.set()
         self.install_status.configure(
             text="Stopping after the package that is running\u2026"
+            if self._can_install_programs()
+            else "No longer watching. Close the administrator window to stop it."
         )
         log.info("install stopped by the user")
 
@@ -2323,8 +2368,25 @@ class WinMigrateWizard:
                 "Install 'App Installer' from the Microsoft Store and run the command "
                 "below.",
             ]
+        if result.error == "declined":
+            return [
+                "",
+                "Software: nothing was installed \u2014 Windows was not given "
+                "permission. Press Install again and choose Yes, or run the "
+                "command below yourself.",
+            ]
         if result.error == "stopped":
-            return ["", "Software: you stopped the install. What had finished is installed."]
+            if self._can_install_programs():
+                return [
+                    "",
+                    "Software: you stopped the install. What had finished is installed.",
+                ]
+            # The elevated one is in a window this process cannot close.
+            return [
+                "",
+                "Software: you stopped watching the install. It is still running in "
+                "its own window \u2014 close that window to stop it.",
+            ]
         if result.error:
             return ["", f"\u26a0 Software: the install did not finish \u2014 {result.error}"]
         if result.returncode:

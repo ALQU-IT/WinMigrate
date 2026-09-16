@@ -1479,7 +1479,120 @@ def test_stopping_an_install_says_what_is_already_installed_stays(
     assert pump(wizard, until=("installed", "install-failed")) == "installed"
 
     assert "you stopped the install" in wizard.restore_done_text.cget("text")
-    assert "what had finished is installed" in wizard.restore_done_text.cget("text").lower()
+    assert "had finished is installed" in wizard.restore_done_text.cget("text").lower()
+
+
+def test_the_install_asks_windows_for_the_rights_it_has_not_got(
+    monkeypatch, bundle: Path, tmp_path: Path
+):
+    """The button has to do what it says. Without administrator rights winget
+    installs nothing, so pressing Install has to produce the UAC prompt -- not
+    run winget anyway and report ninety-seven failures."""
+    from winmigrate.gui import elevate
+    from winmigrate.util import process
+
+    monkeypatch.setattr(elevate, "is_windows", lambda: True)
+    monkeypatch.setattr(elevate, "is_elevated", lambda: False)
+    wizard = _finished_restore(monkeypatch, bundle, tmp_path)
+    import_file = _with_software(wizard, tmp_path, ["Mozilla.Firefox"])
+
+    def refuse_stream(*a, **k):  # pragma: no cover -- the point is it is not called
+        raise AssertionError("winget was run without the rights to install anything")
+
+    started: list[tuple[str, list[str]]] = []
+    monkeypatch.setattr(process, "stream", refuse_stream)
+    monkeypatch.setattr(
+        elevate, "start_elevated",
+        lambda executable, arguments: started.append((executable, arguments)) or 4242,
+    )
+    monkeypatch.setattr(elevate, "wait_for", lambda handle, waiting=None, **k: 0)
+
+    wizard._show(Step.INSTALLING)
+    assert pump(wizard, until=("installed", "install-failed")) == "installed"
+
+    assert len(started) == 1
+    executable, arguments = started[0]
+    assert executable == "winget"
+    # The same import, elevated. A different file here would install nothing
+    # the restore prepared.
+    assert str(import_file) in arguments
+    assert "winget installed everything" in wizard.restore_done_text.cget("text")
+    # And the window said what the dialog was for before it appeared.
+    assert "permission" in written(wizard.install_output).lower()
+
+
+def test_a_refused_uac_prompt_says_nothing_was_installed(
+    monkeypatch, bundle: Path, tmp_path: Path
+):
+    """Pressing No is a choice, not a crash. But the page must not then read as
+    if the programs went on, or the user stops looking for them."""
+    from winmigrate.gui import elevate
+    from winmigrate.util import process
+
+    monkeypatch.setattr(elevate, "is_windows", lambda: True)
+    monkeypatch.setattr(elevate, "is_elevated", lambda: False)
+    wizard = _finished_restore(monkeypatch, bundle, tmp_path)
+    _with_software(wizard, tmp_path, ["Mozilla.Firefox"])
+
+    monkeypatch.setattr(process, "stream", lambda *a, **k: None)
+    monkeypatch.setattr(elevate, "start_elevated", lambda executable, arguments: None)
+
+    wizard._show(Step.INSTALLING)
+    assert pump(wizard, until=("installed", "install-failed")) == "installed"
+
+    text = wizard.restore_done_text.cget("text")
+    assert "nothing was installed" in text
+    assert "permission" in text
+    # The way back, so a mis-click is not the end of it.
+    assert "again" in text
+
+
+def test_stopping_an_elevated_install_admits_it_cannot_stop_it(
+    monkeypatch, bundle: Path, tmp_path: Path
+):
+    """A program without administrator rights cannot kill one that has them.
+    Stop here stops watching, and a button that claims more than it does is
+    worse than one that admits the limit."""
+    from winmigrate.gui import elevate
+    from winmigrate.util import process
+
+    monkeypatch.setattr(elevate, "is_windows", lambda: True)
+    monkeypatch.setattr(elevate, "is_elevated", lambda: False)
+    wizard = _finished_restore(monkeypatch, bundle, tmp_path)
+    _with_software(wizard, tmp_path, ["Mozilla.Firefox"])
+
+    monkeypatch.setattr(process, "stream", lambda *a, **k: None)
+    monkeypatch.setattr(elevate, "start_elevated", lambda executable, arguments: 4242)
+    # Gave up waiting, which is what wait_for returns None for.
+    monkeypatch.setattr(elevate, "wait_for", lambda handle, waiting=None, **k: None)
+
+    wizard._show(Step.INSTALLING)
+    assert pump(wizard, until=("installed", "install-failed")) == "installed"
+
+    text = wizard.restore_done_text.cget("text")
+    assert "stopped watching" in text
+    assert "its own window" in text
+
+
+def test_the_stop_button_says_watching_is_all_it_can_stop(
+    monkeypatch, bundle: Path, tmp_path: Path
+):
+    """The same admission, at the moment the button is pressed rather than on
+    the page afterwards."""
+    from winmigrate.gui import elevate
+
+    monkeypatch.setattr(elevate, "is_windows", lambda: True)
+    monkeypatch.setattr(elevate, "is_elevated", lambda: False)
+    wizard = _finished_restore(monkeypatch, bundle, tmp_path)
+    _with_software(wizard, tmp_path, ["Mozilla.Firefox"])
+
+    wizard._stop_install()
+
+    assert "No longer watching" in wizard.install_status.cget("text")
+
+    monkeypatch.setattr(elevate, "is_elevated", lambda: True)
+    wizard._stop_install()
+    assert "Stopping after the package" in wizard.install_status.cget("text")
 
 
 def test_a_machine_without_winget_is_told_so_rather_than_left_guessing(
@@ -1502,12 +1615,12 @@ def test_a_machine_without_winget_is_told_so_rather_than_left_guessing(
     assert "App Installer" in text
 
 
-def test_a_restore_without_the_rights_says_so_rather_than_offering_a_dead_button(
+def test_a_restore_without_the_rights_says_permission_is_asked_once(
     monkeypatch, bundle: Path, tmp_path: Path
 ):
-    """winget installs programs for the whole machine, which needs permission.
-    Saying "Windows will ask" invites somebody to press a button that cannot
-    work; saying what to do instead costs the same line."""
+    """The worry being answered is not "will this work" but "am I about to be
+    asked ninety-seven times". Saying it is asked once, and then not again, is
+    the sentence that matters."""
     from winmigrate.gui import elevate
 
     monkeypatch.setattr(elevate, "is_windows", lambda: True)
@@ -1518,8 +1631,8 @@ def test_a_restore_without_the_rights_says_so_rather_than_offering_a_dead_button
     wizard._show(Step.SOFTWARE)
 
     note = wizard.software_note.cget("text")
-    assert "cannot" in note and "administrator" in note
-    # And it says the part that stops this reading as a failed migration.
+    assert "once" in note and "without asking again" in note
+    # And the part that stops this reading as a failed migration.
     assert "already back" in note
 
 
