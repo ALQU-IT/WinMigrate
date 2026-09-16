@@ -304,6 +304,165 @@ def apply_environment(record: dict[str, Any], env=None) -> list[Result]:
     return results
 
 
+# --- how Windows looks and responds ----------------------------------------
+#: Settings that only take effect once Windows is told, rather than at the next
+#: sign-in. SystemParametersInfoW takes each as an action code; passing the
+#: value it already holds is a no-op, so telling Windows about all of them is
+#: cheaper than working out which ones changed.
+_SPI_SETDOUBLECLICKTIME = 0x0020
+_SPI_SETMOUSEBUTTONSWAP = 0x0021
+_SPI_SETKEYBOARDDELAY = 0x0017
+_SPI_SETKEYBOARDSPEED = 0x000B
+
+
+def apply_personalization(record: dict[str, Any], env=None) -> list[Result]:
+    """Put back the settings that make a machine feel like the old one.
+
+    Written value by value rather than key by key, and only the values that
+    were actually captured. A setting the old machine never had is not written
+    as a zero here: absent and "off" are different answers, and a restore that
+    turns them into each other is inventing settings nobody chose.
+
+    Type is taken from the value itself. Windows stores these as a mix of
+    numbers and strings -- ``AccentColor`` is a DWORD, ``sShortDate`` is text --
+    and writing one as the other leaves Windows reading a value it will not act
+    on, which looks exactly like the setting not having travelled.
+    """
+    if env is None:  # pragma: no cover -- the live path
+        from .platform_win import Environment  # noqa: PLC0415
+
+        env = Environment.live()
+
+    from .scan.personalization import SETTINGS  # noqa: PLC0415
+
+    by_slot = {setting.slot: setting for setting in SETTINGS}
+    captured = record.get("settings")
+    if not isinstance(captured, dict):
+        return []
+
+    results: list[Result] = []
+    for slot, values in sorted(captured.items()):
+        setting = by_slot.get(slot)
+        if setting is None:
+            # A bundle from a newer version knows about a setting this one does
+            # not. Saying so beats writing registry values by a name we cannot
+            # explain to the person whose machine it is.
+            results.append(
+                Result("setting", slot, Outcome.SKIPPED,
+                       "this version does not know what that setting is")
+            )
+            continue
+        if not isinstance(values, dict):
+            continue
+        results.append(_write_setting(env, setting, values))
+
+    if any(result.outcome is Outcome.APPLIED for result in results):
+        _tell_windows_now(captured)
+    return results
+
+
+def _write_setting(env, setting, values: dict[str, Any]) -> Result:
+    r"""Write one setting's values, refusing anything the table did not ask for.
+
+    The record comes out of a bundle, and a bundle is a file from another
+    machine. Checking each name against the table again here means a record
+    naming ``Control Panel\Desktop\Wallpaper``, or something from a key this
+    one never listed, is dropped rather than written because the slot it
+    arrived under was a real one.
+    """
+    written = 0
+    refused: list[str] = []
+    for name, value in sorted(values.items()):
+        if not setting.wanted(name):
+            refused.append(name)
+            continue
+        if not _safe_setting_value(setting, name, value):
+            refused.append(name)
+            continue
+        try:
+            if isinstance(value, bool) or isinstance(value, int):
+                ok = env.write_registry_dword(setting.hive, setting.key, name, int(value))
+            elif isinstance(value, str):
+                ok = env.write_registry_value(setting.hive, setting.key, name, value)
+            else:
+                refused.append(name)
+                continue
+        except Exception as exc:  # noqa: BLE001
+            return Result("setting", setting.title, Outcome.FAILED, str(exc))
+        written += int(bool(ok))
+
+    if not written:
+        return Result("setting", setting.title, Outcome.SKIPPED,
+                      "nothing in it could be written")
+    detail = f"{written} value(s)"
+    if refused:
+        detail += f"; {len(refused)} not carried ({', '.join(sorted(refused)[:3])})"
+    return Result("setting", setting.title, Outcome.APPLIED, detail)
+
+
+#: The screen saver is the one personalisation value that names a program, so
+#: it is the one that has to be checked rather than trusted.
+_SCREENSAVER_VALUE = "SCRNSAVE.EXE"
+
+
+def _safe_setting_value(setting, name: str, value: Any) -> bool:
+    """Is this value safe to write as it stands?
+
+    Almost all of them are numbers, colours and format strings, where the worst
+    a wrong one does is look wrong. The exception is the screen saver, which
+    names an executable that Windows will later run: a bundle that could put an
+    arbitrary path there would have turned a backup into a way of starting a
+    program on somebody else's machine. Only a ``.scr`` in a Windows directory
+    is accepted, which is what a screen saver is.
+    """
+    if name != _SCREENSAVER_VALUE:
+        return True
+    if not isinstance(value, str) or not value.strip():
+        return False
+    plain = value.strip().strip('"')
+    if not plain.lower().endswith(".scr"):
+        return False
+    # A bare name resolves against the system directory, which is where the
+    # ones that ship with Windows live. A path has to be inside Windows itself.
+    lowered = plain.replace("/", "\\").lower()
+    if "\\" not in lowered:
+        return True
+    return lowered.startswith("c:\\windows\\") or lowered.startswith("%windir%\\")
+
+
+def _tell_windows_now(captured: dict) -> None:
+    """Ask Windows to act on the settings it does not re-read by itself.
+
+    Best effort, and deliberately quiet: everything written above is in the
+    registry and will be read at the next sign-in regardless. This is the
+    difference between the mouse behaving correctly now and behaving correctly
+    tomorrow.
+    """
+    if not is_windows():
+        return
+    mouse = captured.get("mouse") or {}
+    keyboard = captured.get("keyboard_speed") or {}
+    actions = [
+        (_SPI_SETDOUBLECLICKTIME, mouse.get("DoubleClickSpeed")),
+        (_SPI_SETMOUSEBUTTONSWAP, mouse.get("SwapMouseButtons")),
+        (_SPI_SETKEYBOARDDELAY, keyboard.get("KeyboardDelay")),
+        (_SPI_SETKEYBOARDSPEED, keyboard.get("KeyboardSpeed")),
+    ]
+    try:
+        import ctypes  # noqa: PLC0415
+
+        for action, raw in actions:
+            if raw is None:
+                continue
+            try:
+                number = int(str(raw))
+            except (TypeError, ValueError):
+                continue
+            ctypes.windll.user32.SystemParametersInfoW(action, number, None, 0)
+    except Exception as exc:  # noqa: BLE001 -- a setting is never worth an exception
+        log.debug("could not tell Windows about the new settings: %s", exc)
+
+
 # --- the desktop background ------------------------------------------------
 #: Windows keeps these in three places; see :mod:`winmigrate.scan.wallpaper`.
 DESKTOP_KEY = r"Control Panel\Desktop"

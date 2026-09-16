@@ -160,6 +160,18 @@ Microsoft's Office Deployment Tool.
 
 ## What it will not do
 
+How Windows looks and responds travels with you. Ease of Access first --
+sticky keys, high contrast, the magnifier, text size, pointer size -- because
+somebody who spent an afternoon making the screen readable does not experience
+losing it as a setting that failed to migrate, they experience it as the new
+computer being unusable. Then keyboard layout and region (a Swiss keyboard that
+comes back as a US one puts the letters in the wrong places, including in the
+box asking for a password), light or dark and the accent colour, mouse and
+double-click speed, keyboard repeat, the sound scheme, the screen saver, which
+icons are on the desktop, and File Explorer's own settings. Each one is carried
+by name, never by key: a registry key is a shared drawer, and carrying the whole
+of one means carrying whatever Microsoft puts in it next.
+
 Your desktop background travels, including when it isn't a picture. A picture
 you chose is carried as the file you chose -- not the re-encoded copy Windows
 keeps in AppData -- and is set as the background on the new machine, style and

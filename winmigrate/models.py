@@ -31,6 +31,7 @@ class Category(str, Enum):
     NOTEPAD = "notepad"
     DISPLAYS = "displays"
     WALLPAPER = "wallpaper"
+    PERSONALIZATION = "personalization"
     DEV_CONFIG = "dev_config"
     FILE_ASSOCIATIONS = "file_associations"
     SOFTWARE = "software"

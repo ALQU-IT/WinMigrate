@@ -110,6 +110,7 @@ def run_scan(
     _scan_notepad(env, result, config, progress)
     _scan_displays(env, result, progress)
     _scan_wallpaper(env, result, config, progress)
+    _scan_personalization(env, result, progress)
     _note_long_paths(result, long_paths)
 
     result.duration_seconds = time.monotonic() - started
@@ -637,6 +638,18 @@ def _scan_wallpaper(
     # the same accounting as everything else so the size on the confirm page is
     # the size of the bundle.
     _measure_capture_items(items, config, env)
+    result.items.extend(items)
+    result.followups.extend(followups)
+
+
+def _scan_personalization(
+    env: Environment, result: ScanResult, progress: ProgressCallback | None
+) -> None:
+    """Carry how Windows looks and responds: Ease of Access, layout, colours."""
+    from . import personalization as personalization_mod  # noqa: PLC0415 -- optional stage
+
+    _emit(progress, "Reading how Windows is set up")
+    items, followups = personalization_mod.scan_personalization(env)
     result.items.extend(items)
     result.followups.extend(followups)
 

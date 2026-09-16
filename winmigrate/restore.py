@@ -397,6 +397,10 @@ def _apply_settings(report: RestoreReport, destination: Path, wanted: tuple[str,
             report.applied.extend(apply_mod.apply_mapped_drives(records["settings:mapped_drives"]))
         if "settings:env_vars" in records:
             report.applied.extend(apply_mod.apply_environment(records["settings:env_vars"]))
+        if "settings:personalization" in records:
+            report.applied.extend(
+                apply_mod.apply_personalization(records["settings:personalization"])
+            )
         if "settings:wallpaper" in records:
             report.applied.extend(
                 apply_mod.apply_wallpaper(
