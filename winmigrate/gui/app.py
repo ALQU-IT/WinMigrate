@@ -2681,15 +2681,13 @@ class WinMigrateWizard:
     def _program_name(self) -> str:
         """What to call this program in an instruction the user has to type.
 
-        A frozen build is an .exe with whatever name it was given; telling
-        somebody running WinMigrate.exe to type "winmigrate" is telling them to
-        type something their machine does not have.
+        Not the running executable. In the window that is WinMigrate.exe, which
+        is a windowed binary with no console and cannot run a command at all --
+        so this used to print an instruction that opened the backup wizard.
         """
-        import sys  # noqa: PLC0415
+        from .. import reinstall as reinstall_mod  # noqa: PLC0415
 
-        if getattr(sys, "frozen", False):
-            return Path(sys.executable).name
-        return "winmigrate"
+        return reinstall_mod.console_command()
 
     def _open_reinstall_folder(self) -> None:
         artifacts = getattr(self.restore_report, "artifacts", None)

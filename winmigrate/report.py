@@ -420,8 +420,10 @@ def render_restore_report(report, console: Console, *, dry_run: bool | None = No
         if artifacts.office_configuration:
             lines.append("an Office configuration matching the old install was written")
         lines.append(f"files: [bold]{artifacts.directory}[/bold]")
+        from .reinstall import console_command  # noqa: PLC0415
+
         lines.append(
-            "run [bold]winmigrate reinstall "
+            f"run [bold]{console_command()} reinstall "
             f'"{artifacts.directory}"[/bold] when you are ready'
         )
         console.print(

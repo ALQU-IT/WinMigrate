@@ -134,6 +134,40 @@ def write_artifacts(manifest: dict[str, Any], destination: Path) -> Artifacts:
     return artifacts
 
 
+#: The console build's name in the shipped package. The window is
+#: WinMigrate.exe and cannot run commands: it is a windowed binary with no
+#: console, so anything it printed would go nowhere.
+CONSOLE_BUILD = "winmigrate-cli.exe"
+
+
+def console_command() -> str:
+    """How to name this program in an instruction somebody has to type.
+
+    Getting this wrong is not a cosmetic matter. The restore report prints a
+    command for reinstalling the software, and it printed the name of the
+    running executable -- which, in the window, is WinMigrate.exe. Typing that
+    with "reinstall" after it opened the wizard on its first page, offering to
+    back the machine up. Somebody who came to install their programs was handed
+    a backup wizard, and it looked like a working program the whole time.
+
+    The package ships two binaries: the window, and the console build beside
+    it. Only the second can run a command, so that is the one to name -- by
+    full path, because the person reading this is not necessarily sitting in
+    that folder.
+    """
+    import sys  # noqa: PLC0415
+
+    if not getattr(sys, "frozen", False):
+        return "winmigrate"
+    beside = Path(sys.executable).with_name(CONSOLE_BUILD)
+    if beside.is_file():
+        return f'"{beside}"' if " " in str(beside) else str(beside)
+    # No console build next to us. Naming a file that is not there is worse
+    # than naming the window, which now explains itself when asked to run a
+    # command it cannot.
+    return Path(sys.executable).name
+
+
 def without_versions(export: Any) -> Any:
     """The export with each package's pinned version taken out.
 
