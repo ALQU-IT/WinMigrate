@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from winmigrate import apply as apply_mod
+from winmigrate.apply import Outcome
 from winmigrate import capture as capture_mod
 from winmigrate import manifest as manifest_mod
 from winmigrate import restore as restore_mod
@@ -434,3 +436,229 @@ def test_local_state_that_is_not_json_does_not_cost_the_name(tmp_path: Path):
     )
 
     assert _chromium_profile_name(profile) == "Personal"
+
+
+# --- the browser's own list of which profiles exist -------------------------
+def _brave(profile: Path, folders: dict[str, str], extra: dict | None = None) -> Path:
+    """A Brave user-data directory with the given folders and display names."""
+    user_data = profile / "AppData/Local/BraveSoftware/Brave-Browser/User Data"
+    for folder in folders:
+        (user_data / folder).mkdir(parents=True, exist_ok=True)
+        (user_data / folder / "Preferences").write_text(
+            json.dumps({"profile": {"name": "Person 1"}}), encoding="utf-8"
+        )
+    state = {
+        "profile": {
+            "info_cache": {f: {"name": n} for f, n in folders.items()},
+            "profiles_order": list(folders),
+        }
+    }
+    state.update(extra or {})
+    (user_data / "Local State").write_text(json.dumps(state), encoding="utf-8")
+    return user_data
+
+
+def test_a_second_profile_is_on_disk_and_invisible_without_the_browsers_own_list(tmp_path):
+    """The bug, stated as a test. Chromium reads which profiles exist from
+    Local State, which sits *beside* the profile folders rather than inside
+    one. Restoring only the folders leaves the second profile complete on disk
+    and absent from the browser -- "it only copied one of my two profiles"."""
+    profile = tmp_path / "alice"
+    _brave(profile, {"Default": "private", "Profile 1": "Demo Work"})
+    env = Environment.fixture(profile, {})
+
+    items, _followups, _notes = browsers.scan_browsers(env)
+    listing = [i for i in items if i.id == "browser:brave:profile_list"]
+
+    assert len(listing) == 1
+    record = listing[0].record
+    assert sorted(record["profiles"]) == ["Default", "Profile 1"]
+    assert record["profiles"]["Profile 1"]["name"] == "Demo Work"
+    assert record["user_data"].endswith("Brave-Browser/User Data")
+
+
+def test_the_password_store_key_is_never_read_let_alone_carried(tmp_path):
+    """Local State also holds os_crypt.encrypted_key -- the DPAPI-wrapped key
+    for the password and cookie stores. Neither store is captured and the key
+    has no business in a bundle either.
+
+    The record is *built* from the profile list rather than filtered out of the
+    file, so a future Chromium putting something new in there cannot be carried
+    by an oversight."""
+    profile = tmp_path / "alice"
+    _brave(profile, {"Default": "private"},
+           extra={"os_crypt": {"encrypted_key": "SECRET-KEY"}, "browser": {"x": 1}})
+    env = Environment.fixture(profile, {})
+
+    items, _f, _n = browsers.scan_browsers(env)
+    listing = [i for i in items if i.id == "browser:brave:profile_list"][0]
+
+    assert "SECRET-KEY" not in json.dumps(listing.record)
+    assert set(listing.record) == {"user_data", "profiles"}
+    # And it is encrypted-only, like the profile folders it describes.
+    assert listing.sensitivity is Sensitivity.SECRET
+
+
+def test_the_list_is_merged_into_the_new_machines_own(tmp_path):
+    """The file on the new machine belongs to the browser already installed on
+    it: its profiles, its settings, and the wrapped key for its password store.
+    Overwriting it would take all three away and hand Chromium a key this
+    machine's DPAPI cannot unwrap."""
+    destination = tmp_path / "new"
+    relative = "AppData/Local/BraveSoftware/Brave-Browser/User Data"
+    user_data = destination / relative
+    for folder in ("Default", "Profile 1"):
+        (user_data / folder).mkdir(parents=True)
+    (user_data / "Local State").write_text(
+        json.dumps({
+            "profile": {"info_cache": {"Default": {"name": "Person 1"}},
+                        "profiles_order": ["Default"]},
+            "os_crypt": {"encrypted_key": "THIS-MACHINES-KEY"},
+            "browser": {"its_own_setting": 42},
+        }),
+        encoding="utf-8",
+    )
+    record = {
+        "user_data": relative,
+        "profiles": {"Default": {"name": "private"},
+                     "Profile 1": {"name": "Demo Work"}},
+    }
+
+    results = apply_mod.apply_browser_profiles(record, destination)
+
+    assert [r.outcome for r in results] == [Outcome.APPLIED]
+    state = json.loads((user_data / "Local State").read_text(encoding="utf-8"))
+    assert state["os_crypt"]["encrypted_key"] == "THIS-MACHINES-KEY"
+    assert state["browser"] == {"its_own_setting": 42}
+    assert sorted(state["profile"]["info_cache"]) == ["Default", "Profile 1"]
+    # Newer Chromium hides a profile missing from this list even with a good
+    # info_cache entry.
+    assert state["profile"]["profiles_order"] == ["Default", "Profile 1"]
+
+
+def test_a_restored_profile_keeps_the_name_the_user_knows_it_by(tmp_path):
+    """The new machine made its own "Default" on first run and called it
+    "Person 1". Its contents are the old machine's by the time this runs, so
+    leaving the label alone restores the profile and not the profile's
+    identity."""
+    destination = tmp_path / "new"
+    relative = "AppData/Local/BraveSoftware/Brave-Browser/User Data"
+    user_data = destination / relative
+    (user_data / "Default").mkdir(parents=True)
+    (user_data / "Local State").write_text(
+        json.dumps({"profile": {"info_cache": {
+            "Default": {"name": "Person 1", "avatar_icon": "one-this-machine-chose"}
+        }}}),
+        encoding="utf-8",
+    )
+    record = {"user_data": relative, "profiles": {"Default": {"name": "private"}}}
+
+    apply_mod.apply_browser_profiles(record, destination)
+
+    entry = json.loads((user_data / "Local State").read_text(encoding="utf-8"))["profile"]["info_cache"]["Default"]
+    assert entry["name"] == "private"
+    # Anything the bundle has no opinion about stays as the new machine set it.
+    assert entry["avatar_icon"] == "one-this-machine-chose"
+
+
+def test_a_profile_that_was_not_restored_is_not_announced_to_the_browser(tmp_path):
+    """Listing a folder that is not there gives the user a profile in the
+    switcher that opens empty, which is worse than not offering it."""
+    destination = tmp_path / "new"
+    relative = "AppData/Local/BraveSoftware/Brave-Browser/User Data"
+    (destination / relative / "Default").mkdir(parents=True)
+    record = {
+        "user_data": relative,
+        "profiles": {"Default": {"name": "private"}, "Profile 9": {"name": "never restored"}},
+    }
+
+    apply_mod.apply_browser_profiles(record, destination)
+
+    state = json.loads((destination / relative / "Local State").read_text(encoding="utf-8"))
+    assert sorted(state["profile"]["info_cache"]) == ["Default"]
+
+
+def test_a_machine_with_no_browser_yet_gets_a_list_of_its_own(tmp_path):
+    """Restoring before installing the browser is an ordinary order to do it
+    in. Chromium fills in the rest of the file itself, and there is nothing
+    here to lose."""
+    destination = tmp_path / "new"
+    relative = "AppData/Local/BraveSoftware/Brave-Browser/User Data"
+    (destination / relative / "Profile 1").mkdir(parents=True)
+    record = {"user_data": relative, "profiles": {"Profile 1": {"name": "Demo Work"}}}
+
+    results = apply_mod.apply_browser_profiles(record, destination)
+
+    assert [r.outcome for r in results] == [Outcome.APPLIED]
+    state = json.loads((destination / relative / "Local State").read_text(encoding="utf-8"))
+    assert state["profile"]["info_cache"]["Profile 1"]["name"] == "Demo Work"
+
+
+@pytest.mark.parametrize(
+    "record",
+    [{}, {"user_data": ""}, {"user_data": "x", "profiles": {}},
+     {"user_data": "x", "profiles": "nonsense"}, {"profiles": {"a": {}}}],
+)
+def test_a_record_shaped_wrongly_costs_the_restore_nothing(record, tmp_path):
+    """The record comes out of a bundle, which is a file from another machine."""
+    assert apply_mod.apply_browser_profiles(record, tmp_path) == []
+
+
+def test_an_unreadable_list_on_the_new_machine_is_replaced_not_raised(tmp_path):
+    """A half-written Local State -- the browser was killed mid-save -- must
+    not take the restore down with it."""
+    destination = tmp_path / "new"
+    relative = "AppData/Local/BraveSoftware/Brave-Browser/User Data"
+    (destination / relative / "Default").mkdir(parents=True)
+    (destination / relative / "Local State").write_text("{not json", encoding="utf-8")
+    record = {"user_data": relative, "profiles": {"Default": {"name": "private"}}}
+
+    results = apply_mod.apply_browser_profiles(record, destination)
+
+    assert [r.outcome for r in results] == [Outcome.APPLIED]
+    state = json.loads((destination / relative / "Local State").read_text(encoding="utf-8"))
+    assert state["profile"]["info_cache"]["Default"]["name"] == "private"
+
+
+def test_both_profiles_survive_a_whole_backup_and_restore(tmp_path):
+    """The bug end to end, through the real capture and the real restore.
+
+    The unit tests above check the pieces; this checks that the restore
+    actually calls the piece that puts the list back. It did not, at first --
+    the item was captured, the applier worked, and nothing joined them up, so
+    the second profile still arrived invisible.
+    """
+    source = tmp_path / "old"
+    user_data = _brave(source, {"Default": "private", "Profile 1": "Demo Work"},
+                       extra={"os_crypt": {"encrypted_key": "OLD-MACHINE-KEY"}})
+    for folder in ("Default", "Profile 1"):
+        (user_data / folder / "Bookmarks").write_text("{}", encoding="utf-8")
+
+    env = Environment.fixture(source, {})
+    config = ScanConfig(profile_root=source, include_software=False)
+    scan = run_scan(config, env)
+    bundle = tmp_path / "b.dat"
+    capture_mod.capture(
+        scan, CaptureOptions(output=bundle, passphrase=PASSPHRASE, use_vss=False), config, env
+    )
+
+    destination = tmp_path / "new"
+    destination.mkdir()
+    report = restore_mod.restore(
+        RestoreOptions(bundle=bundle, passphrase=PASSPHRASE, destination=destination)
+    )
+    assert report.ok
+
+    relative = "AppData/Local/BraveSoftware/Brave-Browser/User Data"
+    state = json.loads(
+        (destination / relative / "Local State").read_text(encoding="utf-8")
+    )
+    assert sorted(state["profile"]["info_cache"]) == ["Default", "Profile 1"]
+    assert {f: e["name"] for f, e in state["profile"]["info_cache"].items()} == {
+        "Default": "private", "Profile 1": "Demo Work"
+    }
+    # The report says it happened, because a restore that shows its work is
+    # the premise of the tool.
+    assert any(r.kind == "browser" and r.ok for r in report.applied)
+    # And the old machine's password-store key went nowhere near the bundle.
+    assert b"OLD-MACHINE-KEY" not in bundle.read_bytes()

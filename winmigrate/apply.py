@@ -604,6 +604,99 @@ def supersede(applied: list[Result], fresh: list[Result]) -> list[Result]:
     return [*kept, *fresh]
 
 
+# --- which browser profiles exist ------------------------------------------
+def apply_browser_profiles(record: dict[str, Any], destination: Path) -> list[Result]:
+    """Add the restored profiles to the browser's own list of them.
+
+    Chromium keeps that list in ``Local State``, next to the profile folders
+    rather than inside them. A folder restored without an entry there is
+    complete on disk and invisible in the browser -- which is what "it only
+    copied one of my two profiles" is.
+
+    Merged, never overwritten, and this is the whole design. The file on the
+    new machine belongs to the browser already installed on it: it holds that
+    browser's own profiles, its settings, and the wrapped key for its password
+    store. Dropping the old machine's copy over it would take all of that away,
+    and would hand Chromium a key this machine's DPAPI cannot unwrap. So the
+    file is read, the profile entries are added to what is already there, and
+    everything else is left exactly as found.
+    """
+    import json  # noqa: PLC0415
+
+    relative = str(record.get("user_data") or "").strip()
+    profiles = record.get("profiles")
+    if not relative or not isinstance(profiles, dict) or not profiles:
+        return []
+
+    target = destination.joinpath(*relative.split("/")) / "Local State"
+    try:
+        state = json.loads(target.read_text(encoding="utf-8", errors="replace"))
+        if not isinstance(state, dict):
+            state = {}
+    except (OSError, json.JSONDecodeError):
+        # No browser installed yet, or a file we cannot read. A new one holding
+        # only the profile list is still correct: Chromium fills in the rest,
+        # and there is nothing here to lose.
+        state = {}
+
+    section = state.setdefault("profile", {})
+    if not isinstance(section, dict):
+        section = state["profile"] = {}
+    cache = section.setdefault("info_cache", {})
+    if not isinstance(cache, dict):
+        cache = section["info_cache"] = {}
+
+    added: list[str] = []
+    renamed: list[str] = []
+    for folder, entry in sorted(profiles.items()):
+        if not isinstance(folder, str) or not isinstance(entry, dict):
+            continue
+        if not (target.parent / folder).is_dir():
+            # Nothing was restored there, so there is nothing to list. This is
+            # what keeps a deselected profile out of the browser's switcher,
+            # and what stops a record from a bundle naming folders that do not
+            # exist on this machine.
+            continue
+        known = cache.get(folder)
+        if isinstance(known, dict):
+            # Almost always the new machine's own "Default", which it made on
+            # first run and called "Person 1". The folder's contents are the
+            # old machine's by now, so the name the user knows it by is the old
+            # one -- a migration that leaves it reading "Person 1" has restored
+            # the profile and not the profile's identity. Anything this bundle
+            # has no opinion about is left as the new machine set it.
+            merged = {**known, **entry}
+            if merged != known:
+                cache[folder] = merged
+                renamed.append(folder)
+            continue
+        cache[folder] = entry
+        added.append(folder)
+
+    # Newer Chromium keeps an explicit order beside the cache. A profile missing
+    # from it is hidden in the switcher on those builds even with a perfectly
+    # good info_cache entry.
+    order = section.get("profiles_order")
+    if isinstance(order, list):
+        section["profiles_order"] = order + [f for f in added if f not in order]
+
+    if not added and not renamed:
+        return [Result("browser", target.parent.name, Outcome.SKIPPED,
+                       "the browser's list already matches what was restored")]
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    except OSError as exc:
+        return [Result("browser", target.parent.name, Outcome.FAILED, str(exc))]
+    parts = []
+    if added:
+        parts.append(f"{len(added)} added ({', '.join(added)})")
+    if renamed:
+        parts.append(f"{len(renamed)} renamed to match the old machine "
+                     f"({', '.join(renamed)})")
+    return [Result("browser", target.parent.name, Outcome.APPLIED, "; ".join(parts))]
+
+
 # --- how Windows looks and responds ----------------------------------------
 #: Settings that only take effect once Windows is told, rather than at the next
 #: sign-in. SystemParametersInfoW takes each as an action code; passing the

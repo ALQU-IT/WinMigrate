@@ -228,6 +228,46 @@ def _name_from_local_state(profile_dir: Path) -> str:
     return name.strip() if isinstance(name, str) and name.strip() else ""
 
 
+#: Everything in ``Local State`` that is not the profile list. ``os_crypt``
+#: holds the DPAPI-wrapped key for the password and cookie stores, and neither
+#: of those is captured -- but the key has no business in a bundle either way,
+#: and restoring one machine's key onto another is actively harmful: DPAPI on
+#: the new machine cannot unwrap it, so Chromium is handed a key it cannot use
+#: for a store it did not write.
+#:
+#: Rather than filter the file, the record is *built* from the profile list
+#: alone. Nothing else is read, so nothing else can be carried by accident when
+#: a future Chromium puts something new in there.
+def profile_list(user_data: Path, folders: list[str]) -> dict[str, dict]:
+    """What Chromium records about each profile, for the profiles we captured.
+
+    This is the file that makes a profile *exist*. A profile directory restored
+    without its entry here is on disk, complete, and invisible: the browser
+    reads its list of profiles from ``Local State`` and simply does not know
+    the folder is there. Which is exactly what "it only copied one of my two
+    profiles" looks like from the outside.
+    """
+    try:
+        state = json.loads(
+            (user_data / "Local State").read_text(encoding="utf-8", errors="replace")
+        )
+        cache = state.get("profile", {}).get("info_cache", {})
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return {}
+    if not isinstance(cache, dict):
+        return {}
+    entries: dict[str, dict] = {}
+    for folder in folders:
+        entry = cache.get(folder)
+        if isinstance(entry, dict):
+            # The whole entry: the name, the avatar, whether the name is the
+            # default one. It is profile metadata, no part of it is a
+            # credential, and the item carrying it is encrypted-only anyway --
+            # the same treatment the profile's own files already get.
+            entries[folder] = entry
+    return entries
+
+
 def _name_from_preferences(profile_dir: Path) -> str:
     """The name the profile was created with, or "". A fallback, not the answer."""
     try:
@@ -338,6 +378,8 @@ def scan_browsers(env: Environment, files_only: bool = False):
     for profile in profiles:
         profile.extensions = extensions_mod.inventory(profile.profile_dir, profile.engine)
         items.append(_profile_item(profile, env, files_only))
+
+    items.extend(_profile_list_items(profiles, env, files_only))
 
     for followup in _password_followups(profiles):
         followups.append(followup)
@@ -538,6 +580,72 @@ def _profile_item(profile: BrowserProfile, env: Environment, files_only: bool) -
         item.action = Action.SKIP
         item.skip_reason = SkipReason.FILES_ONLY_MODE
     return item
+
+
+def _profile_list_items(
+    profiles: list[BrowserProfile], env: Environment, files_only: bool
+) -> list[Item]:
+    """One item per Chromium browser: its own record of which profiles exist.
+
+    Restoring a profile folder is not enough to restore a profile. Chromium
+    keeps the list of them in ``Local State``, beside the folders rather than
+    inside them, and a browser that has never heard of "Profile 1" does not
+    show it however complete the folder is. Second and subsequent profiles
+    therefore arrived on disk and vanished from the browser.
+
+    Not a file copy. ``Local State`` also holds the key for the password store
+    and whatever else that Chromium keeps there, and the copy on the new
+    machine belongs to the browser already installed on it. So the list is
+    carried as a record and merged into whatever is there, which is the only
+    form of this that cannot destroy the target's own settings.
+    """
+    from ..models import Action  # noqa: PLC0415
+
+    items: list[Item] = []
+    by_browser: dict[str, list[BrowserProfile]] = {}
+    for profile in profiles:
+        if profile.engine == "chromium":
+            by_browser.setdefault(profile.browser_key, []).append(profile)
+
+    for key, group in sorted(by_browser.items()):
+        user_data = group[0].profile_dir.parent
+        entries = profile_list(user_data, [p.profile_dir.name for p in group])
+        if not entries:
+            continue
+        relative = pathutil.relative_within(user_data, env.profile_root)
+        if relative is None or relative == ".":
+            # A user data directory outside the profile cannot be addressed in
+            # the bundle. The profiles themselves are relocated and explained;
+            # their list has nowhere to be merged into and is left out.
+            continue
+        item = Item(
+            id=f"browser:{key}:profile_list",
+            category=Category.BROWSER_PROFILE,
+            kind=Kind.RECORD,
+            title=f"{group[0].browser_title} — which profiles exist ({len(entries)})",
+            sensitivity=Sensitivity.SECRET,
+            record={"user_data": relative, "profiles": entries},
+            restore=RestoreSpec(
+                target=f"%USERPROFILE%\\{relative.replace('/', chr(92))}\\Local State",
+                strategy=RestoreStrategy.MERGE,
+                notes=[
+                    "Merged into the browser's own list, so its existing "
+                    "profiles and settings are kept.",
+                ],
+            ),
+            notes=[
+                Note(
+                    Severity.INFO,
+                    "Without this the browser does not list a restored profile "
+                    "even though its files are all there.",
+                )
+            ],
+        )
+        if files_only:
+            item.action = Action.SKIP
+            item.skip_reason = SkipReason.FILES_ONLY_MODE
+        items.append(item)
+    return items
 
 
 def _password_followups(profiles: list[BrowserProfile]) -> list[Followup]:

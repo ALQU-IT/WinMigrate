@@ -420,6 +420,12 @@ def _apply_settings(report: RestoreReport, destination: Path, wanted: tuple[str,
                     _start_menu_record(records.get("shell:start_menu"), destination),
                 )
             )
+        # Dynamic ids -- one per Chromium browser -- so matched by shape.
+        for item_id, browser_record in sorted(records.items()):
+            if item_id.startswith("browser:") and item_id.endswith(":profile_list"):
+                report.applied.extend(
+                    apply_mod.apply_browser_profiles(browser_record, destination)
+                )
         if "settings:startup_run" in records:
             report.applied.extend(apply_mod.apply_startup(records["settings:startup_run"]))
         if "settings:personalization" in records:
