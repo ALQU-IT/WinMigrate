@@ -291,11 +291,17 @@ def office_reactivation_steps(installation: OfficeInstallation | None) -> list[s
     return list(REACTIVATION_STEPS.get(installation.activation_type, REACTIVATION_STEPS["unknown"]))
 
 
-#: What makes the *installers* quiet. ``--disable-interactivity`` silences
-#: winget's own prompts and nothing else: every installer it then runs is free
-#: to put its own window on the screen, ask where to install, and offer a
-#: toolbar. Ninety-seven of those, arriving one at a time over an hour, is not
-#: an unattended migration.
+#: Removes the installers' own progress windows. Worth having and not worth
+#: worrying about: ``winget import`` does not offer it on every build, and what
+#: keeps an install unattended is not this.
+#:
+#: What keeps it unattended is ``--disable-interactivity``, which is passed
+#: unconditionally, together with winget's ordinary behaviour of running each
+#: package with the silent switches its manifest declares. A wizard that stops
+#: to ask where to install is what ``--interactive`` is for, and that is never
+#: passed here. So a winget without this flag installs the same packages
+#: without asking the same questions; the difference is whether progress
+#: windows appear while it works.
 SILENT_FLAG = "--silent"
 
 #: Without this, an import is a list of *exact versions* to install.
@@ -324,6 +330,21 @@ IGNORE_VERSIONS_FLAG = "--ignore-versions"
 #: added only when this machine's winget says it takes it.
 OPTIONAL_FLAGS: tuple[str, ...] = (IGNORE_VERSIONS_FLAG, SILENT_FLAG)
 
+#: What it actually costs when a winget will not take one of these, so the log
+#: records the consequence rather than only the refusal. A line saying an
+#: option was declined reads like a fault; most of the time it is not one, and
+#: somebody reading the log after a migration deserves to know which.
+FLAG_CONSEQUENCES: dict[str, str] = {
+    SILENT_FLAG: (
+        "installers may show their own progress windows; they still will not "
+        "ask questions, which is --disable-interactivity's job and is always on"
+    ),
+    IGNORE_VERSIONS_FLAG: (
+        "no effect here -- the versions have already been left out of the "
+        "import file for this reason"
+    ),
+}
+
 
 def accepted_flags(runner=process.run) -> tuple[str, ...]:
     """Which of :data:`OPTIONAL_FLAGS` this winget's ``import`` will take.
@@ -345,17 +366,16 @@ def accepted_flags(runner=process.run) -> tuple[str, ...]:
     )
     for flag in OPTIONAL_FLAGS:
         if flag not in accepted:
-            log.info("winget import does not accept %s; leaving it off", flag)
+            log.info(
+                "winget import does not accept %s, so it is left off: %s",
+                flag, FLAG_CONSEQUENCES.get(flag, "the import runs without it"),
+            )
     return accepted
 
 
 def supports_silent(runner=process.run) -> bool:
-    """Does this winget's ``import`` take ``--silent``?
-
-    ``--disable-interactivity`` silences winget's own prompts and nothing else:
-    every installer it runs is then free to put a window on the screen, ask
-    where to install, and offer a toolbar. Ninety-seven of those is not an
-    unattended migration.
+    """Does this winget's ``import`` take ``--silent``? See :data:`SILENT_FLAG`
+    for what it costs when it does not, which is less than the name suggests.
     """
     return SILENT_FLAG in accepted_flags(runner)
 

@@ -499,3 +499,27 @@ def test_a_shape_winget_did_not_write_costs_the_report_nothing(export):
     field here must not cost the user the restore report, which is where the
     follow-up list lives."""
     reinstall.without_versions(export)
+
+
+def test_a_declined_flag_is_logged_with_what_it_costs(caplog):
+    """A log line saying an option was refused reads like a fault. Most of the
+    time it is not one -- winget still installs the same packages without
+    asking the same questions -- and somebody reading the log after a migration
+    deserves to know which kind of line they are looking at."""
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="winmigrate.reinstall"):
+        reinstall.accepted_flags(helping("  --ignore-unavailable\n"))
+
+    text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "--silent" in text
+    # Not just "does not accept": what follows from it.
+    assert "disable-interactivity" in text
+    assert "will not" in text and "ask questions" in text
+
+
+def test_every_optional_flag_can_say_what_its_absence_costs():
+    """A flag added to the list without a note logs a refusal and no reason,
+    which is the line that started this."""
+    for flag in reinstall.OPTIONAL_FLAGS:
+        assert flag in reinstall.FLAG_CONSEQUENCES, flag

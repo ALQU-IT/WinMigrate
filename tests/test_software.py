@@ -1056,3 +1056,49 @@ def test_a_package_windows_brought_is_not_rescued_by_the_known_list():
     )
     assert adopted == []
     assert entries[0].winget_id is None
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Microsoft.WindowsInstallationAssistant",
+        "Windows 11 Installation Assistant",
+        "Windows 10 Installation Assistant",
+        "Windows Update Assistant",
+        "Windows 10 Update Assistant",
+    ],
+)
+def test_the_tool_for_upgrading_this_windows_is_not_carried_to_the_next_one(name):
+    """Whatever it was for has already happened. Installing it on the new
+    machine hands the user a program whose only offer is to reinstall the
+    operating system they are in the middle of moving into."""
+    assert software.is_windows_inbox_name(name) is True
+
+
+def test_a_program_is_recognised_by_its_winget_id_as_well_as_its_name():
+    """Display names are translated; winget ids are not. On a German machine
+    the installation assistant is "Windows 11 Installationsassistent", so a
+    table of English names quietly stops working the moment this tool leaves an
+    English-speaking desk -- and the failure is invisible, because the program
+    simply reappears in the reinstall list."""
+    entry = software.SoftwareEntry(
+        name="Windows 11 Installationsassistent",
+        winget_id="Microsoft.WindowsInstallationAssistant",
+    )
+    assert entry.shipped_with_windows is True
+
+    # And the id is only consulted for a real match, not treated as a licence
+    # to drop anything Microsoft published.
+    assert software.SoftwareEntry(
+        name="Visual Studio Code", winget_id="Microsoft.VisualStudioCode"
+    ).shipped_with_windows is False
+    assert software.SoftwareEntry(
+        name="PowerToys", winget_id="Microsoft.PowerToys"
+    ).shipped_with_windows is False
+
+
+def test_an_entry_with_no_winget_id_does_not_trip_over_the_id_check():
+    """Most registry entries have no package at all, and matching a table
+    against None is the sort of thing that takes the whole scan down."""
+    assert software.SoftwareEntry(name="ACME Bespoke Suite").shipped_with_windows is False
+    assert software.SoftwareEntry(name="x", winget_id=None).shipped_with_windows is False

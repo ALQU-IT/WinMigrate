@@ -132,6 +132,13 @@ WINDOWS_INBOX_PATTERNS = (
     re.compile(r"^microsoft update health tools$", re.IGNORECASE),
     re.compile(r"^windows pc health check$", re.IGNORECASE),
     re.compile(r"^windows subsystem for linux update$", re.IGNORECASE),
+    # One-shot tools for upgrading *this* machine's Windows. Whatever they were
+    # for has already happened, and putting one on a new machine hands the user
+    # a program whose only offer is to reinstall the operating system they are
+    # in the middle of moving into.
+    re.compile(r"^microsoft\.windowsinstallationassistant$", re.IGNORECASE),
+    re.compile(r"^windows 1[01] installation assistant$", re.IGNORECASE),
+    re.compile(r"^windows( 10| 11)? update assistant$", re.IGNORECASE),
     # The inbox Store apps, by package name. Several of these do have winget
     # packages, which is exactly why they need saying: without this they are
     # "reinstallable", and the restore spends its time putting Solitaire back
@@ -160,7 +167,14 @@ WINDOWS_INBOX_PATTERNS = (
 
 
 def is_windows_inbox_name(name: str) -> bool:
-    """True for a program named the way something shipped with Windows is."""
+    """True for a program named the way something shipped with Windows is.
+
+    Asked about a display name and about a winget id, because the two disagree
+    and only one of them is dependable. A display name is translated -- the
+    installation assistant is "Windows 11 Installationsassistent" on a German
+    machine -- so a table of English names quietly stops working the moment the
+    tool leaves an English-speaking desk. A winget id never is.
+    """
     stripped = (name or "").strip()
     return any(pattern.match(stripped) for pattern in WINDOWS_INBOX_PATTERNS)
 
@@ -226,10 +240,16 @@ class SoftwareEntry:
         Windows' own answer first -- ``SignatureKind`` is per-machine and gets
         the hard cases right -- and the name table only for what cannot carry
         that marker, which is every classic installer.
+
+        The winget id is checked as well as the display name, and is the better
+        of the two: ids are not translated, so an id that matches is a match on
+        any machine, while a display name only matches on one in English.
         """
         if self.signature_kind.strip().lower() in SYSTEM_SIGNATURE_KINDS:
             return True
-        return is_windows_inbox_name(self.name)
+        if is_windows_inbox_name(self.name):
+            return True
+        return bool(self.winget_id) and is_windows_inbox_name(self.winget_id)
 
     def to_json(self) -> dict[str, Any]:
         data: dict[str, Any] = {"name": self.name, "version": self.version}
