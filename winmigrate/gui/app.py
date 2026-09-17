@@ -211,6 +211,9 @@ class WinMigrateWizard:
         self.palette = theme.palette_for(self.dark)
         self.style = ttk.Style(root)
         theme.apply(self.style, self.family, self.palette)
+        # After apply(), which sets the colours these are drawn from, and needs
+        # the tkinter module because the artwork is a photo image.
+        theme.round_buttons(self.style, tk, self.palette)
         root.configure(background=self.palette.wash_top)
         log.info("theme: %s", "dark" if self.dark else "light")
 
@@ -300,8 +303,41 @@ class WinMigrateWizard:
         self.subtitle_label.pack(anchor="w", pady=(8, 0))
         ttk.Separator(body, orient="horizontal").pack(fill="x", padx=theme.PAD, pady=16)
 
-        self.page_area = ttk.Frame(body, style="Page.TFrame")
-        self.page_area.pack(fill="both", expand=True, padx=theme.PAD, pady=(0, 16))
+        # A viewport, not a frame. A page is as tall as its content, the panel
+        # is as tall as the window, and when the first exceeds the second the
+        # bottom of the page is simply not drawn -- no clipping indicator, no
+        # scrollbar, nothing. Three browser profiles was enough to push "delete
+        # the exported files" off the end of the passwords page, where it was
+        # both invisible and ticked.
+        holder = ttk.Frame(body, style="Page.TFrame")
+        holder.pack(fill="both", expand=True, padx=theme.PAD, pady=(0, 16))
+        surfaces = theme.surfaces_for(self.palette)
+        self.page_canvas = self.tk.Canvas(
+            holder, highlightthickness=0, borderwidth=0, background=surfaces.page
+        )
+        self.page_scroll = ttk.Scrollbar(
+            holder, orient="vertical", command=self.page_canvas.yview,
+            style="Wizard.Vertical.TScrollbar",
+        )
+        self.page_canvas.configure(yscrollcommand=self._page_scrolled)
+        self.page_canvas.pack(side="left", fill="both", expand=True)
+        # Held as state rather than read back off the widget, and started
+        # hidden: nothing is known about the page's height until Tk has laid it
+        # out, and a scrollbar shown before then says "there is more below" on
+        # a page that has not got any.
+        self._scrollbar_shown = False
+        self.page_scroll.pack_forget()
+
+        # The pages themselves are packed into this exactly as before, so every
+        # page gets the viewport without knowing it is in one.
+        self.page_area = ttk.Frame(self.page_canvas, style="Page.TFrame")
+        self._page_window = self.page_canvas.create_window(
+            0, 0, window=self.page_area, anchor="nw"
+        )
+        self.page_area.bind("<Configure>", self._page_resized)
+        self.page_canvas.bind("<Configure>", self._fit_page_width)
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.page_canvas.bind_all(sequence, self._wheel)
 
         inner = ttk.Frame(self.backdrop_canvas, style="Band.TFrame")
         self.hint = ttk.Label(inner, text="", style="BandHint.TLabel")
@@ -331,6 +367,60 @@ class WinMigrateWizard:
             "band": canvas.create_window(0, 0, window=inner, anchor="nw"),
         }
         canvas.bind("<Configure>", self._relayout)
+
+    def _page_resized(self, _event: Any = None) -> None:
+        """The page changed height, so the canvas has a new amount to scroll."""
+        try:
+            self.page_canvas.configure(scrollregion=self.page_canvas.bbox("all"))
+        except Exception:  # noqa: BLE001 -- not laid out yet
+            pass
+
+    def _fit_page_width(self, event: Any = None) -> None:
+        """Keep the page as wide as the viewport.
+
+        A window embedded in a canvas is sized to its content, so without this
+        every page would be as wide as its widest label and the rest of the
+        panel would be bare.
+        """
+        width = int(getattr(event, "width", 0) or self.page_canvas.winfo_width())
+        if width > 1:
+            self.page_canvas.itemconfigure(self._page_window, width=width)
+
+    def _page_scrolled(self, first: str, last: str) -> None:
+        """Show the scrollbar only when there is something to scroll.
+
+        A permanent scrollbar on pages that almost never need one is a strip of
+        furniture that says "there is more below" on every page that has not
+        got any.
+        """
+        self.page_scroll.set(first, last)
+        try:
+            needed = float(first) > 0.0 or float(last) < 1.0
+        except (TypeError, ValueError):
+            needed = False
+        if needed and not self._scrollbar_shown:
+            self.page_scroll.pack(side="right", fill="y")
+            self._scrollbar_shown = True
+        elif not needed and self._scrollbar_shown:
+            self.page_scroll.pack_forget()
+            self._scrollbar_shown = False
+
+    def _wheel(self, event: Any) -> None:
+        """Scroll the page under the wheel, when there is anywhere to scroll."""
+        if not self._scrollbar_shown:
+            return
+        delta = getattr(event, "delta", 0)
+        number = getattr(event, "num", 0)
+        if number == 4:
+            step = -1
+        elif number == 5:
+            step = 1
+        elif delta:
+            # Windows reports multiples of 120; X11 reports the button instead.
+            step = -1 if delta > 0 else 1
+        else:
+            return
+        self.page_canvas.yview_scroll(step * 3, "units")
 
     #: How tall the button band is. Fixed rather than measured: measuring means
     #: laying out the buttons, reading their height, then laying everything out

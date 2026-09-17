@@ -272,3 +272,123 @@ def test_the_panels_are_painted_in_the_colour_their_widgets_are_styled_with(
     assert styles["Rail.TFrame"]["background"] == surfaces.rail
     assert styles["Page.TFrame"]["background"] == surfaces.page
     assert styles["Band.TFrame"]["background"] == surfaces.band
+
+
+# --- artwork for widgets Tk insists on drawing as rectangles ----------------
+def test_a_rounded_corner_is_shaded_rather_than_stepped():
+    """A corner that goes straight from filled to empty is a staircase, and at
+    the size a button is drawn the staircase is what the eye reads instead of a
+    curve. The fractional pixels are the curve."""
+    coverage = glass.rounded_coverage(20, 20, 6)
+
+    assert coverage[0][0] == 0.0          # the very corner is outside
+    assert coverage[10][10] == 1.0        # the middle is inside
+    partial = [c for row in coverage for c in row if 0.0 < c < 1.0]
+    assert partial, "no partly covered pixels: the corners are hard steps"
+
+
+def test_the_straight_edges_stay_straight():
+    """Only the four corner squares are curved. A shape that pulled its sides
+    in as well would read as a lozenge, and next to a square-edged widget the
+    difference is obvious."""
+    coverage = glass.rounded_coverage(30, 30, 8)
+    middle = len(coverage) // 2
+    assert coverage[middle][0] == 1.0     # left edge, half way down
+    assert coverage[0][middle] == 1.0     # top edge, half way across
+
+
+def test_a_radius_bigger_than_the_button_is_capped():
+    coverage = glass.rounded_coverage(10, 10, 999)
+    assert coverage[5][5] == 1.0
+    assert coverage[0][0] == 0.0
+
+
+@pytest.mark.parametrize("width, height", [(0, 10), (10, 0), (-1, -1)])
+def test_artwork_with_no_size_is_empty_rather_than_an_error(width, height):
+    assert glass.rounded_coverage(width, height, 4) == []
+
+
+def test_a_radius_of_nothing_covers_every_pixel():
+    coverage = glass.rounded_coverage(6, 6, 0)
+    assert all(value == 1.0 for row in coverage for value in row)
+
+
+def test_the_corners_are_painted_the_colour_behind_them_not_left_transparent():
+    """A Tk photo image has no alpha channel. The corners cannot be see-through,
+    so they are painted the colour of the panel the button sits on -- which
+    this program worked out before it drew anything."""
+    pixels = glass.rounded_pixels(16, 16, 5, "#0f6cbd", "#ffffff")
+
+    assert pixels[0][0] == "#ffffff"      # outside: the panel shows
+    assert pixels[8][8] == "#0f6cbd"      # inside: the button
+    # And somewhere along each corner arc there are pixels that are neither,
+    # which is the antialiasing.
+    blended = [
+        value for row in pixels for value in row
+        if value not in ("#ffffff", "#0f6cbd")
+    ]
+    assert blended, "the corners step straight from panel to button"
+
+
+def test_pixels_go_to_tk_in_one_call():
+    """Setting them one at a time is thousands of Tcl round trips per button."""
+    data = glass.photo_data([["#000000", "#ffffff"], ["#ff0000", "#00ff00"]])
+    assert data == "{#000000 #ffffff} {#ff0000 #00ff00}"
+
+
+def test_the_buttons_are_given_rounded_artwork_and_a_layout_that_uses_it(monkeypatch):
+    """A ttk button is drawn from border elements which are rectangles by
+    construction: no option rounds them, in clam or any other built-in theme.
+    The supported way round it is to hand ttk a picture and let it nine-patch
+    the thing -- so both halves have to be there, the element and the layout
+    pointing at it."""
+    import guistub
+
+    guistub.install(monkeypatch)
+    import tkinter as tk
+
+    style = guistub.Style()
+    assert theme.round_buttons(style, tk, theme.DARK) is True
+
+    for name, prefix in (("Accent.TButton", "accent"), ("Wizard.TButton", "quiet")):
+        element = f"{prefix}.roundedbutton"
+        assert element in style.elements
+        kind, args, kwargs = style.elements[element]
+        assert kind == "image"
+        # The nine-patch. Without it the corners stretch with the rest and the
+        # curve smears as the button gets wider.
+        assert kwargs["border"] == theme.BUTTON_RADIUS
+        assert kwargs["sticky"] == "nsew"
+        # Every state the button can be in has its own picture, or it snaps
+        # back to a square one when pressed.
+        assert {spec[0] for spec in args[1:]} == {"disabled", "pressed", "active"}
+        assert style.layouts[name][0][0] == element
+
+
+def test_a_tk_that_refuses_the_artwork_keeps_square_buttons_rather_than_none(monkeypatch):
+    """Fails soft, like everything else that reaches for a platform feature."""
+    import guistub
+
+    guistub.install(monkeypatch)
+    import tkinter as tk
+
+    class Refusing(guistub.Style):
+        def element_create(self, *args, **kwargs):
+            raise tk.TclError("no image element here")
+
+    assert theme.round_buttons(Refusing(), tk, theme.LIGHT) is False
+
+
+def test_the_artwork_is_kept_alive_after_it_is_handed_over(monkeypatch):
+    """A Tk photo image is garbage collected like any other object, and a style
+    element whose image has been collected draws nothing -- a button-shaped
+    hole, which is a memorable way to find this out."""
+    import guistub
+
+    guistub.install(monkeypatch)
+    import tkinter as tk
+
+    theme.round_buttons(guistub.Style(), tk, theme.DARK)
+    assert theme._button_images, "nothing is holding a reference to the images"
+    for image in theme._button_images.values():
+        assert image.data, "an image was created and never filled in"

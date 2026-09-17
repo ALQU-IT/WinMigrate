@@ -20,10 +20,13 @@ checked without a display.
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 
 from . import glass
+
+log = logging.getLogger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class Palette:
@@ -549,3 +552,87 @@ def surfaces_for(palette: Palette) -> Surfaces:
         return glass.veil(backdrop_at(palette, x, y), palette.dark, strength)
 
     return Surfaces(rail=panel("rail"), page=panel("page"), band=panel("band"))
+
+
+# --- rounded buttons --------------------------------------------------------
+#: How round a button is. Matched to the panels it sits on, because two
+#: different radii in one window read as a mistake rather than as a choice.
+BUTTON_RADIUS = 8
+
+#: ttk stretches the middle of a nine-patched image and leaves the corners
+#: alone, so the artwork only has to be large enough to hold two corners and a
+#: seam. Anything bigger is pixels nobody sees.
+_BUTTON_ART = BUTTON_RADIUS * 2 + 4
+
+#: The generated images, kept alive for as long as the program runs. A Tk photo
+#: image is garbage collected like any other object, and a style element whose
+#: image has been collected draws nothing at all -- a button-shaped hole, which
+#: is a memorable way to find this out.
+_button_images: dict[str, object] = {}
+
+
+def round_buttons(style, tk, palette: Palette) -> bool:
+    """Give the buttons real rounded corners. True when it took.
+
+    A ttk button is drawn from border elements which are rectangles by
+    construction: there is no option that rounds them, in clam or any other
+    built-in theme. The supported way round it is to draw the button yourself
+    and hand ttk the picture, which it nine-patches -- corners kept, middle
+    stretched -- so one small image serves a button of any width.
+
+    The corners are not transparent, because a Tk photo image has no alpha.
+    They are painted the colour of the panel the button sits on, which this
+    program computed before it drew anything, so the result is the same as
+    transparency would have been.
+
+    Fails soft and says so: a Tk too old for ``element_create``, or one that
+    refuses the layout, leaves square buttons behind rather than no buttons.
+    """
+    surfaces = surfaces_for(palette)
+    quiet = glass.blend(surfaces.band, palette.ink, 0.05)
+    faces = {
+        "accent": (palette.accent, surfaces.band),
+        "accentActive": (glass.blend(palette.accent, "#ffffff", 0.14), surfaces.band),
+        "accentPressed": (glass.blend(palette.accent, "#000000", 0.18), surfaces.band),
+        "accentOff": (glass.blend(surfaces.band, palette.accent, 0.28), surfaces.band),
+        "quiet": (quiet, surfaces.band),
+        "quietActive": (glass.blend(quiet, palette.ink, 0.06), surfaces.band),
+        "quietPressed": (glass.blend(quiet, palette.ink, 0.12), surfaces.band),
+        # A face, even disabled: exactly the panel colour leaves a button-shaped
+        # hole and the row stops reading as three buttons.
+        "quietOff": (glass.blend(surfaces.band, palette.ink, 0.02), surfaces.band),
+    }
+    try:
+        for name, (fill, behind) in faces.items():
+            image = tk.PhotoImage(width=_BUTTON_ART, height=_BUTTON_ART)
+            image.put(
+                glass.photo_data(
+                    glass.rounded_pixels(_BUTTON_ART, _BUTTON_ART, BUTTON_RADIUS, fill, behind)
+                )
+            )
+            _button_images[name] = image
+
+        for style_name, prefix in (("Accent.TButton", "accent"), ("Wizard.TButton", "quiet")):
+            element = f"{prefix}.roundedbutton"
+            style.element_create(
+                element, "image", _button_images[prefix],
+                ("disabled", _button_images[f"{prefix}Off"]),
+                ("pressed", _button_images[f"{prefix}Pressed"]),
+                ("active", _button_images[f"{prefix}Active"]),
+                # The nine-patch: the outer BUTTON_RADIUS pixels on each side
+                # are the corners and are not stretched. Without this the
+                # corners are scaled with the rest and the curve turns into a
+                # smear as the button gets wider.
+                border=BUTTON_RADIUS, sticky="nsew", padding=0,
+            )
+            style.layout(style_name, [
+                (element, {"sticky": "nsew", "children": [
+                    ("Button.padding", {"sticky": "nsew", "children": [
+                        ("Button.label", {"sticky": "nswe"}),
+                    ]}),
+                ]}),
+            ])
+    except Exception as exc:  # noqa: BLE001 -- square buttons beat no buttons
+        log.info("rounded buttons are not available here: %s", exc)
+        return False
+    return True

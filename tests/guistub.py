@@ -78,6 +78,12 @@ class Widget:
     def bind(self, *args, **kwargs):
         pass
 
+    def bind_all(self, *args, **kwargs):
+        pass
+
+    def unbind_all(self, *args, **kwargs):
+        pass
+
     def insert(self, *args, **kwargs):
         # Text widgets are written into rather than configured, and what the
         # restore page puts in the follow-up box -- "import these, then delete
@@ -183,6 +189,17 @@ class Treeview(Widget):
         self._children = [child for child in self._children if child in self.rows]
 
 
+class PhotoImage:
+    """A Tk photo image. Records what was put into it, which is the artwork."""
+
+    def __init__(self, width=0, height=0, **kwargs):
+        self.width, self.height = width, height
+        self.data = ""
+
+    def put(self, data, **kwargs):
+        self.data = data
+
+
 class Canvas(Widget):
     """The backdrop. Records what was drawn, in order.
 
@@ -241,12 +258,22 @@ class Canvas(Widget):
     def winfo_height(self):
         return 700
 
+    def bbox(self, *args):
+        return (0, 0, 1000, 700)
+
+    def yview(self, *args):
+        pass
+
+    def yview_scroll(self, *args):
+        pass
+
 
 class Style:
     def __init__(self, *args):
         self.themes: list[str] = []
         self.styles: dict[str, dict] = {}
         self.layouts: dict[str, object] = {}
+        self.elements: dict[str, tuple] = {}
 
     def theme_use(self, name):
         self.themes.append(name)
@@ -260,6 +287,9 @@ class Style:
     def layout(self, name, spec=None):
         self.layouts[name] = spec
         return spec
+
+    def element_create(self, name, kind, *args, **kwargs):
+        self.elements[name] = (kind, args, kwargs)
 
 
 def install(monkeypatch) -> list:
@@ -282,6 +312,7 @@ def install(monkeypatch) -> list:
     tk.Tk = Widget
     tk.Text = Widget
     tk.Canvas = Canvas
+    tk.PhotoImage = PhotoImage
     tk.StringVar = Var
     tk.BooleanVar = Var
     tk.TkVersion = 8.6

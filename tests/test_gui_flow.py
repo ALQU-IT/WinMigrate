@@ -2100,3 +2100,88 @@ def test_nothing_is_re_applied_when_the_install_did_not_run(
     assert pump(wizard, until=("installed", "install-failed")) == "installed"
 
     assert asked == []
+
+
+# --- a page taller than the window ------------------------------------------
+def test_a_page_too_tall_for_the_window_can_be_scrolled_to(monkeypatch, profile: Path):
+    """Three browser profiles was enough to push "delete the exported files"
+    off the bottom of the passwords page. A page is as tall as its content and
+    the panel is as tall as the window; when the first exceeds the second, Tk
+    simply does not draw the rest -- no indicator, no scrollbar, nothing. The
+    checkbox was invisible and ticked."""
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+
+    # Tk reports the visible fraction. Everything fits: no furniture.
+    wizard._page_scrolled("0.0", "1.0")
+    assert wizard._scrollbar_shown is False
+    assert wizard.page_scroll._packed is False
+
+    # There is more below.
+    wizard._page_scrolled("0.0", "0.6")
+    assert wizard._scrollbar_shown is True
+    assert wizard.page_scroll._packed is True
+
+    # And it goes away again when the page shrinks.
+    wizard._page_scrolled("0.0", "1.0")
+    assert wizard._scrollbar_shown is False
+
+
+def test_being_scrolled_down_counts_as_having_somewhere_to_scroll(
+    monkeypatch, profile: Path
+):
+    """Looking only at the bottom fraction hides the bar once the user has
+    scrolled to the end, which takes away the only way back up."""
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+
+    wizard._page_scrolled("0.4", "1.0")
+    assert wizard._scrollbar_shown is True
+
+
+def test_a_reading_tk_has_not_made_yet_does_not_raise(monkeypatch, profile: Path):
+    """<Configure> fires before the page is laid out, and the fractions arrive
+    as whatever Tk had at the time."""
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+
+    wizard._page_scrolled("", "")
+    assert wizard._scrollbar_shown is False
+
+
+def test_the_page_is_kept_as_wide_as_the_window(monkeypatch, profile: Path):
+    """A window embedded in a canvas is sized to its content, so without this
+    every page would be as wide as its widest label and the rest of the panel
+    would be bare."""
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+
+    wizard._fit_page_width(type("Event", (), {"width": 742})())
+
+    assert wizard.page_canvas.windows[wizard._page_window]["width"] == 742
+
+
+def test_a_window_with_no_width_yet_is_left_alone(monkeypatch, profile: Path):
+    """The first <Configure> arrives at 1x1, and sizing the page to that makes
+    it one pixel wide for good."""
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    wizard._fit_page_width(type("Event", (), {"width": 900})())
+
+    wizard._fit_page_width(type("Event", (), {"width": 1})())
+
+    assert wizard.page_canvas.windows[wizard._page_window]["width"] == 900
+
+
+def test_the_wheel_does_nothing_on_a_page_that_fits(monkeypatch, profile: Path):
+    """Scrolling a page with nowhere to go makes the content twitch."""
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    scrolled: list = []
+    wizard.page_canvas.yview_scroll = lambda *args: scrolled.append(args)
+
+    wizard._page_scrolled("0.0", "1.0")
+    wizard._wheel(type("Event", (), {"delta": 120, "num": 0})())
+    assert scrolled == []
+
+    wizard._page_scrolled("0.0", "0.5")
+    wizard._wheel(type("Event", (), {"delta": 120, "num": 0})())
+    wizard._wheel(type("Event", (), {"delta": -120, "num": 0})())
+    # Windows reports a delta; X11 reports button 4 and 5 instead.
+    wizard._wheel(type("Event", (), {"delta": 0, "num": 4})())
+    wizard._wheel(type("Event", (), {"delta": 0, "num": 5})())
+    assert [args[0] for args in scrolled] == [-3, 3, -3, 3]

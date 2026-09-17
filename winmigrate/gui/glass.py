@@ -325,3 +325,95 @@ class Backdrop:
 
     def clear(self) -> None:
         self.canvas.delete("backdrop")
+
+
+# --- rounded artwork for widgets Tk draws as rectangles ---------------------
+def rounded_coverage(
+    width: int, height: int, radius: float, samples: int = 4
+) -> list[list[float]]:
+    """How much of each pixel a rounded rectangle covers, row by row.
+
+    ``0.0`` is outside, ``1.0`` inside, and the fractions in between are the
+    corner pixels. Those fractions are the whole point: a corner stepped
+    straight from filled to empty is a staircase, and at the sizes a button is
+    drawn at the staircase is what the eye reads instead of a curve.
+
+    A ttk button is drawn from border elements that are square by construction
+    and cannot be told otherwise. The way round it is to hand ttk an image and
+    let it nine-patch the thing -- which needs artwork, which needs this.
+
+    Coverage is estimated by sampling each pixel on a ``samples`` x ``samples``
+    grid, offset to the centres of its cells so the edges of the pixel are not
+    counted twice.
+    """
+    if width <= 0 or height <= 0:
+        return []
+    radius = max(0.0, min(radius, width / 2, height / 2))
+    samples = max(1, samples)
+    step = 1.0 / samples
+    offset = step / 2
+
+    # The centres of the four corner arcs.
+    corners = (
+        (radius, radius), (width - radius, radius),
+        (width - radius, height - radius), (radius, height - radius),
+    )
+
+    rows: list[list[float]] = []
+    for pixel_y in range(height):
+        row: list[float] = []
+        for pixel_x in range(width):
+            inside = 0
+            for sub_y in range(samples):
+                y = pixel_y + offset + sub_y * step
+                for sub_x in range(samples):
+                    x = pixel_x + offset + sub_x * step
+                    if _within(x, y, width, height, radius, corners):
+                        inside += 1
+            row.append(inside / (samples * samples))
+        rows.append(row)
+    return rows
+
+
+def _within(x, y, width, height, radius, corners) -> bool:
+    """Is this point inside the rounded rectangle?
+
+    Outside the corner squares the shape is an ordinary rectangle, so only a
+    point in one of the four corner squares has to be measured against its arc.
+    """
+    if not (0 <= x <= width and 0 <= y <= height):
+        return False
+    if radius <= 0:
+        return True
+    left, right = x < radius, x > width - radius
+    top, bottom = y < radius, y > height - radius
+    if not ((left or right) and (top or bottom)):
+        return True
+    centre_x, centre_y = corners[0 if left and top else 1 if right and top else
+                                 2 if right and bottom else 3]
+    return math.hypot(x - centre_x, y - centre_y) <= radius
+
+
+def rounded_pixels(
+    width: int, height: int, radius: float, fill: str, behind: str, samples: int = 4
+) -> list[list[str]]:
+    """A rounded rectangle as flat pixels, already composited onto ``behind``.
+
+    There is no alpha channel here either -- a Tk photo image is opaque -- so
+    the corners are not transparent, they are painted the colour of whatever
+    the button sits on. Which is knowable: it is the frosted panel underneath,
+    and this program worked that colour out before it drew anything.
+    """
+    return [
+        [blend(behind, fill, coverage) for coverage in row]
+        for row in rounded_coverage(width, height, radius, samples)
+    ]
+
+
+def photo_data(pixels: list[list[str]]) -> str:
+    """Pixels in the one format ``PhotoImage.put`` takes in a single call.
+
+    Setting them one at a time is thousands of Tcl round trips per button; this
+    is one.
+    """
+    return " ".join("{" + " ".join(row) + "}" for row in pixels)
