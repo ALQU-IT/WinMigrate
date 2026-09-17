@@ -331,6 +331,7 @@ def test_components_are_counted_apart_from_things_to_reinstall_by_hand():
         "components": 2,
         "launcher_managed": 0,
         "covered_by_office": 0,
+        "shipped_with_windows": 0,
         "winget_packages_in_export": 0,
     }
 
@@ -896,3 +897,162 @@ def test_every_id_in_the_table_looks_like_a_winget_id():
         assert " " not in identifier, identifier
         assert prefix not in seen, f"{prefix} listed twice"
         seen.add(prefix)
+
+
+# --- programs that came with Windows ---------------------------------------
+def test_windows_own_programs_are_not_work_on_either_list():
+    """A new Windows already has Edge, Paint, the Store and Solitaire. Several
+    of them have winget packages, so without this the restore spends its time
+    installing them on top of themselves while the user watches -- and the
+    by-hand list is padded with chores that are already done."""
+    inventory = software.SoftwareInventory(
+        entries=[
+            software.SoftwareEntry(name="Microsoft Edge", winget_id="Microsoft.Edge"),
+            software.SoftwareEntry(name="Microsoft OneDrive", winget_id="Microsoft.OneDrive"),
+            software.SoftwareEntry(
+                name="Microsoft.WindowsCalculator",
+                winget_id="9WZDNCRFHVN5",
+                signature_kind="System",
+            ),
+            software.SoftwareEntry(name="Microsoft.Paint", signature_kind="System"),
+            # The one thing on the machine the user actually chose.
+            software.SoftwareEntry(name="Notepad++", winget_id="Notepad++.Notepad++"),
+            software.SoftwareEntry(name="ACME Bespoke Suite"),
+        ]
+    )
+
+    assert [entry.name for entry in inventory.reinstallable] == ["Notepad++"]
+    assert [entry.name for entry in inventory.manual] == ["ACME Bespoke Suite"]
+    assert len(inventory.shipped_with_windows) == 4
+    assert inventory.to_json()["counts"]["shipped_with_windows"] == 4
+
+
+def test_windows_own_programs_are_recorded_rather_than_dropped():
+    """A migration that quietly forgets software is the failure this tool is
+    built to avoid. Being on the machine is a fact about the machine; it is the
+    *reinstalling* that is pointless, not the knowing."""
+    entry = software.SoftwareEntry(name="Microsoft Edge", winget_id="Microsoft.Edge")
+    data = entry.to_json()
+    assert data["name"] == "Microsoft Edge"
+    assert data["shipped_with_windows"] is True
+
+
+def test_windows_asked_rather_than_guessed_when_it_can_answer():
+    """SignatureKind is per-machine and gets the hard cases right. Windows
+    Terminal ships with Windows 11 and is a real installed application on
+    Windows 10 -- and the same name has to land on opposite sides of the line
+    depending on which machine is being backed up. A name table cannot do
+    that; this is exactly why the marker is preferred over one."""
+    inbox = software.SoftwareEntry(name="Microsoft.WindowsTerminal", signature_kind="System")
+    chosen = software.SoftwareEntry(name="Microsoft.WindowsTerminal", signature_kind="Store")
+    assert inbox.shipped_with_windows is True
+    assert chosen.shipped_with_windows is False
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Microsoft Visual Studio Code",
+        "Microsoft Office 365",
+        "Microsoft Teams",
+        "Microsoft PowerToys",
+        "Microsoft SQL Server Management Studio",
+        "Microsoft Visual Studio Community 2022",
+        "Microsoft.WindowsTerminal",
+    ],
+)
+def test_the_name_table_does_not_swallow_microsofts_real_applications(name):
+    """"Microsoft" is not a signal. The cost of a wrong entry in that table is
+    a program the user installed going missing from their migration, which is
+    worse than the noise the table exists to remove."""
+    assert software.is_windows_inbox_name(name) is False
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Microsoft Edge",
+        "Microsoft Edge Update",
+        "Microsoft OneDrive",
+        "Microsoft Update Health Tools",
+        "Microsoft.MicrosoftSolitaireCollection",
+        "Microsoft.WindowsStore",
+        "Microsoft.XboxGamingOverlay",
+        "Clipchamp.Clipchamp",
+        "MicrosoftWindows.Client.WebExperience",
+    ],
+)
+def test_the_name_table_covers_what_carries_no_marker(name):
+    """SignatureKind only exists for Appx packages. Edge and OneDrive register
+    under Uninstall like any other program and carry no such marker, so they
+    need naming or they stay in the reinstall list forever."""
+    assert software.is_windows_inbox_name(name) is True
+
+
+def test_windows_own_programs_are_taken_out_of_the_winget_import():
+    """The flag is what the report reads; the import file is what actually
+    runs. Leaving the id in it means winget reinstalls Edge regardless of what
+    the report said."""
+    export = {
+        "Sources": [
+            {
+                "Packages": [
+                    {"PackageIdentifier": "Microsoft.Edge"},
+                    {"PackageIdentifier": "Notepad++.Notepad++"},
+                    {"PackageIdentifier": "9WZDNCRFHVN5"},
+                ]
+            }
+        ]
+    }
+    # Cased differently on purpose: winget's export and its list output do not
+    # always agree, and a case-sensitive compare would leave the package in.
+    removed = software.drop_from_export(export, {"microsoft.edge", "9wzdncrfhvn5"})
+
+    assert removed == 2
+    assert [p["PackageIdentifier"] for p in export["Sources"][0]["Packages"]] == [
+        "Notepad++.Notepad++"
+    ]
+
+
+def test_dropping_from_an_export_copes_with_a_shape_it_did_not_write():
+    """The export comes from whatever winget is on the machine. A shape this
+    did not expect must cost the packages nothing, not raise."""
+    assert software.drop_from_export(None, {"Microsoft.Edge"}) == 0
+    assert software.drop_from_export({}, {"Microsoft.Edge"}) == 0
+    assert software.drop_from_export({"Sources": "nonsense"}, {"Microsoft.Edge"}) == 0
+    assert software.drop_from_export({"Sources": [{"Packages": None}]}, {"x"}) == 0
+    export = {"Sources": [{"Packages": [{"PackageIdentifier": "Microsoft.Edge"}]}]}
+    assert software.drop_from_export(export, set()) == 0
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [("System", "System"), (4, "System"), (3, "Store"), (0, "None"), (None, ""), (99, "")],
+)
+def test_the_signature_marker_survives_both_shapes_powershell_emits(raw, expected):
+    """ConvertTo-Json reduces the enum to its ordinal in some PowerShell
+    versions and keeps the name in others. Reading only one of the two would
+    silently stop recognising inbox apps on half the machines."""
+    assert software._signature_kind(raw) == expected
+
+
+def test_the_appx_query_actually_asks_for_the_marker():
+    """The whole mechanism rests on a property that has to be in the SELECT.
+    Dropping it from the script would leave every Appx package unmarked and the
+    failure would be invisible."""
+    assert "SignatureKind" in software.APPX_SCRIPT
+
+
+def test_a_package_windows_brought_is_not_rescued_by_the_known_list():
+    """The curated table exists to give a package back to something the user
+    installed that winget failed to recognise. Finding one for Edge is not a
+    find."""
+    entries = [
+        software.SoftwareEntry(name="Microsoft Edge", winget_knows_no_package=True),
+    ]
+    export: dict = {}
+    adopted = software.adopt_known_packages(
+        entries, export, runner=lambda *a, **k: pytest.fail("winget was consulted for Edge")
+    )
+    assert adopted == []
+    assert entries[0].winget_id is None

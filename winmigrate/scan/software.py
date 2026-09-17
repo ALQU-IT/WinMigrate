@@ -102,6 +102,69 @@ APPX_NOISE_PREFIXES = (
 )
 
 
+#: What ``Get-AppxPackage`` reports for a package that is part of Windows
+#: rather than something the user installed. This is the authoritative answer,
+#: and it is per-machine: Windows Terminal is "System" on a Windows 11 that
+#: shipped with it and "Store" on a Windows 10 where somebody installed it, and
+#: both answers are correct for that machine.
+SYSTEM_SIGNATURE_KINDS = frozenset({"system"})
+
+#: Programs that arrive with Windows, named the way their uninstall entry or
+#: their Appx package names them.
+#:
+#: Wanted because ``SignatureKind`` only exists for Appx packages: the
+#: classic installers below register under Uninstall like any other program and
+#: carry no such marker. Kept deliberately short and anchored, because the cost
+#: of a wrong entry here is a program the user installed going missing from
+#: their migration -- which is the failure this whole tool exists to prevent.
+#:
+#: Note what is *not* here. "Microsoft Corporation" as a publisher is not a
+#: signal: Office, Visual Studio, VS Code, SQL Server and PowerToys are all
+#: Microsoft and all of them have to migrate. Neither is Windows Terminal,
+#: which ships with Windows 11 but is a real installed application on Windows
+#: 10 -- SignatureKind answers that one correctly and a name list cannot.
+WINDOWS_INBOX_PATTERNS = (
+    # Edge and its updater. Present on every Windows since 2020, and the new
+    # machine has a newer one before this tool is even opened.
+    re.compile(r"^microsoft edge( update| beta| dev| canary)?$", re.IGNORECASE),
+    re.compile(r"^microsoft onedrive$", re.IGNORECASE),
+    # Servicing plumbing, which reinstalls itself through Windows Update.
+    re.compile(r"^microsoft update health tools$", re.IGNORECASE),
+    re.compile(r"^windows pc health check$", re.IGNORECASE),
+    re.compile(r"^windows subsystem for linux update$", re.IGNORECASE),
+    # The inbox Store apps, by package name. Several of these do have winget
+    # packages, which is exactly why they need saying: without this they are
+    # "reinstallable", and the restore spends its time putting Solitaire back
+    # on a machine that already has it.
+    re.compile(
+        r"^microsoft\.("
+        r"549981c3f5f10"                       # Cortana
+        r"|bing(news|weather|search|finance|sports)"
+        r"|gethelp|getstarted|gamingapp|people|wallet|oneconnect"
+        r"|microsoft(officehub|solitairecollection|stickynotes|3dviewer)"
+        r"|mixedreality\.portal|mspaint|paint|powerautomatedesktop"
+        r"|screensketch|sechealthui|storepurchaseapp"
+        r"|windows(alarms|calculator|camera|feedbackhub|maps|notepad"
+        r"|soundrecorder|store)"
+        r"|windowscommunicationsapps|xbox.*|yourphone|zune(music|video)"
+        r"|desktopappinstaller|outlookforwindows|copilot"
+        r"|(heif|webp|raw)imageextension|(vp9|av1|hevc)videoextensions?"
+        r"|webmediaextensions"
+        r")$",
+        re.IGNORECASE,
+    ),
+    re.compile(r"^microsoftwindows\.(client\.|crossdevice)", re.IGNORECASE),
+    re.compile(r"^clipchamp\.clipchamp$", re.IGNORECASE),
+    re.compile(r"^microsoftcorporationii\.(quickassist|winappruntime)", re.IGNORECASE),
+)
+
+
+def is_windows_inbox_name(name: str) -> bool:
+    """True for a program named the way something shipped with Windows is."""
+    stripped = (name or "").strip()
+    return any(pattern.match(stripped) for pattern in WINDOWS_INBOX_PATTERNS)
+
+
 #: Runtimes, redistributables and driver packages. They are real installed
 #: entries, but nobody reinstalls them deliberately -- whatever needs them
 #: brings them along -- so listing them as chores to do by hand is noise.
@@ -142,6 +205,10 @@ class SoftwareEntry:
     #: uninstall entry points back at a launcher. Such titles re-download when
     #: the user signs into the launcher, so they are not manual work either.
     managed_by: str | None = None
+    #: What Windows says signed this Appx package: "System" for one that is part
+    #: of Windows, "Store" for one the user installed. Empty for everything that
+    #: is not an Appx package, and for a Windows too old to report it.
+    signature_kind: str = ""
 
     @property
     def reinstallable(self) -> bool:
@@ -151,6 +218,18 @@ class SoftwareEntry:
     def is_component(self) -> bool:
         """A runtime or driver that arrives with whatever needs it."""
         return any(pattern.search(self.name) for pattern in COMPONENT_PATTERNS)
+
+    @property
+    def shipped_with_windows(self) -> bool:
+        """Part of Windows, so the new machine already has it.
+
+        Windows' own answer first -- ``SignatureKind`` is per-machine and gets
+        the hard cases right -- and the name table only for what cannot carry
+        that marker, which is every classic installer.
+        """
+        if self.signature_kind.strip().lower() in SYSTEM_SIGNATURE_KINDS:
+            return True
+        return is_windows_inbox_name(self.name)
 
     def to_json(self) -> dict[str, Any]:
         data: dict[str, Any] = {"name": self.name, "version": self.version}
@@ -167,6 +246,13 @@ class SoftwareEntry:
             data["architecture"] = self.architecture
         if self.is_component:
             data["component"] = True
+        if self.shipped_with_windows:
+            # Recorded rather than dropped. It is true of the old machine and
+            # costs one line; a migration that quietly forgets software is the
+            # thing this tool is built not to do.
+            data["shipped_with_windows"] = True
+        if self.signature_kind:
+            data["signature_kind"] = self.signature_kind
         if self.winget_knows_no_package:
             data["winget_has_no_package"] = True
         if self.covered_by_office:
@@ -187,7 +273,11 @@ class SoftwareInventory:
 
     @property
     def reinstallable(self) -> list[SoftwareEntry]:
-        return [entry for entry in self.entries if entry.reinstallable]
+        return [
+            entry
+            for entry in self.entries
+            if entry.reinstallable and not entry.shipped_with_windows
+        ]
 
     @property
     def manual(self) -> list[SoftwareEntry]:
@@ -199,6 +289,7 @@ class SoftwareInventory:
             and not entry.is_component
             and not entry.covered_by_office
             and not entry.managed_by
+            and not entry.shipped_with_windows
         ]
 
     @property
@@ -206,13 +297,31 @@ class SoftwareInventory:
         return [
             entry
             for entry in self.entries
-            if not entry.reinstallable and entry.is_component and not entry.managed_by
+            if not entry.reinstallable
+            and entry.is_component
+            and not entry.managed_by
+            and not entry.shipped_with_windows
         ]
 
     @property
     def launcher_managed(self) -> list[SoftwareEntry]:
         """Titles that come back by signing into a game launcher."""
-        return [entry for entry in self.entries if entry.managed_by and not entry.reinstallable]
+        return [
+            entry
+            for entry in self.entries
+            if entry.managed_by and not entry.reinstallable and not entry.shipped_with_windows
+        ]
+
+    @property
+    def shipped_with_windows(self) -> list[SoftwareEntry]:
+        """What came with Windows, and so is on the new machine already.
+
+        Not work, in either column. Edge, Paint, the Store, Solitaire: the new
+        machine has them before this tool is opened, several have winget
+        packages, and without this they fill the reinstall list with things that
+        would be reinstalled on top of themselves.
+        """
+        return [entry for entry in self.entries if entry.shipped_with_windows]
 
     def launchers(self) -> dict[str, int]:
         """Launcher name -> how many managed titles it accounts for."""
@@ -230,6 +339,7 @@ class SoftwareInventory:
                 "components": len(self.components),
                 "launcher_managed": len(self.launcher_managed),
                 "covered_by_office": sum(1 for e in self.entries if e.covered_by_office),
+                "shipped_with_windows": len(self.shipped_with_windows),
                 "winget_packages_in_export": len(packages_from_export(self.winget_export)),
             },
             "applications": [entry.to_json() for entry in self.entries],
@@ -682,8 +792,8 @@ def is_framework_package(identifier: str) -> bool:
 
 # --- appx ------------------------------------------------------------------
 APPX_SCRIPT = (
-    "Get-AppxPackage | Select-Object Name,PackageFamilyName,Publisher,Version,Architecture "
-    "| ConvertTo-Json -Compress -Depth 3"
+    "Get-AppxPackage | Select-Object Name,PackageFamilyName,Publisher,Version,"
+    "Architecture,SignatureKind | ConvertTo-Json -Compress -Depth 3"
 )
 
 
@@ -726,9 +836,25 @@ def parse_appx_json(text: str) -> list[SoftwareEntry]:
                 appx_family=str(package.get("PackageFamilyName") or "").strip() or None,
                 scope="user",
                 architecture=str(package.get("Architecture") or "").strip(),
+                signature_kind=_signature_kind(package.get("SignatureKind")),
             )
         )
     return entries
+
+
+#: ``SignatureKind`` as PowerShell serialises the enum: a name when the
+#: property was expanded, an ordinal when ConvertTo-Json reduced it to its
+#: numeric value. 0=None, 1=Developer, 2=Enterprise, 3=Store, 4=System.
+SIGNATURE_KIND_NAMES = {0: "None", 1: "Developer", 2: "Enterprise", 3: "Store", 4: "System"}
+
+
+def _signature_kind(value: Any) -> str:
+    """Normalise what ConvertTo-Json made of the SignatureKind enum."""
+    if isinstance(value, bool) or value is None:
+        return ""
+    if isinstance(value, int):
+        return SIGNATURE_KIND_NAMES.get(value, "")
+    return str(value).strip()
 
 
 def _publisher_common_name(publisher: str) -> str:
@@ -965,6 +1091,10 @@ def adopt_known_packages(
     for entry in entries:
         if entry.winget_id or not entry.winget_knows_no_package:
             continue
+        if entry.shipped_with_windows:
+            # Finding a package for something Windows already installed is not
+            # a find. The table exists to rescue what the user chose to put on.
+            continue
         identifier = known_package_for(entry.name)
         if not identifier or squash(identifier) in claimed:
             continue
@@ -1011,6 +1141,36 @@ def _add_to_export(export: dict[str, Any], identifiers: list[str]) -> None:
             packages.append({"PackageIdentifier": identifier})
 
 
+def drop_from_export(export: dict[str, Any] | None, identifiers: set[str]) -> int:
+    """Take ids out of the file winget import will read. Returns how many.
+
+    Matched case-insensitively, because winget's export and its list output do
+    not always agree on the casing of an id and a case-sensitive compare would
+    quietly leave the package in.
+    """
+    if not export or not identifiers:
+        return 0
+    unwanted = {identifier.lower() for identifier in identifiers}
+    removed = 0
+    for source in export.get("Sources") or []:
+        if not isinstance(source, dict):
+            continue
+        packages = source.get("Packages")
+        if not isinstance(packages, list):
+            continue
+        kept = [
+            package
+            for package in packages
+            if not (
+                isinstance(package, dict)
+                and str(package.get("PackageIdentifier", "")).lower() in unwanted
+            )
+        ]
+        removed += len(packages) - len(kept)
+        source["Packages"] = kept
+    return removed
+
+
 def merge(
     registry_entries: list[SoftwareEntry],
     appx_entries: list[SoftwareEntry],
@@ -1033,6 +1193,9 @@ def merge(
         existing.publisher = existing.publisher or entry.publisher
         existing.appx_family = existing.appx_family or entry.appx_family
         existing.architecture = existing.architecture or entry.architecture
+        # Only the Appx half of a merged pair carries this, and it is the half
+        # that knows whether Windows brought the thing along.
+        existing.signature_kind = existing.signature_kind or entry.signature_kind
 
     entries = list(merged.values())
     stats = apply_winget_listings(entries, listings) if listings else None
@@ -1087,6 +1250,25 @@ def scan_software(env: Environment) -> SoftwareInventory:
     inventory.entries, inventory.join_stats = merge(
         registry_entries, appx_entries, packages_from_export(export), listings
     )
+
+    # Windows brings its own programs, and the new machine already has them.
+    # Several -- Edge, Paint, the Store, Solitaire -- do have winget packages,
+    # so without this the restore spends its time reinstalling them on top of
+    # themselves while the user watches. They stay in the record, flagged, so
+    # nothing is silently dropped; they just stop being work.
+    shipped = inventory.shipped_with_windows
+    if shipped:
+        removed = drop_from_export(
+            inventory.winget_export,
+            {entry.winget_id for entry in shipped if entry.winget_id},
+        )
+        inventory.notes.append(
+            f"{len(shipped)} program(s) that come with Windows are listed but will "
+            "not be reinstalled, because the new machine has them already"
+            + (f" ({removed} removed from the winget import)" if removed else "")
+        )
+        log.info("%d program(s) shipped with Windows; not reinstalling them", len(shipped))
+
     if env.is_windows:
         # The second opinion, after winget's own. Only for the ones it said it
         # had no package for, and only once it confirms each id itself.

@@ -335,3 +335,27 @@ def test_the_flag_is_looked_for_by_name_rather_than_by_prose():
     assert reinstall.supports_silent(helping(HELP_WITHOUT_SILENT)) is False
     # Prose about silence is not the flag.
     assert reinstall.supports_silent(helping("installs packages silently")) is False
+
+
+def test_what_came_with_windows_is_neither_counted_nor_written_down(tmp_path: Path):
+    """The scan flags these and takes them out of the winget import. The report
+    has to agree, or it promises 99 reinstalls for an import file holding 97 --
+    and pads the by-hand list with Paint, which is already on the new machine."""
+    record = {
+        "applications": [
+            {"name": "Mozilla Firefox", "winget_id": "Mozilla.Firefox"},
+            {"name": "Microsoft Edge", "winget_id": "Microsoft.Edge",
+             "shipped_with_windows": True},
+            {"name": "Microsoft.Paint", "shipped_with_windows": True},
+            {"name": "Bespoke Tool", "publisher": "ACME"},
+        ],
+        "winget_export": {"Sources": [{"Packages": [{"PackageIdentifier": "Mozilla.Firefox"}]}]},
+    }
+    artifacts = reinstall.write_artifacts(manifest_with(("software", record)), tmp_path)
+
+    assert artifacts.reinstallable_count == 1
+    assert artifacts.manual_count == 1
+    text = artifacts.manual_list.read_text(encoding="utf-8")
+    assert "Bespoke Tool" in text
+    assert "Paint" not in text
+    assert "Microsoft Edge" not in text

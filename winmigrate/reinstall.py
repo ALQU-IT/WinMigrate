@@ -72,8 +72,14 @@ def write_artifacts(manifest: dict[str, Any], destination: Path) -> Artifacts:
         # someone who wrote their own -- and one odd field here must not cost
         # the user the restore report, which is where the follow-up list lives.
         applications = [
-            app for app in _as_list(software.get("applications")) if isinstance(app, dict)
+            app
+            for app in _as_list(software.get("applications"))
+            if isinstance(app, dict) and not app.get("shipped_with_windows")
         ]
+        # Dropped here, once, rather than filtered out of each list below:
+        # what came with Windows is on the new machine already, so it is
+        # neither something to reinstall nor a chore to write down. The scan
+        # has already taken these out of the winget import.
         artifacts.reinstallable_count = sum(1 for app in applications if app.get("winget_id"))
         # Runtimes and drivers arrive with whatever needs them; listing them as
         # chores would bury the handful that genuinely need a person.
