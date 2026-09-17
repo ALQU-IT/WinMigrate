@@ -356,15 +356,21 @@ def test_the_two_palettes_are_actually_different_and_the_right_way_round():
     assert brightness(theme.LIGHT.ink) < 60
 
     for palette in (theme.LIGHT, theme.DARK):
-        page = brightness(palette.page)
+        # Against the frosted panel, not the flat page colour: the panel is
+        # what the text is actually read on, and it is tinted by the wash
+        # behind it, so checking the wrong one would pass while the real
+        # surface drifted towards the ink.
+        page = brightness(theme.surfaces_for(palette).page)
         for name in ("ink", "ink_soft", "accent", "secret", "bad"):
             assert abs(brightness(getattr(palette, name)) - page) > 60, (palette, name)
 
 
-def test_the_dark_palette_does_not_use_the_vista_widget_theme():
-    """vista draws its widgets from Windows' own light bitmaps, which cannot be
-    recoloured. A dark page framed in white chrome looks broken, so clam -- which
-    is drawn from the colours it is given -- is used instead."""
+def test_neither_palette_uses_the_vista_widget_theme():
+    """vista draws its widgets from Windows' own bitmaps. They cannot be
+    recoloured and they ignore every background handed to them, so under vista
+    an accent-filled button is simply a grey button and a frosted panel is
+    framed in chrome that does not match it. Both themes use clam, which is
+    drawn from the colours it is given."""
 
     class Recorder:
         def __init__(self):
@@ -379,13 +385,13 @@ def test_the_dark_palette_does_not_use_the_vista_widget_theme():
         def map(self, *a, **k):
             pass
 
-    dark = Recorder()
-    theme.apply(dark, "Segoe UI", theme.DARK)
-    assert dark.used == ["clam"]
+        def layout(self, *a, **k):
+            pass
 
-    light = Recorder()
-    theme.apply(light, "Segoe UI", theme.LIGHT)
-    assert light.used[0] == "vista"
+    for palette in (theme.DARK, theme.LIGHT):
+        recorder = Recorder()
+        theme.apply(recorder, "Segoe UI", palette)
+        assert recorder.used == ["clam"], palette
 
 
 
@@ -415,8 +421,13 @@ def test_neither_confirm_page_lets_an_empty_passphrase_through(tmp_path: Path):
 def test_a_palette_knows_whether_it_is_dark_rather_than_being_recognised_by_identity():
     """apply() used to decide with ``palette is DARK``, and identity stops being
     true the moment the module is imported twice -- a frozen build, a reload, a
-    test that clears sys.modules. It does not raise; it hands a dark page the
-    light widget theme and leaves it framed in white chrome."""
+    test that clears sys.modules. It does not raise; it quietly hands a dark
+    window the light treatment.
+
+    The widget theme no longer turns on it, but the frosting still does: a dark
+    panel is veiled towards white a fraction as hard as a light one, because
+    over a near-black field a heavy white veil is a grey slab. Getting that
+    backwards on a copied palette would light the whole window up."""
     import dataclasses
 
     assert theme.LIGHT.dark is False and theme.DARK.dark is True
@@ -425,23 +436,7 @@ def test_a_palette_knows_whether_it_is_dark_rather_than_being_recognised_by_iden
     # A copy is a different object and must still be treated as dark.
     copied = dataclasses.replace(theme.DARK)
     assert copied is not theme.DARK
-
-    class Recorder:
-        def __init__(self):
-            self.used = []
-
-        def theme_use(self, name):
-            self.used.append(name)
-
-        def configure(self, *a, **k):
-            pass
-
-        def map(self, *a, **k):
-            pass
-
-    recorder = Recorder()
-    theme.apply(recorder, "Segoe UI", copied)
-    assert recorder.used == ["clam"]
+    assert theme.surfaces_for(copied) == theme.surfaces_for(theme.DARK)
 
 
 # --- how the pages read -----------------------------------------------------
@@ -511,3 +506,46 @@ def test_the_offer_is_made_for_either_reason_and_never_twice():
 
     assert elevate.should_offer(False, False) is False   # nothing asked for it
     assert elevate.should_offer(True, True) is False     # this is the relaunched copy
+
+
+def test_the_tick_boxes_are_styled_with_option_names_clam_actually_has():
+    """ttk accepts an option a theme has never heard of without a word.
+
+    "indicatorcolor" reads like the right name and clam has no such option, so
+    a style written against it silently does nothing: the boxes keep clam's
+    default white fill, which on the dark theme makes the *unticked* ones the
+    brightest thing on the page. It looked styled and was inverted, and nothing
+    failed. clam's indicator takes indicatorbackground and indicatorforeground.
+    """
+
+    class Recorder:
+        def __init__(self):
+            self.options: dict[str, set[str]] = {}
+
+        def theme_use(self, name):
+            pass
+
+        def configure(self, name, **kwargs):
+            self.options.setdefault(name, set()).update(kwargs)
+
+        def map(self, name, **kwargs):
+            self.options.setdefault(name, set()).update(kwargs)
+
+        def layout(self, *a, **k):
+            pass
+
+    recorder = Recorder()
+    theme.apply(recorder, "Segoe UI", theme.DARK)
+
+    indicators = [
+        name for name in recorder.options
+        if name.endswith(("TCheckbutton", "TRadiobutton"))
+    ]
+    assert indicators, "no tick box or radio style was configured at all"
+    for name in indicators:
+        used = recorder.options[name]
+        assert "indicatorbackground" in used, name
+        assert "indicatorforeground" in used, name
+        assert "indicatorcolor" not in used, (
+            f"{name} uses indicatorcolor, which clam ignores"
+        )

@@ -189,3 +189,133 @@ def set_icon(root, image_factory=None) -> bool:
     except Exception as exc:  # noqa: BLE001 -- a default icon still works
         log.info("could not set the window icon: %s", exc)
         return False
+
+
+# --- the window's own material ---------------------------------------------
+#: ``DwmSetWindowAttribute`` attributes, by their numbers in dwmapi.h.
+#:
+#: Each arrived in a different Windows build and an older one rejects the
+#: attribute it has never heard of with an HRESULT rather than crashing, which
+#: is why every one of these can simply be attempted. On Windows 10 the corner
+#: and colour attributes do nothing and the dark title bar still works; on
+#: Windows 11 all of them do.
+DWMWA_USE_IMMERSIVE_DARK_MODE = 20     # Windows 10 1809+
+DWMWA_BORDER_COLOR = 34                # Windows 11 22000+
+DWMWA_CAPTION_COLOR = 35
+DWMWA_TEXT_COLOR = 36
+DWMWA_SYSTEMBACKDROP_TYPE = 38         # Windows 11 22621+
+DWMWA_WINDOW_CORNER_PREFERENCE = 33
+
+#: ``DWM_WINDOW_CORNER_PREFERENCE``. 2 is the rounded corner Windows 11 gives
+#: its own windows; 0 lets the system decide, which for a Tk window means
+#: square.
+DWMWCP_ROUND = 2
+
+#: ``DWM_SYSTEMBACKDROP_TYPE``. Mica samples the desktop wallpaper and blurs it
+#: behind the window -- the genuine article, done by the compositor rather than
+#: imitated. It is the only real blur available to this program.
+DWMSBT_MAINWINDOW = 2       # Mica
+DWMSBT_TRANSIENTWINDOW = 3  # Acrylic
+
+
+def _window_handle(root) -> int | None:
+    """The HWND for a Tk window, or None if it has not got one yet.
+
+    ``winfo_id`` on Windows returns the handle of Tk's *child* window, not the
+    top-level one that has a title bar and a frame -- and DWM attributes set on
+    a child are accepted and then do nothing at all, which is the most annoying
+    way for this to fail. ``GetParent`` walks up to the real one.
+    """
+    if not is_windows():
+        return None
+    try:
+        import ctypes  # noqa: PLC0415
+
+        root.update_idletasks()  # the handle does not exist until it is realised
+        child = int(root.winfo_id())
+        parent = int(ctypes.windll.user32.GetParent(child))
+        return parent or child
+    except Exception as exc:  # noqa: BLE001
+        log.debug("no window handle available: %s", exc)
+        return None
+
+
+def _colorref(colour: str) -> int:
+    """``#rrggbb`` as the 0x00bbggrr integer DWM wants.
+
+    Byte order reversed against every other colour in this program, which is
+    the one thing to get wrong here: passing an RGB integer straight through
+    silently swaps red and blue, and a blue title bar comes out orange.
+    """
+    from .glass import parse  # noqa: PLC0415
+
+    red, green, blue = parse(colour)
+    return (blue << 16) | (green << 8) | red
+
+
+def _set_attribute(handle: int, attribute: int, value: int) -> bool:
+    """One ``DwmSetWindowAttribute`` call. True when Windows accepted it."""
+    try:
+        import ctypes  # noqa: PLC0415
+        from ctypes import wintypes  # noqa: PLC0415
+
+        dwmapi = ctypes.windll.dwmapi
+        dwmapi.DwmSetWindowAttribute.argtypes = [
+            wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD
+        ]
+        dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
+        # Every attribute used here takes a 4-byte value: a BOOL, an enum, or a
+        # COLORREF. Declaring the size wrongly is how this call corrupts the
+        # stack rather than politely failing.
+        stored = ctypes.c_int(value)
+        result = dwmapi.DwmSetWindowAttribute(
+            wintypes.HWND(handle),
+            wintypes.DWORD(attribute),
+            ctypes.byref(stored),
+            wintypes.DWORD(ctypes.sizeof(stored)),
+        )
+        return result == 0
+    except Exception as exc:  # noqa: BLE001 -- an old build, or no dwmapi
+        log.debug("DWM attribute %d not accepted: %s", attribute, exc)
+        return False
+
+
+def apply_window_material(root, palette) -> list[str]:
+    """Make the frame Windows draws match the window it is drawn around.
+
+    Tk gives every window the default title bar, which on a dark theme is a
+    white strip above a dark page -- the single loudest thing on screen, and
+    the giveaway that a window was not written for this operating system. The
+    frame is not ours to paint, but it is ours to ask about, and Windows 11
+    answers all of these.
+
+    Returns the names of what it managed to set, for the log and for a test to
+    read. Every part fails soft: a Windows 10 machine gets the dark title bar
+    and nothing else, and one older still gets what it had before.
+    """
+    handle = _window_handle(root)
+    if handle is None:
+        return []
+
+    applied: list[str] = []
+    attempts: tuple[tuple[str, int, int], ...] = (
+        # First, because on Windows 10 it is the only one that lands and it is
+        # the one that matters most.
+        ("dark-title-bar", DWMWA_USE_IMMERSIVE_DARK_MODE, 1 if palette.dark else 0),
+        ("rounded-corners", DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND),
+        # The caption is painted the colour of the wash directly beneath it, so
+        # the frame stops being a separate strip and the window reads as one
+        # object. This is what does most of the work of looking modern.
+        ("caption-colour", DWMWA_CAPTION_COLOR, _colorref(palette.wash_top)),
+        ("caption-text", DWMWA_TEXT_COLOR, _colorref(palette.ink)),
+        ("border-colour", DWMWA_BORDER_COLOR, _colorref(palette.rule)),
+        # Real blur, from the compositor, sampling the desktop behind the
+        # window. The only genuine glass in the program -- everything inside
+        # the window is computed, because nothing in Tk can blur.
+        ("mica", DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_MAINWINDOW),
+    )
+    for name, attribute, value in attempts:
+        if _set_attribute(handle, attribute, value):
+            applied.append(name)
+    log.info("window material: %s", ", ".join(applied) if applied else "none available")
+    return applied

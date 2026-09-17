@@ -290,10 +290,38 @@ def test_every_ttk_style_the_window_uses_is_configured():
     from winmigrate.gui import theme
 
     used = set(re.findall(r'style="([\w.]+)"', _app_source()))
-    theme_source = _module_source("winmigrate.gui.theme")
-    configured = set(re.findall(r'style\.configure\(\s*"([\w.]+)"', theme_source))
+
+    # apply() is run rather than read. It used to be scanned for
+    # style.configure("...") calls, which stopped seeing a name the moment two
+    # styles shared a loop -- the regex passed while a real widget fell back to
+    # the default. Running it records whatever it actually configures, however
+    # the call is written.
+    class Recorder:
+        def __init__(self):
+            self.configured: set[str] = set()
+
+        def theme_use(self, name):
+            pass
+
+        def configure(self, name, **kwargs):
+            self.configured.add(name)
+
+        def map(self, *a, **k):
+            pass
+
+        def layout(self, *a, **k):
+            pass
+
+    recorder = Recorder()
+    theme.apply(recorder, "Segoe UI", theme.LIGHT)
     named = {theme.RAIL_ON, theme.RAIL_DONE, theme.RAIL_OFF}
-    assert used - configured - named == set()
+    assert used - recorder.configured - named == set()
+
+    # And the two palettes configure the same set, or one of them has a widget
+    # falling back to ttk's default in a window that is otherwise themed.
+    other = Recorder()
+    theme.apply(other, "Segoe UI", theme.DARK)
+    assert recorder.configured == other.configured
 
 
 def test_the_passphrase_is_dropped_when_the_job_ends_not_when_it_starts():

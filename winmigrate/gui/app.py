@@ -39,7 +39,7 @@ from ..models import ScanResult, Severity
 from ..platform_win import Environment
 from ..scan import run_scan
 from ..util import humanize, paths as pathutil
-from . import defaults, desktop, elevate, runlog, selection, theme
+from . import defaults, desktop, elevate, glass, runlog, selection, theme
 from .wizard import Mode, PasswordExport, Step, WizardData
 
 
@@ -211,10 +211,13 @@ class WinMigrateWizard:
         self.palette = theme.palette_for(self.dark)
         self.style = ttk.Style(root)
         theme.apply(self.style, self.family, self.palette)
-        root.configure(background=self.palette.page)
+        root.configure(background=self.palette.wash_top)
         log.info("theme: %s", "dark" if self.dark else "light")
 
         self._build_chrome()
+        # After the chrome, so the caption is painted the colour of the wash it
+        # sits above rather than a colour chosen before there was one.
+        desktop.apply_window_material(root, self.palette)
         self._build_pages()
         self._bind_keys()
         self._show(Step.CHOOSE)
@@ -222,18 +225,41 @@ class WinMigrateWizard:
 
     # --- the frame around every page ---------------------------------------
     def _build_chrome(self) -> None:
+        """The window's furniture: the wash, the three panels, and the rail.
+
+        Everything sits on one canvas. The canvas paints the colour wash and
+        the frosted panels; the panels' contents are ordinary ttk frames
+        embedded in it, so the text stays real text that ttk styles and the
+        user can select. Only the surfaces underneath are drawn.
+
+        Packing the frames directly into the window instead would be simpler
+        and would also hide the wash completely: a ttk frame paints one opaque
+        colour over every pixel it covers, and frames packed edge to edge cover
+        all of them. The gaps are the design.
+        """
         ttk = self.ttk
 
-        body = ttk.Frame(self.root, style="Page.TFrame")
-        body.pack(fill="both", expand=True)
+        self.backdrop_canvas = self.tk.Canvas(
+            self.root,
+            highlightthickness=0,
+            borderwidth=0,
+            # Matched to the top of the wash so the split second before the
+            # first paint is not a white flash on a dark theme.
+            background=self.palette.wash_top,
+        )
+        self.backdrop_canvas.pack(fill="both", expand=True)
+        self.backdrop = glass.Backdrop(
+            self.backdrop_canvas, self.palette, theme.CARD_RADIUS
+        )
 
-        self.rail = ttk.Frame(body, style="Rail.TFrame", width=theme.RAIL_WIDTH)
-        self.rail.pack(side="left", fill="y")
-        self.rail.pack_propagate(False)
+        body = ttk.Frame(self.backdrop_canvas, style="Page.TFrame")
+
+        self.rail = ttk.Frame(self.backdrop_canvas, style="Rail.TFrame",
+                              width=theme.RAIL_WIDTH)
         ttk.Label(self.rail, text="WinMigrate", style="RailTitle.TLabel").pack(
             anchor="w", padx=18, pady=(22, 2)
         )
-        ttk.Label(self.rail, text="profile backup", style="RailOff.TLabel").pack(
+        ttk.Label(self.rail, text="profile backup", style="RailNote.TLabel").pack(
             anchor="w", padx=18, pady=(0, 18)
         )
         self.rail_labels: list[Any] = []
@@ -243,7 +269,10 @@ class WinMigrateWizard:
             label = ttk.Label(
                 self.rail, text=f"  {RAIL_LABELS[entry]}", style=theme.RAIL_OFF
             )
-            label.pack(anchor="w", padx=16, pady=4)
+            # Filled across the rail rather than sized to its text, so the step
+            # the user is on reads as a selected row instead of a stray
+            # coloured word.
+            label.pack(fill="x", padx=10, pady=1)
             self.rail_labels.append(label)
 
         # Pinned to the bottom of the rail rather than mentioned once at the
@@ -252,39 +281,38 @@ class WinMigrateWizard:
         self.log_label = ttk.Label(
             self.rail,
             text=self._log_note(),
-            style="RailOff.TLabel",
-            wraplength=theme.RAIL_WIDTH - 32,
+            style="RailNote.TLabel",
+            # The rail frame is inset inside its panel, so the text has less
+            # room than the rail is wide. Wrapping to the panel's full width
+            # runs the last word off the edge.
+            wraplength=theme.RAIL_WIDTH - 52,
             justify="left",
         )
         self.log_label.pack(side="bottom", anchor="w", padx=16, pady=(0, 16))
 
-        right = ttk.Frame(body, style="Page.TFrame")
-        right.pack(side="left", fill="both", expand=True)
-
-        head = ttk.Frame(right, style="Page.TFrame")
-        head.pack(fill="x", padx=theme.PAD, pady=(24, 0))
+        head = ttk.Frame(body, style="Page.TFrame")
+        head.pack(fill="x", padx=theme.PAD, pady=(22, 0))
         self.title_label = ttk.Label(head, text="", style="Title.TLabel")
         self.title_label.pack(anchor="w")
         self.subtitle_label = ttk.Label(
             head, text="", style="Subtitle.TLabel", wraplength=640, justify="left"
         )
-        self.subtitle_label.pack(anchor="w", pady=(6, 0))
-        ttk.Separator(right, orient="horizontal").pack(fill="x", padx=theme.PAD, pady=16)
+        self.subtitle_label.pack(anchor="w", pady=(8, 0))
+        ttk.Separator(body, orient="horizontal").pack(fill="x", padx=theme.PAD, pady=16)
 
-        self.page_area = ttk.Frame(right, style="Page.TFrame")
-        self.page_area.pack(fill="both", expand=True, padx=theme.PAD)
+        self.page_area = ttk.Frame(body, style="Page.TFrame")
+        self.page_area.pack(fill="both", expand=True, padx=theme.PAD, pady=(0, 16))
 
-        footer = ttk.Frame(self.root, style="Band.TFrame")
-        footer.pack(fill="x", side="bottom")
-        ttk.Separator(footer, orient="horizontal").pack(fill="x")
-        inner = ttk.Frame(footer, style="Band.TFrame")
-        inner.pack(fill="x", padx=theme.PAD, pady=12)
+        inner = ttk.Frame(self.backdrop_canvas, style="Band.TFrame")
         self.hint = ttk.Label(inner, text="", style="BandHint.TLabel")
-        self.hint.pack(side="left")
+        self.hint.pack(side="left", padx=theme.PAD)
+        # The one button the page is asking for is filled with the accent; the
+        # other two are outlines. A row of three identical buttons makes
+        # somebody read all three to find out which one means "carry on".
         self.next_button = self.ttk.Button(
-            inner, text="Next", style="Wizard.TButton", command=self._go_next
+            inner, text="Next", style="Accent.TButton", command=self._go_next
         )
-        self.next_button.pack(side="right")
+        self.next_button.pack(side="right", padx=(0, theme.PAD))
         self.back_button = self.ttk.Button(
             inner, text="Back", style="Wizard.TButton", command=self._go_back
         )
@@ -293,6 +321,63 @@ class WinMigrateWizard:
             inner, text="Cancel", style="Wizard.TButton", command=self._cancel
         )
         self.cancel_button.pack(side="right", padx=(0, 8))
+
+        # Embedded rather than packed, so the canvas can place them over the
+        # panels it paints and leave the gaps between them showing.
+        canvas = self.backdrop_canvas
+        self._panels = {
+            "rail": canvas.create_window(0, 0, window=self.rail, anchor="nw"),
+            "page": canvas.create_window(0, 0, window=body, anchor="nw"),
+            "band": canvas.create_window(0, 0, window=inner, anchor="nw"),
+        }
+        canvas.bind("<Configure>", self._relayout)
+
+    #: How tall the button band is. Fixed rather than measured: measuring means
+    #: laying out the buttons, reading their height, then laying everything out
+    #: again around it, and the window visibly settles while it happens.
+    FOOTER_HEIGHT = 62
+
+    def _relayout(self, event: Any = None) -> None:
+        """Repaint the wash and put the three panels back where they belong.
+
+        Runs on every resize, so it repaints rather than animating: a canvas
+        with a few hundred rectangles on it is cheap to throw away and redraw,
+        and cheaper than working out which of them moved.
+        """
+        canvas = self.backdrop_canvas
+        width = int(getattr(event, "width", 0) or canvas.winfo_width())
+        height = int(getattr(event, "height", 0) or canvas.winfo_height())
+        if width <= 1 or height <= 1:  # not laid out yet
+            return
+
+        gap = theme.CARD_GAP
+        surfaces = theme.surfaces_for(self.palette)
+        rail_right = gap + theme.RAIL_WIDTH
+        band_top = height - gap - self.FOOTER_HEIGHT
+        body_bottom = band_top - gap
+        page_left = rail_right + gap
+        page_right = width - gap
+
+        self.backdrop.clear()
+        self.backdrop.paint_wash(width, height, theme.BLOOMS)
+        self.backdrop.paint_panel(gap, gap, rail_right, body_bottom, surfaces.rail)
+        self.backdrop.paint_panel(page_left, gap, page_right, body_bottom, surfaces.page)
+        self.backdrop.paint_panel(gap, band_top, width - gap, height - gap, surfaces.band)
+
+        # Inset by the corner radius so a panel's rounded corner is not clipped
+        # off by the square frame sitting inside it.
+        inset = theme.CARD_RADIUS // 2
+        for name, (x0, y0, x1, y1) in (
+            ("rail", (gap, gap, rail_right, body_bottom)),
+            ("page", (page_left, gap, page_right, body_bottom)),
+            ("band", (gap, band_top, width - gap, height - gap)),
+        ):
+            canvas.coords(self._panels[name], x0 + inset, y0 + inset)
+            canvas.itemconfigure(
+                self._panels[name],
+                width=max(1, x1 - x0 - inset * 2),
+                height=max(1, y1 - y0 - inset * 2),
+            )
 
     def _bind_keys(self) -> None:
         """Enter goes on, Escape backs out.

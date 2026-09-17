@@ -183,10 +183,70 @@ class Treeview(Widget):
         self._children = [child for child in self._children if child in self.rows]
 
 
+class Canvas(Widget):
+    """The backdrop. Records what was drawn, in order.
+
+    Not a drawing surface -- there is no display -- but the wizard positions
+    the three panels on it, so what it was told to draw and where is exactly
+    the layout, and can be asserted on.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.items: list[tuple] = []
+        self.windows: dict[int, dict] = {}
+        self._next = 0
+
+    def _add(self, kind, *coords, **kwargs):
+        self._next += 1
+        self.items.append((kind, coords, kwargs))
+        return self._next
+
+    def create_rectangle(self, *coords, **kwargs):
+        return self._add("rectangle", *coords, **kwargs)
+
+    def create_oval(self, *coords, **kwargs):
+        return self._add("oval", *coords, **kwargs)
+
+    def create_polygon(self, *coords, **kwargs):
+        return self._add("polygon", *coords, **kwargs)
+
+    def create_line(self, *coords, **kwargs):
+        return self._add("line", *coords, **kwargs)
+
+    def create_window(self, x, y, window=None, anchor="nw", **kwargs):
+        self._next += 1
+        self.windows[self._next] = {"x": x, "y": y, "window": window, **kwargs}
+        return self._next
+
+    def coords(self, item, *values):
+        if item in self.windows and len(values) >= 2:
+            self.windows[item]["x"], self.windows[item]["y"] = values[0], values[1]
+
+    def itemconfigure(self, item, **kwargs):
+        if item in self.windows:
+            self.windows[item].update(kwargs)
+
+    itemconfig = itemconfigure
+
+    def delete(self, *tags):
+        # Only tagged drawing is cleared; the embedded panels stay, which is
+        # what the real canvas does and what the wizard relies on.
+        if "backdrop" in tags:
+            self.items = [i for i in self.items if i[2].get("tags") != "backdrop"]
+
+    def winfo_width(self):
+        return 1000
+
+    def winfo_height(self):
+        return 700
+
+
 class Style:
     def __init__(self, *args):
         self.themes: list[str] = []
         self.styles: dict[str, dict] = {}
+        self.layouts: dict[str, object] = {}
 
     def theme_use(self, name):
         self.themes.append(name)
@@ -196,6 +256,10 @@ class Style:
 
     def map(self, *args, **kwargs):
         pass
+
+    def layout(self, name, spec=None):
+        self.layouts[name] = spec
+        return spec
 
 
 def install(monkeypatch) -> list:
@@ -217,6 +281,7 @@ def install(monkeypatch) -> list:
     tk = module("tkinter")
     tk.Tk = Widget
     tk.Text = Widget
+    tk.Canvas = Canvas
     tk.StringVar = Var
     tk.BooleanVar = Var
     tk.TkVersion = 8.6
