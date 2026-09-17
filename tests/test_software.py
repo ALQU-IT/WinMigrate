@@ -1102,3 +1102,43 @@ def test_an_entry_with_no_winget_id_does_not_trip_over_the_id_check():
     against None is the sort of thing that takes the whole scan down."""
     assert software.SoftwareEntry(name="ACME Bespoke Suite").shipped_with_windows is False
     assert software.SoftwareEntry(name="x", winget_id=None).shipped_with_windows is False
+
+
+def test_the_export_is_never_asked_for_the_versions():
+    """The root of the whole thing. winget export leaves versions out unless
+    asked, and asking for them is what turned the import file into a list of
+    builds to install rather than programs:
+
+        No version found matching: 8.8.1
+        Search failed for: Notepad++.Notepad++
+
+    The repository does not keep old manifests, so a file written with versions
+    stops working within weeks -- and it fails for every package at once,
+    because they all age together.
+    """
+    seen: list[list[str]] = []
+
+    def fake_runner(command, timeout=None, input_text=None):
+        seen.append(list(command))
+        target = Path(command[command.index("-o") + 1])
+        target.write_text(json.dumps({"Sources": [{"Packages": []}]}), encoding="utf-8")
+        return CommandResult(command, 0)
+
+    software.run_winget_export(runner=fake_runner)
+
+    assert seen and "--include-versions" not in seen[0]
+    # Nothing else about the command changed with it.
+    assert seen[0][:2] == ["winget", "export"]
+    assert "--accept-source-agreements" in seen[0]
+    assert "--disable-interactivity" in seen[0]
+
+
+def test_an_older_bundle_that_does_have_versions_is_still_readable():
+    """A bundle captured before this was fixed carries versions. Reading one
+    must not become a different code path, or the fix breaks the restores it
+    was meant to rescue."""
+    export = {"Sources": [{"Packages": [
+        {"PackageIdentifier": "A.B", "Version": "1"},
+        {"PackageIdentifier": "C.D"},
+    ]}]}
+    assert software.packages_from_export(export) == [("A.B", "1"), ("C.D", "")]

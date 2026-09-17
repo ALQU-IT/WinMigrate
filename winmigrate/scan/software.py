@@ -13,8 +13,12 @@ marked with whether winget can reinstall it. Anything it cannot goes into a
 "reinstall by hand" list rather than being quietly dropped -- a migration that
 silently loses software is worse than one that admits it.
 
-The import file written for restore is **winget's own export**, verbatim, rather
-than something reconstructed here.
+The import file written for restore is **winget's own export**, rather than
+something reconstructed here, with two deliberate departures that are each
+argued for where they happen: packages winget failed to recognise as installed
+are added back (:func:`adopt_known_packages`), and no version is ever recorded
+or replayed, because a version in that file is an instruction to install a
+build that will not exist for long (:func:`run_winget_export`).
 
 Which applications winget can reinstall is answered by ``winget list``, not by
 guessing: it reports every installed application with either a real package id
@@ -425,6 +429,19 @@ def run_winget_export(runner=process.run) -> tuple[dict[str, Any] | None, str | 
     ``winget export`` produces the same JSON that ``winget import`` consumes,
     which is why it is preferred over scraping ``winget list``'s column output.
     Returns ``(export, error)``.
+
+    Deliberately *without* ``--include-versions``. That flag writes the version
+    each package happens to be at, and ``winget import`` then treats those
+    versions as instructions rather than notes: it insists on them, the
+    community repository does not keep old manifests, and within weeks every
+    version in the file is one nobody can install. The whole import then fails
+    at once, package by package, saying "No version found matching" -- which
+    reads as the packages having gone rather than as the file having aged.
+
+    A migration wants the program back, not the build of it that happened to be
+    on the old machine. What version that was is recorded next to every
+    application in the manifest either way; it simply has no business being in
+    the file that says what to install.
     """
     with tempfile.TemporaryDirectory() as directory:
         target = Path(directory) / "winget-export.json"
@@ -436,7 +453,6 @@ def run_winget_export(runner=process.run) -> tuple[dict[str, Any] | None, str | 
                 str(target),
                 "--accept-source-agreements",
                 "--disable-interactivity",
-                "--include-versions",
             ],
             timeout=180,
         )
@@ -451,7 +467,13 @@ def run_winget_export(runner=process.run) -> tuple[dict[str, Any] | None, str | 
 
 
 def packages_from_export(export: dict[str, Any] | None) -> list[tuple[str, str]]:
-    """Flatten an export into ``(package_id, version)`` pairs."""
+    """Flatten an export into ``(package_id, version)`` pairs.
+
+    The version is empty for anything this tool exported, because the export is
+    asked for without versions on purpose -- see :func:`run_winget_export`. The
+    pair is kept because a manifest captured by an older build has them, and
+    reading one of those must not become a different code path.
+    """
     if not export:
         return []
     packages: list[tuple[str, str]] = []
