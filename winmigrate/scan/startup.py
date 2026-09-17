@@ -23,6 +23,7 @@ more honest, since a dead entry is a login-time error box in perpetuity.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 from ..models import (
@@ -134,14 +135,28 @@ def _run_entries(env: Environment) -> Item | None:
     )
 
 
+#: Extensions Windows will start from a Run entry. The path ends at the first
+#: of these that stands at a word boundary: in ``cmd.exe /c thing.exe`` the
+#: program is cmd, and in ``rundll32.exe x.dll,Entry`` it is rundll32.
+EXECUTABLE_PATTERN = re.compile(
+    r"^(.*?\.(?:exe|com|bat|cmd|scr|pif))(?=\s|$)", re.IGNORECASE
+)
+
+
 def executable_of(command: str) -> str:
     """The program a Run command line actually starts.
 
     Windows accepts both ``"C:\\Program Files\\App\\app.exe" --quiet`` and the
     same path unquoted, which is ambiguous by construction: the space could
-    separate the program from its arguments or be part of the folder name. A
-    quoted path is taken as given; an unquoted one is grown a word at a time
-    until it names something that exists, which is what Windows itself does.
+    separate the program from its arguments or be part of the folder name.
+
+    Three answers, in order of how much they know. A quoted path is taken as
+    given. An unquoted one is grown a word at a time until it names something
+    that exists, which is what Windows itself does and is exact when the
+    program is here. When it is not here -- which is every entry during a
+    restore, since these are put back before anything has been installed --
+    the path is taken to end at the first word carrying an extension Windows
+    executes.
     """
     text = (command or "").strip()
     if not text:
@@ -154,4 +169,17 @@ def executable_of(command: str) -> str:
         candidate = " ".join(words[:count])
         if Path(pathutil.to_posix(candidate)).exists():
             return candidate
+    # Nothing here matched, which on a restore is the normal case rather than
+    # the odd one: these entries are put back before their programs have been
+    # installed, so growing a word at a time finds nothing and the old fallback
+    # of "the first word" turned every unquoted "C:\Program Files\..." into
+    # "C:\Program" -- a path that will never exist, reported as a program the
+    # machine does not have.
+    #
+    # So fall back to the shape of the thing instead of to its presence: the
+    # first word ending in an extension Windows will execute, which is where
+    # the path stops and the arguments start.
+    match = EXECUTABLE_PATTERN.match(text)
+    if match:
+        return match.group(1)
     return words[0]

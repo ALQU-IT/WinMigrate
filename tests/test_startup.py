@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from winmigrate import apply as apply_mod
 from winmigrate.apply import Outcome
 from winmigrate.models import Category, Kind
@@ -123,3 +125,116 @@ def test_each_entry_is_named_as_it_is_restored(tmp_path: Path):
 def test_a_record_that_is_not_a_record_does_nothing(tmp_path: Path):
     assert apply_mod.apply_startup({}, env_with(tmp_path)) == []
     assert apply_mod.apply_startup({"entries": "nonsense"}, env_with(tmp_path)) == []
+
+
+# --- the program is not here *yet* ------------------------------------------
+@pytest.mark.parametrize(
+    "command, expected",
+    [
+        # The one that was breaking: an unquoted path with a space in it, on a
+        # machine where the program is not installed yet. Growing a word at a
+        # time finds nothing, and "the first word" is C:\Program.
+        (r"C:\Program Files\Notepad++\notepad++.exe",
+         r"C:\Program Files\Notepad++\notepad++.exe"),
+        (r"C:\Program Files\App\app.exe --quiet", r"C:\Program Files\App\app.exe"),
+        (r'"C:\Program Files\App\app.exe" --quiet', r"C:\Program Files\App\app.exe"),
+        # The first executable is the program; what follows is its argument.
+        (r"C:\Windows\system32\cmd.exe /c C:\other\thing.exe",
+         r"C:\Windows\system32\cmd.exe"),
+        (r"rundll32.exe shell32.dll,Control_RunDLL", "rundll32.exe"),
+        # Nothing that looks like a program: the old fallback is still the best
+        # answer available.
+        (r"C:\Tools\runner --flag", r"C:\Tools\runner"),
+        ("", ""),
+    ],
+)
+def test_the_program_is_found_even_when_it_is_not_installed_yet(command, expected):
+    """Every Run entry is put back before any software is installed, so the
+    "grow until it exists" reading finds nothing and falls through. Falling
+    through to the first word turned "C:\\Program Files\\..." into
+    "C:\\Program", which will never exist on any machine -- so the entry was
+    reported as a program the user does not have, for ever."""
+    assert startup.executable_of(command) == expected
+
+
+def test_a_real_path_still_wins_over_the_shape_of_one(tmp_path):
+    """When the program is here, its presence is the exact answer and beats
+    guessing where the arguments start."""
+    program = tmp_path / "my app.exe.thing"
+    program.write_bytes(b"MZ")
+    assert startup.executable_of(f"{program} --flag") == str(program)
+
+
+def test_the_login_entries_are_asked_about_again_once_the_software_is_there(tmp_path):
+    """The bug in one sentence: a restore writes the login entries before it
+    installs anything, so every one of them is skipped as a program this
+    machine does not have -- and nothing ever asks again.
+
+    The entries were right. The question was early.
+    """
+    profile = tmp_path / "u"
+    profile.mkdir()
+    env = Environment.fixture(profile, {})
+    program = tmp_path / "Notepad++" / "notepad++.exe"
+    record = {"entries": {"Notepad++": str(program), "Gone": r"C:\nowhere\gone.exe"}}
+
+    # Restore time: the installer has not run, so neither program is here.
+    first = apply_mod.apply_startup(record, env)
+    assert {r.name: r.outcome for r in first} == {
+        "Notepad++": Outcome.SKIPPED, "Gone": Outcome.SKIPPED
+    }
+    # And it does not say so as though it were the final word.
+    assert all("yet" in r.detail for r in first)
+
+    # The install runs, and one of the two arrives.
+    program.parent.mkdir(parents=True)
+    program.write_bytes(b"MZ")
+
+    fresh = apply_mod.retry_startup(record, first, env)
+
+    assert [r.name for r in fresh] == ["Notepad++"]
+    assert fresh[0].outcome is Outcome.APPLIED
+    written = env.registry.get(f"HKCU\\{startup.RUN_KEY}", {})
+    assert written == {"Notepad++": str(program)}, "the Run value was never written"
+
+
+def test_the_second_look_leaves_alone_what_it_cannot_change(tmp_path):
+    """A program that is still missing after the install is still missing.
+    Returning it again would put a duplicate line in the report saying nothing
+    new."""
+    profile = tmp_path / "u"
+    profile.mkdir()
+    env = Environment.fixture(profile, {})
+    record = {"entries": {"Gone": r"C:\nowhere\gone.exe"}}
+
+    first = apply_mod.apply_startup(record, env)
+    assert apply_mod.retry_startup(record, first, env) == []
+
+
+def test_nothing_is_re_asked_when_nothing_was_skipped(tmp_path):
+    """No install, no second look: retrying an entry that already applied would
+    rewrite a registry value for no reason."""
+    profile = tmp_path / "u"
+    profile.mkdir()
+    env = Environment.fixture(profile, {})
+    assert apply_mod.retry_startup({"entries": {}}, [], env) == []
+
+
+def test_the_later_answer_replaces_the_earlier_one_in_the_report():
+    """Otherwise the report carries both "not on this machine" and "restored"
+    for the same program, and the reader cannot tell which line came last."""
+    from winmigrate.apply import Result
+
+    applied = [
+        Result("startup", "Notepad++", Outcome.SKIPPED, "not here yet"),
+        Result("startup", "Gone", Outcome.SKIPPED, "not here yet"),
+        Result("printer", "Notepad++", Outcome.APPLIED, "a different kind, left alone"),
+    ]
+    fresh = [Result("startup", "Notepad++", Outcome.APPLIED, "C:\\np\\notepad++.exe")]
+
+    settled = apply_mod.supersede(applied, fresh)
+
+    startup_rows = [(r.name, r.outcome) for r in settled if r.kind == "startup"]
+    assert startup_rows == [("Gone", Outcome.SKIPPED), ("Notepad++", Outcome.APPLIED)]
+    # A result of another kind that happens to share a name is not touched.
+    assert any(r.kind == "printer" and r.outcome is Outcome.APPLIED for r in settled)

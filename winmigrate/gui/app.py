@@ -2484,6 +2484,47 @@ class WinMigrateWizard:
             ]
         return ["", "Software: winget installed everything it had a package for."]
 
+    def _settle_after_install(self) -> None:
+        """Finish the jobs that could not be done before the software existed.
+
+        A restore runs files, then settings, then -- much later, and only once
+        the user has agreed to it -- the software. Anything that depends on a
+        program being present is therefore asked too early the first time, and
+        has to be asked again here.
+        """
+        self._restore_startup_after_install()
+        self._refresh_taskbar_after_install()
+
+    def _restore_startup_after_install(self) -> None:
+        """Put back the login entries whose programs have just arrived.
+
+        Every one of them was skipped during the restore, correctly and
+        uselessly: none of those programs were on the machine yet. This is the
+        same question asked at the only moment it has a meaningful answer.
+        """
+        from .. import apply as apply_mod  # noqa: PLC0415
+
+        result = self.install_result
+        report = self.restore_report
+        if result is None or result.error or report is None:
+            return
+        record = self._manifest_record("settings:startup_run")
+        if not record:
+            return
+        applied = getattr(report, "applied", []) or []
+        fresh = apply_mod.retry_startup(record, applied)
+        if fresh:
+            report.applied = apply_mod.supersede(applied, fresh)
+
+    def _manifest_record(self, item_id: str) -> dict | None:
+        """One item's record out of the restored manifest, or None."""
+        manifest = getattr(self.restore_report, "manifest", None) or {}
+        for item in manifest.get("items", []) or []:
+            if isinstance(item, dict) and item.get("id") == item_id:
+                record = item.get("record")
+                return record if isinstance(record, dict) else None
+        return None
+
     def _refresh_taskbar_after_install(self) -> None:
         """Make the taskbar resolve now that its programs exist.
 
@@ -2867,7 +2908,7 @@ class WinMigrateWizard:
                     payload.returncode,
                     f" ({payload.error})" if payload.error else "",
                 )
-            self._refresh_taskbar_after_install()
+            self._settle_after_install()
             self._show(Step.RESTORE_DONE)
         elif kind == "install-failed":
             self.install_bar.stop()

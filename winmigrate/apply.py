@@ -504,7 +504,7 @@ def _explorer_is_running(runner) -> bool:
 
 
 # --- what starts when you log in -------------------------------------------
-def apply_startup(record: dict[str, Any], env=None) -> list[Result]:
+def apply_startup(record: dict[str, Any], env=None, only=None) -> list[Result]:
     """Re-add the login programs whose program is actually on this machine.
 
     Each entry is named in its own result rather than being written quietly and
@@ -515,6 +515,14 @@ def apply_startup(record: dict[str, Any], env=None) -> list[Result]:
     An entry whose program is missing is left out, not restored broken. That is
     both the safer answer and the more useful one: a dead Run entry is an error
     box at every login, for ever, naming a path the user has never seen.
+
+    "Missing" is a question with two different answers depending on when it is
+    asked, which is the trap here. A restore applies settings before any
+    software has been installed, so at that moment *none* of these programs are
+    on the machine and every entry is skipped. :func:`retry_startup` asks again
+    once the install has finished, which is when the answer means something.
+
+    ``only`` limits the pass to particular entry names, for that second look.
     """
     if env is None:  # pragma: no cover -- the live path
         from .platform_win import Environment  # noqa: PLC0415
@@ -531,11 +539,14 @@ def apply_startup(record: dict[str, Any], env=None) -> list[Result]:
     for name, command in sorted(entries.items()):
         if not isinstance(name, str) or not isinstance(command, str) or not command.strip():
             continue
+        if only is not None and name not in only:
+            continue
         program = executable_of(command)
         if not program or not Path(pathutil.to_posix(pathutil.expand(program, env.environ))).exists():
             results.append(
                 Result("startup", name, Outcome.SKIPPED,
-                       f"{program or 'its program'} is not on this machine")
+                       f"{program or 'its program'} is not on this machine yet; "
+                       "it is put back if the install brings it")
             )
             continue
         try:
@@ -547,6 +558,50 @@ def apply_startup(record: dict[str, Any], env=None) -> list[Result]:
             Result("startup", name, Outcome.APPLIED if written else Outcome.FAILED, program)
         )
     return results
+
+
+def retry_startup(record: dict[str, Any], applied: list[Result], env=None) -> list[Result]:
+    """Ask again about the login entries whose program was not here yet.
+
+    A restore runs in one order and only one: files, then settings, then -- much
+    later, once the user has pressed a button and agreed to it -- the software.
+    So when the login entries are written, nothing they name is installed, and
+    every one of them is skipped as a program this machine does not have. The
+    entries were correct, the question was early.
+
+    This is the second asking, after the install. It looks only at the ones
+    that were skipped, and returns only the ones whose answer changed, so the
+    report gains a line for each entry that came back rather than a second copy
+    of every entry it already listed.
+    """
+    pending = {
+        result.name for result in applied
+        if result.kind == "startup" and result.outcome is Outcome.SKIPPED
+    }
+    if not pending:
+        return []
+    fresh = apply_startup(record, env, only=pending)
+    changed = [result for result in fresh if result.outcome is not Outcome.SKIPPED]
+    log.info(
+        "startup entries re-checked after the install: %d of %d came back",
+        len(changed), len(pending),
+    )
+    return changed
+
+
+def supersede(applied: list[Result], fresh: list[Result]) -> list[Result]:
+    """Replace the earlier answer for anything asked a second time.
+
+    Without this the report says both "not on this machine" and "restored" for
+    the same program, which is worse than either on its own -- the reader has
+    no way to tell which line is the later one.
+    """
+    superseded = {(result.kind, result.name) for result in fresh}
+    kept = [
+        result for result in applied
+        if (result.kind, result.name) not in superseded
+    ]
+    return [*kept, *fresh]
 
 
 # --- how Windows looks and responds ----------------------------------------

@@ -2027,3 +2027,76 @@ def test_the_window_asks_the_installers_to_be_quiet_too(
 
     assert seen and "--silent" in seen[0]
     assert "--ignore-versions" in seen[0]
+
+
+def test_the_login_programs_are_put_back_once_the_install_has_run(
+    monkeypatch, bundle: Path, tmp_path: Path
+):
+    """The window is the only place that knows the install has finished, so it
+    is the only place that can ask the question again. Without this the restore
+    reports every login program as one this machine does not have -- which was
+    true when it asked, and had stopped being true by the time the user read
+    it."""
+    from winmigrate import apply as apply_mod
+    from winmigrate.util import process
+
+    wizard = _finished_restore(monkeypatch, bundle, tmp_path)
+    _with_software(wizard, tmp_path, ["Mozilla.Firefox"])
+
+    record = {"entries": {"Firefox": r"C:\Program Files\Mozilla Firefox\firefox.exe"}}
+    wizard.restore_report.manifest = {
+        "items": [{"id": "settings:startup_run", "record": record}]
+    }
+    wizard.restore_report.applied = [
+        apply_mod.Result("startup", "Firefox", apply_mod.Outcome.SKIPPED, "not here yet")
+    ]
+
+    asked: list[dict] = []
+
+    def fake_retry(rec, applied, env=None):
+        asked.append(rec)
+        return [apply_mod.Result("startup", "Firefox", apply_mod.Outcome.APPLIED, "back")]
+
+    monkeypatch.setattr(apply_mod, "retry_startup", fake_retry)
+    monkeypatch.setattr(
+        process, "stream",
+        lambda command, on_line, timeout=0, cancelled=None: process.CommandResult(command, 0, "ok"),
+    )
+
+    wizard._show(Step.INSTALLING)
+    assert pump(wizard, until=("installed", "install-failed")) == "installed"
+
+    assert asked == [record], "the login entries were never re-checked"
+    rows = [(r.name, r.outcome) for r in wizard.restore_report.applied if r.kind == "startup"]
+    assert rows == [("Firefox", apply_mod.Outcome.APPLIED)]
+
+
+def test_nothing_is_re_applied_when_the_install_did_not_run(
+    monkeypatch, bundle: Path, tmp_path: Path
+):
+    """A failed or declined install leaves the machine as it was, so asking
+    again would only rewrite the same skips."""
+    from winmigrate import apply as apply_mod
+    from winmigrate.util import process
+
+    wizard = _finished_restore(monkeypatch, bundle, tmp_path)
+    _with_software(wizard, tmp_path, ["Mozilla.Firefox"])
+    wizard.restore_report.manifest = {
+        "items": [{"id": "settings:startup_run", "record": {"entries": {"A": "a.exe"}}}]
+    }
+
+    asked: list[dict] = []
+    monkeypatch.setattr(
+        apply_mod, "retry_startup", lambda rec, applied, env=None: asked.append(rec) or []
+    )
+    monkeypatch.setattr(
+        process, "stream",
+        lambda command, on_line, timeout=0, cancelled=None: process.CommandResult(
+            command, None, error="winget not found on this machine"
+        ),
+    )
+
+    wizard._show(Step.INSTALLING)
+    assert pump(wizard, until=("installed", "install-failed")) == "installed"
+
+    assert asked == []
