@@ -103,3 +103,53 @@ def test_the_dry_run_assertion_survives_a_narrow_console():
         render_restore_report(report, console, dry_run=True)
         collapsed = " ".join(console.export_text().split())
         assert "was not created" in collapsed, width
+
+
+#: Roots that name one person's machine. Deliberately not "/tmp/": a throwaway
+#: placeholder path is fine anywhere and is never opened, and a check that
+#: flags those is one people learn to work around rather than obey.
+ABSOLUTE_ROOTS = ("/home/", "/Users/", "/root/", "C:\\Users\\", "C:/Users/")
+
+#: Reading one of those is the mistake. Constructing one is not: this suite is
+#: full of fabricated absolute paths used as data -- what a registry value
+#: holds, what a parser is fed, a profile root deliberately unlike the real one
+#: -- and none of them is ever opened.
+READS = ("read_text", "read_bytes", "open", "is_file", "is_dir", "exists", "glob", "rglob")
+
+
+def _absolute_literal(node: ast.AST) -> str | None:
+    """The machine-specific path this expression opens, if it opens one."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value if node.value.startswith(ABSOLUTE_ROOTS) else None
+    # Path("/home/...").read_text() -- the receiver is the Path call.
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "Path":
+        for argument in node.args:
+            found = _absolute_literal(argument)
+            if found:
+                return found
+    return None
+
+
+@pytest.mark.parametrize("path", SOURCES, ids=lambda p: str(p.relative_to(ROOT)))
+def test_nothing_opens_a_path_only_its_author_has(path: Path):
+    r"""``Path("/home/user/WinMigrate/...").read_text()`` passes for exactly one
+    person and fails everywhere else -- including CI, which is where it is
+    found, after it has been pushed.
+
+    Only reads are flagged. A fabricated absolute path is ordinary test data
+    here; opening one is the thing that cannot work anywhere but one machine.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    offenders = []
+    for node in calls_in(tree):
+        if isinstance(node.func, ast.Attribute) and node.func.attr in READS:
+            if _absolute_literal(node.func.value):
+                offenders.append(node.lineno)
+        elif isinstance(node.func, ast.Name) and node.func.id == "open":
+            if node.args and _absolute_literal(node.args[0]):
+                offenders.append(node.lineno)
+    assert not offenders, (
+        f"{path.relative_to(ROOT)} lines {sorted(set(offenders))}: reads an absolute "
+        "path from the machine this was written on. Derive it from __file__, or "
+        "use tmp_path."
+    )

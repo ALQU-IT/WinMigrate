@@ -135,9 +135,10 @@ def test_without_a_console_build_beside_it_the_window_is_named_after_all(
 def test_the_name_the_entry_point_hands_out_is_the_one_that_is_shipped():
     """Two files agree on it by writing it once. A rename in the build workflow
     that missed one of them would print a command naming a file nobody has."""
-    workflow = Path("/home/user/WinMigrate/.github/workflows/build-exe.yml").read_text(
-        encoding="utf-8"
-    )
+    # Found from this file, not from an absolute path: a test that names one
+    # passes only on the machine it was written on.
+    root = Path(__file__).resolve().parent.parent
+    workflow = (root / ".github/workflows/build-exe.yml").read_text(encoding="utf-8")
     assert f"--name {reinstall.CONSOLE_BUILD.removesuffix('.exe')}" in workflow
     assert gui_entry.CONSOLE_BUILD == reinstall.CONSOLE_BUILD
 
