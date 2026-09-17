@@ -692,18 +692,28 @@ def _password_followups(profiles: list[BrowserProfile]) -> list[Followup]:
             followups.append(
                 Followup(
                     id=passwords_mod.followup_id(profile.browser_key, suffix),
-                    title=f"{named}: export passwords yourself if you want them",
+                    title=f"{named}: passwords need exporting from the old machine",
                     why=(
                         f"{named} sync is "
                         + ("off" if profile.state.signed_in else "not set up")
-                        + ", so its passwords are only on this machine. WinMigrate does not "
-                        "read the password store; the browser's own export does, behind its "
-                        "own Windows Hello prompt."
+                        + ", so its passwords exist only on the old machine and are not in "
+                        "this bundle. WinMigrate does not read the password store; the "
+                        "browser's own export does, behind its own Windows Hello prompt. "
+                        "The backup offers to walk you through that export -- if this "
+                        "follow-up is still here, it was not done."
                     ),
+                    # Written to be read on the *new* machine, because that is
+                    # where a follow-up list is read. "Settings -> Passwords ->
+                    # Export" with no machine named is an instruction somebody
+                    # follows on the computer in front of them, exporting the
+                    # empty store of a browser they have just installed.
                     steps=[
-                        f"In {profile.browser_title}{in_profile}: Settings → Passwords → "
-                        "Export, and authenticate when Windows asks.",
-                        "Import the resulting CSV in the same place on the new machine.",
+                        "Do this on the OLD machine, while you still have it. Once it is "
+                        "wiped these passwords are gone -- nothing in this bundle has them.",
+                        f"There: open {profile.browser_title}{in_profile}, go to Settings → "
+                        "Passwords → Export, and authenticate when Windows asks.",
+                        "Bring the CSV across, then import it in the same place in "
+                        f"{profile.browser_title} here.",
                         "Delete the CSV afterwards -- it is plaintext.",
                     ],
                     category=Category.BROWSER_PASSWORDS,

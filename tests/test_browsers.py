@@ -662,3 +662,50 @@ def test_both_profiles_survive_a_whole_backup_and_restore(tmp_path):
     assert any(r.kind == "browser" and r.ok for r in report.applied)
     # And the old machine's password-store key went nowhere near the bundle.
     assert b"OLD-MACHINE-KEY" not in bundle.read_bytes()
+
+
+def test_the_password_follow_up_names_the_machine_it_must_be_done_on(tmp_path):
+    """A follow-up list is read on the NEW machine. "Settings -> Passwords ->
+    Export" with no machine named is an instruction somebody follows on the
+    computer in front of them -- exporting the empty store of a browser they
+    have just installed, and concluding the migration lost their passwords.
+
+    It cannot lose them: it never had them. But the old machine still does,
+    until it is wiped, and that is the part with a deadline on it.
+    """
+    profile = tmp_path / "alice"
+    user_data = _brave(profile, {"Default": "private"})
+    (user_data / "Default" / "Preferences").write_text(
+        json.dumps({"account_info": [{"email": "a@b.c"}], "sync": {}}), encoding="utf-8"
+    )
+    env = Environment.fixture(profile, {})
+
+    _items, followups, _notes = browsers.scan_browsers(env)
+    password = [f for f in followups if f.category is Category.BROWSER_PASSWORDS]
+
+    assert password, "a profile with sync off must say what happens to its passwords"
+    steps = " ".join(password[0].steps).lower()
+    assert "old machine" in steps
+    assert "while you still have it" in steps
+    # And it says plainly that the bundle does not have them, so nobody goes
+    # looking for a setting that would bring them back.
+    assert "not in this bundle" in password[0].why.lower()
+
+
+def test_a_synced_profile_is_told_the_opposite_and_correctly(tmp_path):
+    """Sync on means the passwords are in the cloud and come down on sign-in.
+    Sending that user to the old machine would be busywork."""
+    profile = tmp_path / "alice"
+    user_data = _brave(profile, {"Default": "private"})
+    (user_data / "Default" / "Preferences").write_text(
+        json.dumps({"account_info": [{"email": "a@b.c"}],
+                    "sync": {"has_setup_completed": True}}),
+        encoding="utf-8",
+    )
+    env = Environment.fixture(profile, {})
+
+    _items, followups, _notes = browsers.scan_browsers(env)
+    password = [f for f in followups if f.category is Category.BROWSER_PASSWORDS][0]
+
+    assert "sync down on sign-in" in password.title
+    assert "old machine" not in " ".join(password.steps).lower()
