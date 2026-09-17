@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from winmigrate import reinstall
 from winmigrate.util.process import CommandResult
 
@@ -65,11 +67,27 @@ def test_artifacts_are_written_for_software_and_office(tmp_path: Path):
     assert artifacts.manual_count == 1
 
 
-def test_the_import_file_is_wingets_own_export_verbatim(tmp_path: Path):
-    """Replaying winget's export is more reliable than rebuilding one."""
+def test_the_import_file_is_wingets_own_export_but_for_the_pinned_versions(tmp_path: Path):
+    """Replaying winget's export is more reliable than rebuilding one, so the
+    file stays winget's own output -- with exactly one thing taken out.
+
+    The versions are removed because keeping them makes the file unusable
+    within weeks: the repository drops old manifests, and an import that
+    insists on the version the old machine had then installs nothing at all.
+    Everything else is left exactly as winget wrote it, and this test is here
+    to catch the next thing that quietly starts editing it."""
     artifacts = reinstall.write_artifacts(manifest_with(("software", SOFTWARE_RECORD)), tmp_path)
     written = json.loads(artifacts.winget_import.read_text(encoding="utf-8"))
-    assert written == SOFTWARE_RECORD["winget_export"]
+
+    assert written == reinstall.without_versions(SOFTWARE_RECORD["winget_export"])
+    # Said plainly, so the test does not simply agree with the function it is
+    # checking: same packages, same order, no versions.
+    original = SOFTWARE_RECORD["winget_export"]["Sources"][0]["Packages"]
+    packages = written["Sources"][0]["Packages"]
+    assert [p["PackageIdentifier"] for p in packages] == [
+        p["PackageIdentifier"] for p in original
+    ]
+    assert all(set(p) == {"PackageIdentifier"} for p in packages)
 
 
 def test_applications_winget_cannot_handle_are_listed_not_dropped(tmp_path: Path):
@@ -288,6 +306,10 @@ HELP_WITHOUT_SILENT = HELP_WITH_SILENT.replace(
     "  --silent                  Request silent installation of packages\n", ""
 )
 
+HELP_WITHOUT_IGNORE_VERSIONS = HELP_WITH_SILENT.replace(
+    "  --ignore-versions         Ignore the versions in the import file\n", ""
+)
+
 
 def helping(text: str, ok: bool = True):
     def runner(argv, timeout=None):
@@ -337,6 +359,66 @@ def test_the_flag_is_looked_for_by_name_rather_than_by_prose():
     assert reinstall.supports_silent(helping("installs packages silently")) is False
 
 
+def test_the_import_does_not_insist_on_the_versions_that_were_installed(tmp_path: Path):
+    """Without this the import installs nothing at all, and says so package by
+    package in a way that looks like the packages are gone.
+
+    winget export writes down the version each package was at; winget import
+    then demands exactly that version. The community repository does not keep
+    old manifests, so a few weeks later every version in the file is one nobody
+    can install, and the whole import fails at once:
+
+        No version found matching: 8.8.1
+        Search failed for: Notepad++.Notepad++
+
+    Somebody moving to a new machine is not trying to reproduce last year's
+    build of Notepad++; they are trying to get Notepad++ back.
+    """
+    command = reinstall.import_command(tmp_path / "x.json", helping(HELP_WITH_SILENT))
+
+    assert "--ignore-versions" in command
+
+
+def test_a_winget_without_that_flag_is_not_given_it_either(tmp_path: Path):
+    """Same reasoning as --silent: an unknown option is a usage error before
+    the first package, so offering it to a winget that has never heard of it
+    trades a partial install for no install."""
+    command = reinstall.import_command(
+        tmp_path / "x.json", helping(HELP_WITHOUT_IGNORE_VERSIONS)
+    )
+
+    assert "--ignore-versions" not in command
+    # And the rest of the command is untouched by its absence.
+    assert "--silent" in command
+    assert "--ignore-unavailable" in command
+
+
+def test_the_flags_are_worked_out_from_one_reading_of_the_help(tmp_path: Path):
+    """winget is not quick to start. Asking it the same question once per flag
+    puts a pause in front of the install for each one, and every extra flag
+    would make it worse."""
+    calls = []
+
+    def counting(argv, timeout=None):
+        calls.append(list(argv))
+        return CommandResult(command=list(argv), returncode=0, stdout=HELP_WITH_SILENT)
+
+    reinstall.import_command(tmp_path / "x.json", counting)
+    assert len(calls) == 1
+
+
+def test_a_winget_that_cannot_answer_still_gets_a_command_that_runs(tmp_path: Path):
+    """Missing, broken, or too old to describe itself. The import must still be
+    the command that worked before any of these flags existed."""
+    command = reinstall.import_command(tmp_path / "x.json", helping("", ok=False))
+
+    assert command == [
+        "winget", "import", "-i", str(tmp_path / "x.json"),
+        "--accept-source-agreements", "--accept-package-agreements",
+        "--ignore-unavailable", "--disable-interactivity",
+    ]
+
+
 def test_what_came_with_windows_is_neither_counted_nor_written_down(tmp_path: Path):
     """The scan flags these and takes them out of the winget import. The report
     has to agree, or it promises 99 reinstalls for an import file holding 97 --
@@ -359,3 +441,61 @@ def test_what_came_with_windows_is_neither_counted_nor_written_down(tmp_path: Pa
     assert "Bespoke Tool" in text
     assert "Paint" not in text
     assert "Microsoft Edge" not in text
+
+
+def test_the_import_file_carries_no_pinned_versions_either(tmp_path: Path):
+    """The flag is the fix, and this is the fix said twice, because the
+    failure is total and the file is also something the user runs by hand --
+    the restore report prints the command next to it."""
+    record = {
+        "applications": [{"name": "Notepad++", "winget_id": "Notepad++.Notepad++"}],
+        "winget_export": {
+            "Sources": [
+                {
+                    "SourceDetails": {"Name": "winget"},
+                    "Packages": [
+                        {"PackageIdentifier": "Notepad++.Notepad++", "Version": "8.8.1"},
+                        # The versions that were never installable: an entry
+                        # winget matched through Add/Remove Programs carries
+                        # whatever the installer wrote there.
+                        {"PackageIdentifier": "Blizzard.BattleNet", "Version": "Unknown"},
+                        {"PackageIdentifier": "Ubisoft.Connect", "Version": "< 173.1.0"},
+                    ],
+                }
+            ]
+        },
+    }
+    artifacts = reinstall.write_artifacts(manifest_with(("software", record)), tmp_path)
+
+    written = json.loads(artifacts.winget_import.read_text(encoding="utf-8"))
+    packages = written["Sources"][0]["Packages"]
+    assert [p["PackageIdentifier"] for p in packages] == [
+        "Notepad++.Notepad++", "Blizzard.BattleNet", "Ubisoft.Connect"
+    ]
+    assert not any("Version" in package for package in packages)
+    # Everything else winget wrote is still there, or it is not winget's export.
+    assert written["Sources"][0]["SourceDetails"] == {"Name": "winget"}
+
+
+def test_stripping_the_versions_does_not_empty_the_manifest_it_read_from():
+    """The manifest is read again for the report. Editing it in place would
+    show up three screens later as an unrelated blank."""
+    export = {"Sources": [{"Packages": [{"PackageIdentifier": "a", "Version": "1.0"}]}]}
+
+    stripped = reinstall.without_versions(export)
+
+    assert stripped["Sources"][0]["Packages"][0] == {"PackageIdentifier": "a"}
+    assert export["Sources"][0]["Packages"][0]["Version"] == "1.0"
+
+
+@pytest.mark.parametrize(
+    "export",
+    [None, {}, "nonsense", {"Sources": "nonsense"}, {"Sources": [None]},
+     {"Sources": [{"Packages": None}]}, {"Sources": [{"Packages": ["not a dict"]}]}],
+)
+def test_a_shape_winget_did_not_write_costs_the_report_nothing(export):
+    """The export comes from whatever winget is on the machine, and the
+    manifest may have come from a different version of this tool. One odd
+    field here must not cost the user the restore report, which is where the
+    follow-up list lives."""
+    reinstall.without_versions(export)

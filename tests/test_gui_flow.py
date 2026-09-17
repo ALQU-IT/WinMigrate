@@ -2002,13 +2002,18 @@ def test_the_window_asks_the_installers_to_be_quiet_too(
     monkeypatch, bundle: Path, tmp_path: Path
 ):
     """The window is where ninety-seven installers would open ninety-seven
-    windows, so it is the path that most needs them silent."""
+    windows, so it is the path that most needs them silent -- and the path that
+    most needs the versions ignored, since it is the one the user presses a
+    button for and then watches do nothing."""
     from winmigrate import reinstall as reinstall_mod
     from winmigrate.util import process
 
     wizard = _finished_restore(monkeypatch, bundle, tmp_path)
     _with_software(wizard, tmp_path, ["Mozilla.Firefox"])
-    monkeypatch.setattr(reinstall_mod, "supports_silent", lambda runner=None: True)
+    monkeypatch.setattr(
+        reinstall_mod, "accepted_flags",
+        lambda runner=None: reinstall_mod.OPTIONAL_FLAGS,
+    )
 
     seen: list[list[str]] = []
 
@@ -2021,3 +2026,4 @@ def test_the_window_asks_the_installers_to_be_quiet_too(
     assert pump(wizard, until=("installed", "install-failed")) == "installed"
 
     assert seen and "--silent" in seen[0]
+    assert "--ignore-versions" in seen[0]

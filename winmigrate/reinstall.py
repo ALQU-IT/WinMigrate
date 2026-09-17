@@ -107,7 +107,9 @@ def write_artifacts(manifest: dict[str, Any], destination: Path) -> Artifacts:
         artifacts.launcher_count = len(launcher_games)
         if export:
             path = directory / WINGET_IMPORT_FILE
-            path.write_text(json.dumps(export, indent=2), encoding="utf-8")
+            path.write_text(
+                json.dumps(without_versions(export), indent=2), encoding="utf-8"
+            )
             artifacts.winget_import = path
         if manual or launcher_games:
             path = directory / MANUAL_LIST_FILE
@@ -130,6 +132,54 @@ def write_artifacts(manifest: dict[str, Any], destination: Path) -> Artifacts:
             artifacts.notes.append(f"could not generate an Office configuration: {exc}")
 
     return artifacts
+
+
+def without_versions(export: Any) -> Any:
+    """The export with each package's pinned version taken out.
+
+    ``winget import`` is also given ``--ignore-versions``, and this is the same
+    fix said twice on purpose, because the failure it prevents is total:
+    nothing installs, and the reason is reported per package in a way that
+    reads as the packages being gone rather than as a version being stale.
+
+    A version is only worth keeping in this file if the point is to reproduce a
+    machine exactly, and it is not -- somebody moving house wants Notepad++
+    back, not last year's build of it. Which version they had is still recorded
+    beside every application in the manifest; it is simply no longer an
+    instruction.
+
+    Two reasons for doing it here rather than trusting the flag alone. An older
+    winget may not take the flag, and would then be handed a file it cannot
+    satisfy. And this file is something the user can run themselves -- the
+    restore report prints the command next to it -- so it has to work on its
+    own, not only when this program builds the command line around it.
+
+    Copied, never edited in place: the manifest this came from is read again
+    for the report, and quietly emptying its fields is the sort of thing that
+    surfaces three screens later as an unrelated blank.
+    """
+    if not isinstance(export, dict):
+        return export
+    copy = dict(export)
+    if not isinstance(copy.get("Sources"), list):
+        return copy
+    sources = []
+    for source in copy["Sources"]:
+        if not isinstance(source, dict):
+            sources.append(source)
+            continue
+        entry = dict(source)
+        packages = entry.get("Packages")
+        if isinstance(packages, list):
+            entry["Packages"] = [
+                {key: value for key, value in package.items() if key != "Version"}
+                if isinstance(package, dict)
+                else package
+                for package in packages
+            ]
+        sources.append(entry)
+    copy["Sources"] = sources
+    return copy
 
 
 def _as_list(value: Any) -> list[Any]:
@@ -248,31 +298,83 @@ def office_reactivation_steps(installation: OfficeInstallation | None) -> list[s
 #: an unattended migration.
 SILENT_FLAG = "--silent"
 
+#: Without this, an import is a list of *exact versions* to install.
+#:
+#: ``winget export`` writes down the version of each package that was
+#: installed, and ``winget import`` then insists on that version. The community
+#: repository does not keep old manifests, so within weeks the version on the
+#: old machine is one nobody can install any more, and the import answers
+#: "No version found matching: 8.8.1" and then "Search failed for:
+#: Notepad++.Notepad++" -- for every package at once, because they all aged
+#: together. The migration reports nothing installed and every reason looks
+#: like a missing package.
+#:
+#: Some versions are unusable from the moment they are written. An entry winget
+#: matched through Add/Remove Programs can carry whatever the installer put
+#: there, so the export ends up asking for "Unknown", or for "< 17.14.41",
+#: which is not a version at all.
+#:
+#: This is the documented way to say "the newest one will do", which for
+#: somebody moving to a new machine is what they wanted anyway: they are not
+#: trying to reproduce last year's build of Notepad++, they are trying to get
+#: Notepad++ back.
+IGNORE_VERSIONS_FLAG = "--ignore-versions"
 
-def supports_silent(runner=process.run) -> bool:
-    """Does this winget's ``import`` take ``--silent``? Asked, never assumed.
+#: Asked about rather than assumed, newest concern first. Anything here is
+#: added only when this machine's winget says it takes it.
+OPTIONAL_FLAGS: tuple[str, ...] = (IGNORE_VERSIONS_FLAG, SILENT_FLAG)
 
-    It is documented for ``install`` and has not always been accepted by
-    ``import``. Passing an option winget does not know is not a degraded
-    install -- it is a usage error before the first package, so nothing
-    installs at all, which is the worst outcome available here.
 
-    So the help is read first. Option names are not translated, so looking for
-    the flag itself works on a machine in any language, and a winget that is
-    missing or broken answers no and the import runs as it always did.
+def accepted_flags(runner=process.run) -> tuple[str, ...]:
+    """Which of :data:`OPTIONAL_FLAGS` this winget's ``import`` will take.
+
+    Asked, never assumed. Passing an option winget does not know is not a
+    degraded install -- it is a usage error raised before the first package, so
+    nothing installs at all, which is the worst outcome available here.
+
+    So the help is read, once, and searched for each flag by name. Option names
+    are not translated, so this works on a machine running Windows in any
+    language, and a winget that is missing or broken answers nothing and the
+    import runs as it always did.
     """
     result = runner(["winget", "import", "-?"], timeout=60)
-    found = SILENT_FLAG in (result.stdout or "")
-    log.info("winget import %s --silent", "accepts" if found else "does not accept")
-    return found
+    help_text = result.stdout or ""
+    accepted = tuple(flag for flag in OPTIONAL_FLAGS if flag in help_text)
+    log.info(
+        "winget import accepts: %s", ", ".join(accepted) if accepted else "none of the extras"
+    )
+    for flag in OPTIONAL_FLAGS:
+        if flag not in accepted:
+            log.info("winget import does not accept %s; leaving it off", flag)
+    return accepted
 
 
-def winget_import_command(import_file: Path, silent: bool = False) -> list[str]:
+def supports_silent(runner=process.run) -> bool:
+    """Does this winget's ``import`` take ``--silent``?
+
+    ``--disable-interactivity`` silences winget's own prompts and nothing else:
+    every installer it runs is then free to put a window on the screen, ask
+    where to install, and offer a toolbar. Ninety-seven of those is not an
+    unattended migration.
+    """
+    return SILENT_FLAG in accepted_flags(runner)
+
+
+def supports_ignore_versions(runner=process.run) -> bool:
+    """Does this winget's ``import`` take ``--ignore-versions``?"""
+    return IGNORE_VERSIONS_FLAG in accepted_flags(runner)
+
+
+def winget_import_command(import_file: Path, extra: "tuple[str, ...] | list[str]" = ()) -> list[str]:
     """The command that replays winget's export on this machine.
 
     ``--ignore-unavailable`` keeps one missing package from aborting the rest,
     and ``--accept-package-agreements`` is required for an unattended run --
     the user has already agreed to this step at the prompt.
+
+    ``extra`` is whatever of :data:`OPTIONAL_FLAGS` this machine's winget said
+    it would take, which is worked out once by :func:`accepted_flags` rather
+    than guessed here.
 
     Named separately from the running of it because it is run two ways: the
     command line waits for the whole thing, and the window streams it so a
@@ -289,14 +391,13 @@ def winget_import_command(import_file: Path, silent: bool = False) -> list[str]:
         "--ignore-unavailable",
         "--disable-interactivity",
     ]
-    if silent:
-        command.append(SILENT_FLAG)
+    command.extend(extra)
     return command
 
 
 def import_command(import_file: Path, runner=process.run) -> list[str]:
     """The import command this machine's winget will actually accept."""
-    return winget_import_command(import_file, silent=supports_silent(runner))
+    return winget_import_command(import_file, accepted_flags(runner))
 
 
 def run_winget_import(import_file: Path, runner=process.run) -> process.CommandResult:
