@@ -16,7 +16,22 @@ TASKBAND = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Taskband"
 BAG = r"HKCU\Software\Microsoft\Windows\Shell\Bags\1\Desktop"
 
 
-def env_with(root: Path, registry: dict | None = None) -> Environment:
+def env_with(root: Path, registry: dict | None = None, pinned: bool = False) -> Environment:
+    """A fixture machine. Bare unless asked otherwise.
+
+    ``pinned=True`` puts the taskbar's shortcut files where Explorer looks for
+    them, which is what the pins in the registry name. The two halves live in
+    different places and a restore can land them in different places, so which
+    of the two a test has is part of what it is testing -- not something for
+    this helper to decide on its behalf.
+    """
+    if pinned:
+        folder = root.joinpath(
+            "AppData", "Roaming", "Microsoft", "Internet Explorer",
+            "Quick Launch", "User Pinned", "TaskBar",
+        )
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "Brave.lnk").write_bytes(b"L\x00\x00\x00")
     return Environment.fixture(root, registry or {})
 
 
@@ -83,7 +98,7 @@ def test_a_blob_that_is_not_a_blob_does_not_come_back_as_one():
 
 # --- putting it back --------------------------------------------------------
 def test_the_taskbar_is_written_back_byte_for_byte(tmp_path: Path):
-    env = env_with(tmp_path)
+    env = env_with(tmp_path, pinned=True)
     blob = base64.b64encode(b"\x01\x02pinned").decode()
 
     results = apply_mod.apply_shell_layout(
@@ -96,7 +111,7 @@ def test_the_taskbar_is_written_back_byte_for_byte(tmp_path: Path):
 
 def test_a_record_naming_a_value_the_table_never_asked_for_is_refused(tmp_path: Path):
     """The record comes out of a bundle, which is a file from another machine."""
-    env = env_with(tmp_path)
+    env = env_with(tmp_path, pinned=True)
 
     apply_mod.apply_shell_layout(
         {"values": {
@@ -155,7 +170,7 @@ def test_explorer_is_only_restarted_when_something_was_actually_written(tmp_path
     """A migration that finishes with the old taskbar still on screen reads as
     one that did not work -- but restarting Explorer for nothing is a flicker
     with no reason behind it."""
-    env = env_with(tmp_path)
+    env = env_with(tmp_path, pinned=True)
 
     nothing = apply_mod.apply_shell_layout({"values": {}}, None, None, env)
     assert [r.name for r in nothing] == ["your taskbar"]
@@ -170,7 +185,7 @@ def test_explorer_is_only_restarted_when_something_was_actually_written(tmp_path
 def test_explorer_is_not_killed_on_the_machine_running_the_tests(tmp_path: Path):
     """The worst of the reach-past: a test that got this far on a Windows build
     machine would taskkill that machine's desktop."""
-    env = env_with(tmp_path)
+    env = env_with(tmp_path, pinned=True)
     env.is_windows = True  # as a test exercising a Windows path would
 
     results = apply_mod.apply_shell_layout(
@@ -280,3 +295,64 @@ def test_a_desktop_already_back_on_its_own_is_not_started_twice(tmp_path: Path):
 
     assert result.outcome is Outcome.APPLIED
     assert started == []
+
+
+def test_the_pins_are_not_written_when_their_shortcuts_are_somewhere_else(tmp_path: Path):
+    """The taskbar is two halves in two places, and a restore can land them in
+    two different places.
+
+    The pins are a registry blob naming shortcuts by path, and a registry is
+    always the one on the machine running the restore. The shortcuts are files
+    and go wherever the restore was told to put them. Aim a restore at a folder
+    rather than at the profile you are signed in to and Explorer ends up with a
+    taskbar of buttons that each open:
+
+        C:\\Users\\second\\...\\User Pinned\\TaskBar\\Brave.lnk
+        The specified path does not exist.
+
+    Better a taskbar that was not restored than one whose every button is an
+    error box.
+    """
+    env = env_with(tmp_path, pinned=False)
+    blob = base64.b64encode(b"\x01\x02pinned").decode()
+
+    (result,) = apply_mod.apply_shell_layout(
+        {"values": {"Favorites": {"base64": blob}}}, None, None, env
+    )
+
+    assert result.outcome is Outcome.SKIPPED
+    assert TASKBAND not in env.registry, "pins were written with nothing to point at"
+    # And it says what to do about it, because the files are not lost -- they
+    # are in the restore, wherever it put them.
+    assert "profile you are signed in to" in result.detail
+
+
+def test_explorer_is_not_restarted_for_a_taskbar_that_was_refused(tmp_path: Path):
+    """A flicker, and the same taskbar afterwards."""
+    env = env_with(tmp_path, pinned=False)
+    blob = base64.b64encode(b"x").decode()
+
+    results = apply_mod.apply_shell_layout(
+        {"values": {"Favorites": {"base64": blob}}}, None, None, env
+    )
+
+    assert "Explorer" not in [r.name for r in results]
+
+
+def test_the_shortcuts_being_there_is_what_decides_it(tmp_path: Path):
+    """Asked of the folder Explorer actually reads, not of the restore's
+    destination -- which is a path this function is never given and would have
+    to be trusted about."""
+    assert apply_mod.taskbar_pins_present(env_with(tmp_path, pinned=False)) is False
+    assert apply_mod.taskbar_pins_present(env_with(tmp_path, pinned=True)) is True
+
+
+def test_an_empty_pinned_folder_counts_as_not_there(tmp_path: Path):
+    """The folder exists on every Windows. What matters is whether the
+    shortcuts the pins name are in it."""
+    tmp_path.joinpath(
+        "AppData", "Roaming", "Microsoft", "Internet Explorer",
+        "Quick Launch", "User Pinned", "TaskBar",
+    ).mkdir(parents=True)
+
+    assert apply_mod.taskbar_pins_present(env_with(tmp_path)) is False

@@ -305,6 +305,30 @@ def apply_environment(record: dict[str, Any], env=None) -> list[Result]:
 
 
 # --- the taskbar and the desktop -------------------------------------------
+def taskbar_pins_present(env) -> bool:
+    """Are the shortcut files the taskbar pins point at actually in place?
+
+    The taskbar is two halves that live in different places. The pins are an
+    opaque blob in the registry, naming shortcuts by path; the shortcuts are
+    ``.lnk`` files under the user's roaming profile. Explorer reads the blob,
+    goes looking for each file, and if one is not there the user gets a Windows
+    error box naming a path they have never seen -- which is what a restore to
+    anywhere other than the live profile produced, every time.
+
+    The registry half always lands on the machine running the restore, because
+    that is where a registry is. The files land wherever the restore was told
+    to put them. When those are not the same place, writing the pins builds a
+    taskbar of shortcuts to nothing.
+    """
+    from .scan.shell import PINNED_FOLDER  # noqa: PLC0415
+
+    folder = env.appdata_roaming().joinpath(*PINNED_FOLDER, "TaskBar")
+    try:
+        return any(folder.glob("*.lnk"))
+    except OSError:
+        return False
+
+
 def apply_shell_layout(
     taskbar: dict[str, Any] | None,
     desktop: dict[str, Any] | None,
@@ -314,11 +338,16 @@ def apply_shell_layout(
     """Put the taskbar and desktop layout back, and let Explorer see it.
 
     These are opaque blobs Windows never documented, so they are written as
-    they were read. The one judgement made here is about the Start menu, whose
-    format changes between Windows releases: it is put back only onto a machine
-    of the release it came from. A Start menu that has to rebuild itself is a
-    nuisance; one half-transplanted from another Windows version is worse, and
-    the person it happens to has no way to know why their computer looks broken.
+    they were read. Two judgements are made here rather than none.
+
+    The Start menu's format changes between Windows releases, so it is put back
+    only onto a machine of the release it came from. A Start menu that has to
+    rebuild itself is a nuisance; one half-transplanted from another Windows
+    version is worse, and the person it happens to has no way to know why their
+    computer looks broken.
+
+    And the taskbar pins are written only when the shortcuts they name are
+    where Explorer will look for them. See :func:`taskbar_pins_present`.
     """
     if env is None:  # pragma: no cover -- the live path
         from .platform_win import Environment  # noqa: PLC0415
@@ -334,9 +363,22 @@ def apply_shell_layout(
 
     results: list[Result] = []
     if taskbar:
-        results.append(
-            _write_blobs(env, TASKBAND_KEY, taskbar, "your taskbar", TASKBAND_VALUES)
-        )
+        if taskbar_pins_present(env):
+            results.append(
+                _write_blobs(env, TASKBAND_KEY, taskbar, "your taskbar", TASKBAND_VALUES)
+            )
+        else:
+            # Better a taskbar that was not restored than one whose every
+            # button opens an error box. The shortcuts are still in the
+            # restore, wherever it put them.
+            results.append(
+                Result(
+                    "layout", "your taskbar", Outcome.SKIPPED,
+                    "the pinned shortcuts are not in this account's profile, so "
+                    "the pins would point at nothing; restore into the profile "
+                    "you are signed in to, or copy the shortcuts across by hand",
+                )
+            )
     if desktop:
         results.append(
             _write_blobs(env, DESKTOP_BAG_KEY, desktop, "your desktop icons", None)
