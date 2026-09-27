@@ -677,7 +677,9 @@ def apply_browser_profiles(record: dict[str, Any], destination: Path) -> list[Re
     # A bundle written before the name travelled falls back to the folder above
     # it, which is at least "Brave-Browser".
     label = str(record.get("browser") or "").strip() or target.parent.parent.name
-    label = f"{label}: which profiles exist"
+    # The report prints kind then name, so this reads on from "browser":
+    # "browser profiles for Brave".
+    label = f"profiles for {label}"
     try:
         state = json.loads(target.read_text(encoding="utf-8", errors="replace"))
         if not isinstance(state, dict):

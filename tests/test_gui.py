@@ -12,6 +12,8 @@ import os
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from winmigrate.gui import defaults, selection
 from winmigrate.models import Action, Category, Item, Kind, ScanResult, Sensitivity, SkipReason
 
@@ -742,3 +744,58 @@ def test_the_window_never_tells_anyone_to_type_the_bare_program_name():
         and "\n\n" not in node.value
     ]
     assert found == [], found
+
+
+def test_the_window_calls_it_a_password_everywhere():
+    """The page asks for a "Password for this backup" and the hint beneath it
+    said a "passphrase" was required. Two words for one thing on one screen
+    makes somebody wonder whether there are two things.
+
+    Internally it stays a passphrase -- the CLI, the crypto and the manifest
+    all say so, and that is fine. What is on screen says password.
+    """
+    import ast
+
+    for module in ("winmigrate.gui.app", "winmigrate.gui.wizard"):
+        tree = ast.parse(_module_source(module))
+        docstrings = {
+            id(node.body[0].value)
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module))
+            and ast.get_docstring(node, clean=False)
+        }
+        on_screen = [
+            (node.lineno, node.value)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+            and id(node) not in docstrings
+            and " " in node.value and "passphrase" in node.value.lower()
+        ]
+        assert on_screen == [], (module, on_screen)
+
+
+def test_console_dashes_become_real_ones_in_the_window():
+    """The source writes "--" because a console on an old code page cannot
+    encode an em dash. The window can, and shows what the two hyphens mean."""
+    from winmigrate.gui.app import typeset
+
+    assert typeset("Delete the CSV afterwards -- it is plaintext.") == (
+        "Delete the CSV afterwards \u2014 it is plaintext."
+    )
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'winmigrate-cli.exe reinstall "C:\\\\x\\\\WinMigrate-Reinstall" --apps',
+        "winget import --ignore-versions --silent",
+        "--profile-root C:\\\\Users\\\\a",
+    ],
+)
+def test_a_command_the_window_prints_keeps_its_flags(command):
+    """The restore page prints commands with real options in them. A dash
+    substitution that reached "--apps" would print a command that fails, on the
+    page that exists to hand the user a command that works."""
+    from winmigrate.gui.app import typeset
+
+    assert typeset(command) == command

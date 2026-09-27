@@ -160,7 +160,7 @@ def test_the_wrong_passphrase_returns_to_the_field_rather_than_a_dead_end(
     wizard._show(Step.OPENING)
     assert pump(wizard) == "open-failed"
     assert wizard.step is Step.SOURCE
-    assert shown and "passphrase" in shown[-1][1][1].lower()
+    assert shown and "password" in shown[-1][1][1].lower()
 
 
 def test_unticking_an_item_keeps_it_off_the_machine(
@@ -262,7 +262,7 @@ def test_the_passphrase_survives_long_enough_to_retry_and_no_longer(
     wizard.destination_var.set(str(second))
     wizard._show(Step.RESTORE_CONFIRM)
     assert wizard.next_button.state == "disabled"
-    assert "passphrase" in wizard.hint.cget("text").lower()
+    assert "password" in wizard.hint.cget("text").lower()
 
 
 def test_the_backup_passphrase_is_dropped_the_same_way(
@@ -1140,7 +1140,7 @@ def test_the_summary_keeps_its_order_when_both_extra_lines_appear(
     assert lines[2].startswith("Replaces:")
     assert lines[3].startswith("Items:")
     assert [line.split(":")[0] for line in lines[3:8]] == [
-        "Items", "Size", "Encrypted-only items", "Passwords", "Shadow copy"
+        "Items", "Size", "Private", "Passwords", "Open files"
     ]
 
 
@@ -2185,3 +2185,102 @@ def test_the_wheel_does_nothing_on_a_page_that_fits(monkeypatch, profile: Path):
     wizard._wheel(type("Event", (), {"delta": 0, "num": 4})())
     wizard._wheel(type("Event", (), {"delta": 0, "num": 5})())
     assert [args[0] for args in scrolled] == [-3, 3, -3, 3]
+
+
+def test_what_can_be_chosen_is_listed_above_what_cannot(monkeypatch, profile: Path):
+    """The scan lists in category order, so the known folders that are not on
+    this machine sat between the ones that are and the browser profiles --
+    five rows of "not on this machine" pushing the profiles out of view."""
+    from winmigrate.gui import selection
+
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    def row(item_id, selectable, secret=False):
+        return selection.Row(
+            item_id, item_id.split(":")[-1].title(), "user files", 10, 1,
+            secret=secret, selectable=selectable, selected=selectable,
+            reason="" if selectable else "not on this machine",
+        )
+
+    wizard.data.rows = [
+        row("files:videos", False),
+        row("files:documents", True),
+        row("files:links", False),
+        row("browser:brave:default", True, secret=True),
+    ]
+    wizard.data.selected = {"files:documents", "browser:brave:default"}
+
+    wizard._render_rows()
+
+    assert wizard.tree.get_children() == [
+        "files:documents", "browser:brave:default", "files:videos", "files:links",
+    ]
+
+
+def test_the_restore_only_option_is_greyed_while_backing_up(monkeypatch, profile: Path):
+    """"Also install my programs" only means anything on a restore. Live during
+    a backup, it reads as a question about the backup."""
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+
+    wizard.mode_var.set(Mode.BACKUP.value)
+    wizard._mode_changed()
+    assert wizard.admin_check.cget("state") == "disabled"
+
+    wizard.mode_var.set(Mode.RESTORE.value)
+    wizard._mode_changed()
+    assert wizard.admin_check.cget("state") == "normal"
+
+
+def test_the_first_page_matches_its_opening_branch_before_any_click(
+    monkeypatch, profile: Path
+):
+    """It opens on backup unless a bundle sits beside the program. Nobody has
+    clicked anything yet, and the option must already be in the right state."""
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile), "mode": "backup"})
+    assert wizard.admin_check.cget("state") == "disabled"
+
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile), "mode": "restore"})
+    assert wizard.admin_check.cget("state") == "normal"
+
+
+def test_the_password_can_be_checked_before_it_is_committed_to(monkeypatch, profile: Path):
+    """Nobody can recover this password, and typing it twice does not catch the
+    likeliest mistake -- the same one twice, with Caps Lock on."""
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+
+    assert wizard.passphrase.cget("show") == "•"
+    wizard.reveal_backup_password.set(True)
+    wizard.reveal_backup_password.apply()
+    assert wizard.passphrase.cget("show") == ""
+    assert wizard.passphrase2.cget("show") == ""
+
+    # And the restore page has its own, for the same password typed years later.
+    wizard.reveal_bundle_password.set(True)
+    wizard.reveal_bundle_password.apply()
+    assert wizard.bundle_passphrase.cget("show") == ""
+
+
+def test_a_shown_password_is_masked_again_when_the_page_is_left(monkeypatch, profile: Path):
+    """It is still in the field, and the field can come back -- on screen for
+    whoever looks at the window next."""
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    wizard.reveal_backup_password.set(True)
+    wizard.reveal_backup_password.apply()
+
+    wizard._show(Step.CHOOSE)
+
+    assert wizard.reveal_backup_password.get() is False
+    assert wizard.passphrase.cget("show") == "•"
+
+
+def test_the_last_page_offers_one_way_out_not_two(monkeypatch, profile: Path):
+    """"Close" and "Finish" both closed the window, side by side. Two buttons
+    for one action make somebody stop and look for the difference."""
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+
+    wizard._show(Step.DONE)
+    assert wizard.cancel_button._packed is False
+    assert wizard.next_button.cget("text") == "Finish"
+
+    # And it comes back on any page where Cancel means something.
+    wizard._show(Step.CHOOSE)
+    assert wizard.cancel_button._packed is True

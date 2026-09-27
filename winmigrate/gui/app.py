@@ -164,6 +164,24 @@ def run(options: dict | None = None) -> int:
     return 0
 
 
+def typeset(text: str) -> str:
+    """Text written for a console, made fit for the window.
+
+    Follow-ups, notes and warnings are written once and shown in two places.
+    Their source uses "--" where a dash belongs, and deliberately: the console
+    build prints them too, and a Windows console on an old code page cannot
+    encode an em dash at all -- it raises, which is why the command line carries
+    a handler for exactly that. So the source keeps the two hyphens and the
+    window, which can draw anything, turns them into the dash they stand for
+    here, at the one place text crosses into it.
+    """
+    return (
+        text.replace(" -- ", " \u2014 ")
+        .replace(" --\n", " \u2014\n")
+        .replace("\n-- ", "\n\u2014 ")
+    )
+
+
 class WinMigrateWizard:
     """The window, its pages, and the two background workers."""
 
@@ -226,6 +244,9 @@ class WinMigrateWizard:
         # sits above rather than a colour chosen before there was one.
         desktop.apply_window_material(root, self.palette)
         self._build_pages()
+        # The first page opens on whichever branch is likelier, so its options
+        # have to match that branch before anybody has clicked anything.
+        self._sync_mode_options()
         self._bind_keys()
         self._show(Step.CHOOSE)
         self.root.after(80, self._drain_events)
@@ -361,6 +382,7 @@ class WinMigrateWizard:
             inner, text="Cancel", style="Wizard.TButton", command=self._cancel
         )
         self.cancel_button.pack(side="right", padx=(0, 8))
+        self._cancel_shown = True
 
         # Embedded rather than packed, so the canvas can place them over the
         # panels it paints and leave the gaps between them showing.
@@ -570,7 +592,7 @@ class WinMigrateWizard:
                 value=value,
                 variable=self.mode_var,
                 style="Wizard.TRadiobutton",
-                command=self._refresh_buttons,
+                command=self._mode_changed,
             ).pack(anchor="w", pady=(14, 0))
             ttk.Label(page, text="     " + blurb, style="Hint.TLabel", wraplength=600,
                       justify="left").pack(anchor="w")
@@ -583,7 +605,11 @@ class WinMigrateWizard:
                 )
                 self.admin_check = ttk.Checkbutton(
                     page,
-                    text="     Also install my programs (Windows will ask for permission)",
+                    # Indented by packing, not by spaces in the text. Leading
+                    # spaces sit between the box and its words, which pushes the
+                    # words away from the box they belong to and leaves the box
+                    # itself out at the margin.
+                    text="Also install my programs (Windows will ask for permission)",
                     variable=self.restore_as_admin,
                     style="Wizard.TCheckbutton",
                 )
@@ -597,7 +623,7 @@ class WinMigrateWizard:
                     wraplength=600,
                     justify="left",
                 )
-                self.admin_check.pack(anchor="w", pady=(6, 0))
+                self.admin_check.pack(anchor="w", pady=(6, 0), padx=(26, 0))
                 self.admin_hint.pack(anchor="w")
             if value == Mode.RESTORE.value and self.found_bundles:
                 found = defaults.describe_bundle_file(self.found_bundles[0])
@@ -632,6 +658,7 @@ class WinMigrateWizard:
         self.bundle_passphrase = ttk.Entry(page, show="•")
         self.bundle_passphrase.pack(fill="x", pady=(4, 6))
         self.bundle_passphrase.bind("<KeyRelease>", lambda _e: self._refresh_buttons())
+        self.reveal_bundle_password = self._reveal_toggle(page, self.bundle_passphrase)
         ttk.Label(
             page,
             text="Used only to open the backup and read what is in it. Nothing is "
@@ -659,6 +686,49 @@ class WinMigrateWizard:
     #: folders and browsers, and few enough that the buttons under the list stay
     #: on screen at the window's smallest size.
     ITEM_ROWS = 11
+
+    def _text_box(
+        self, page: Any, *, height: int, wrap: str, monospace: bool = False,
+        pady: tuple[int, int] = (0, 0),
+    ) -> tuple[Any, Any]:
+        """A scrolling box of text on the page. Returns ``(text, holder)``.
+
+        One builder for the three there were, which had each been written out
+        in full and had each come out the same wrong way:
+
+        * No font, so Tk used its fixed-width terminal font, and the list of
+          things still to do after a restore -- the page this whole tool ends
+          on -- read like a log file.
+        * The flat page colour as background, not the frosted panel's, so on
+          the dark theme each box was a visibly different slab on its card.
+        * The scrollbar packed after the text, so a narrow page squeezed it out
+          of existence, as it did the item lists.
+        """
+        surfaces = theme.surfaces_for(self.palette)
+        field = glass.blend(surfaces.page, self.palette.ink, 0.035)
+        holder = self.ttk.Frame(page, style="Page.TFrame")
+        holder.pack(fill="both", expand=True, pady=pady)
+        text = self.tk.Text(
+            holder, height=height, wrap=wrap, relief="flat",
+            background=field, foreground=self.palette.ink,
+            insertbackground=self.palette.ink,
+            selectbackground=self.palette.accent,
+            selectforeground=self.palette.accent_ink,
+            borderwidth=0, highlightthickness=1,
+            highlightbackground=self.palette.rule, highlightcolor=self.palette.accent,
+            padx=10, pady=8,
+            # "TkFixedFont" is a named font and must be passed as a name: in a
+            # tuple it is read as a family of that name, which does not exist.
+            font="TkFixedFont" if monospace else (self.family, theme.BODY_SIZE),
+        )
+        bar = self.ttk.Scrollbar(
+            holder, orient="vertical", command=text.yview,
+            style="Wizard.Vertical.TScrollbar",
+        )
+        text.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        text.pack(side="left", fill="both", expand=True)
+        return text, holder
 
     def _item_list(self, page: Any) -> Any:
         """A list of things to tick, with a scrollbar that stays visible.
@@ -690,6 +760,68 @@ class WinMigrateWizard:
         bar.pack(side="right", fill="y")
         tree.pack(side="left", fill="both", expand=True)
         return tree
+
+    #: What a password field shows in place of each character.
+    MASK = "•"
+
+    def _reveal_toggle(self, page: Any, *entries: Any) -> Any:
+        """A tick box that shows what was typed in these password fields.
+
+        This password cannot be recovered by anyone, so a mistake in it is
+        permanent -- and typing it twice does not catch the one mistake most
+        likely to happen, which is making the same one twice: Caps Lock on, a
+        keyboard set to another layout, a neighbouring key under a thumb.
+        Looking at it does. Windows puts the same control on its own password
+        fields.
+
+        Off by default, and switched off again whenever the page is left, so a
+        password shown once is not still on screen the next time the window is
+        looked at over a shoulder.
+        """
+        tk, ttk = self.tk, self.ttk
+        shown = tk.BooleanVar(value=False)
+
+        def apply() -> None:
+            for entry in entries:
+                entry.configure(show="" if shown.get() else self.MASK)
+
+        ttk.Checkbutton(
+            page, text="Show what I typed", variable=shown, command=apply,
+            style="Wizard.TCheckbutton",
+        ).pack(anchor="w", pady=(0, 4))
+        shown.apply = apply  # type: ignore[attr-defined] -- for _hide_passwords
+        self._reveal_toggles = [*getattr(self, "_reveal_toggles", []), shown]
+        return shown
+
+    def _hide_passwords(self) -> None:
+        """Put every password field back behind its mask."""
+        for shown in getattr(self, "_reveal_toggles", []):
+            if shown.get():
+                shown.set(False)
+                shown.apply()
+
+    def _mode_changed(self) -> None:
+        """Backup or restore was chosen: show only the options that apply to it."""
+        self._sync_mode_options()
+        self._refresh_buttons()
+
+    def _sync_mode_options(self) -> None:
+        """Grey out "Also install my programs" unless a restore is chosen.
+
+        It only means anything on a restore, but it sat live on the page while
+        "Back up this machine" was selected -- so somebody backing up would read
+        it as a question about the backup, tick it, and wonder what installing
+        programs had to do with copying them.
+
+        Greyed rather than hidden: the choice between the two branches is made
+        on this page, and a checkbox that appears and disappears under the
+        pointer as they read makes the page jump.
+        """
+        check = getattr(self, "admin_check", None)
+        if check is None:
+            return
+        restoring = self.mode_var.get() == Mode.RESTORE.value
+        check.configure(state="normal" if restoring else "disabled")
 
     def _page_opening(self, page: Any) -> None:
         ttk = self.ttk
@@ -804,17 +936,7 @@ class WinMigrateWizard:
             page, text="", style="Body.TLabel", justify="left", wraplength=640
         )
         self.software_text.pack(anchor="w", pady=(6, 8))
-        holder = ttk.Frame(page, style="Page.TFrame")
-        holder.pack(fill="both", expand=True)
-        self.software_box = self.tk.Text(
-            holder, height=9, wrap="none", relief="flat", background=self.palette.page,
-            foreground=self.palette.ink, borderwidth=0, highlightthickness=1,
-            highlightbackground=self.palette.rule,
-        )
-        bar = ttk.Scrollbar(holder, orient="vertical", command=self.software_box.yview)
-        self.software_box.configure(yscrollcommand=bar.set)
-        self.software_box.pack(side="left", fill="both", expand=True)
-        bar.pack(side="right", fill="y")
+        self.software_box, _holder = self._text_box(page, height=9, wrap="none")
         self.software_note = ttk.Label(
             page, text="", style="Hint.TLabel", justify="left", wraplength=640
         )
@@ -831,17 +953,12 @@ class WinMigrateWizard:
         self.install_status = ttk.Label(page, text="Starting\u2026", style="Body.TLabel",
                                         wraplength=640, justify="left")
         self.install_status.pack(anchor="w")
-        holder = ttk.Frame(page, style="Page.TFrame")
-        holder.pack(fill="both", expand=True, pady=(10, 0))
-        self.install_output = self.tk.Text(
-            holder, height=9, wrap="word", relief="flat", background=self.palette.page,
-            foreground=self.palette.ink, borderwidth=0, highlightthickness=1,
-            highlightbackground=self.palette.rule,
+        # winget's own output, which lines things up in columns and draws its
+        # progress bars out of characters: the one place a fixed-width font is
+        # the right one.
+        self.install_output, _holder = self._text_box(
+            page, height=9, wrap="word", monospace=True, pady=(10, 0)
         )
-        bar = ttk.Scrollbar(holder, orient="vertical", command=self.install_output.yview)
-        self.install_output.configure(yscrollcommand=bar.set)
-        self.install_output.pack(side="left", fill="both", expand=True)
-        bar.pack(side="right", fill="y")
         self.install_stop_button = ttk.Button(
             page, text="Stop installing", command=self._stop_install
         )
@@ -856,18 +973,7 @@ class WinMigrateWizard:
         self.reinstall_button = ttk.Button(
             page, text="Open the reinstall folder…", command=self._open_reinstall_folder
         )
-        holder = ttk.Frame(page, style="Page.TFrame")
-        holder.pack(fill="both", expand=True)
-        self.followup_holder = holder
-        self.followup_box = self.tk.Text(
-            holder, height=10, wrap="word", relief="flat", background=self.palette.page,
-            foreground=self.palette.ink, borderwidth=0, highlightthickness=1,
-            highlightbackground=self.palette.rule,
-        )
-        bar = ttk.Scrollbar(holder, orient="vertical", command=self.followup_box.yview)
-        self.followup_box.configure(yscrollcommand=bar.set)
-        self.followup_box.pack(side="left", fill="both", expand=True)
-        bar.pack(side="right", fill="y")
+        self.followup_box, self.followup_holder = self._text_box(page, height=10, wrap="word")
 
     def _page_welcome(self, page: Any) -> None:
         tk, ttk = self.tk, self.ttk
@@ -1464,6 +1570,9 @@ class WinMigrateWizard:
         self.passphrase2 = ttk.Entry(page, show="•")
         self.passphrase2.pack(fill="x", pady=(4, 6))
         self.passphrase2.bind("<KeyRelease>", lambda _e: self._refresh_buttons())
+        self.reveal_backup_password = self._reveal_toggle(
+            page, self.passphrase, self.passphrase2
+        )
         ttk.Label(
             page,
             text="This password is the only way back into the backup. Nobody can "
@@ -1534,6 +1643,9 @@ class WinMigrateWizard:
         # the rail honest; doing it here as well means nothing in between reads
         # a stale mode.
         self._collect()
+        # Whatever page is next, a password shown on the last one is masked
+        # again: it is still in the field, and the field may come back.
+        self._hide_passwords()
         for frame in self.pages.values():
             frame.pack_forget()
         self.step = step
@@ -1620,7 +1732,7 @@ class WinMigrateWizard:
             # plaintext exports have served their purpose once the bundle holds
             # an encrypted copy.
             self.shred_results = self._shred_exported_csvs()
-            self.done_text.configure(text=self._done_summary())
+            self.done_text.configure(text=typeset(self._done_summary()))
             self._forget_passphrases()
 
     def _forget_passphrases(self) -> None:
@@ -1666,8 +1778,18 @@ class WinMigrateWizard:
         self.back_button.configure(
             state="normal" if wizard.can_go_back(self.step, self.data.mode) else "disabled"
         )
+        # On the last page "Close" and "Finish" both closed the window, side by
+        # side -- two buttons offering the same thing, which makes somebody stop
+        # and wonder what the difference is. There is none, so one goes.
         finished = self.step in wizard.TERMINAL
-        self.cancel_button.configure(text="Close" if finished else "Cancel")
+        if finished and self._cancel_shown:
+            self.cancel_button.pack_forget()
+            self._cancel_shown = False
+        elif not finished and not self._cancel_shown:
+            # Packed after Next and Back originally, so packing it again last
+            # puts it back where it was.
+            self.cancel_button.pack(side="right", padx=(0, 8))
+            self._cancel_shown = True
         self.hint.configure(text=verdict.message if not verdict.ok else "")
         # Choosing the job on the first page changes what the rail says, and
         # waiting for the next page to redraw it means the user picks Restore
@@ -1856,7 +1978,15 @@ class WinMigrateWizard:
     # --- the list ----------------------------------------------------------
     def _render_rows(self) -> None:
         self.tree.delete(*self.tree.get_children())
-        for row in self.data.rows:
+        # What can be chosen first, and what cannot after it. The scan lists
+        # things in category order, so every known folder that is not on this
+        # machine -- Videos, Favorites, Links, Saved Games, Contacts -- sat
+        # between the folders that are and the browser profiles, and pushed the
+        # profiles below the edge of the list. A row that says "not on this
+        # machine" is worth showing, so the answer is complete; it is not worth
+        # the space above the things somebody might actually untick. A stable
+        # sort, so each group keeps the scan's order.
+        for row in sorted(self.data.rows, key=lambda r: not r.selectable):
             if row.selectable:
                 mark = TICKED if row.item_id in self.data.selected else UNTICKED
                 note = "encrypted only" if row.secret else ""
@@ -2004,7 +2134,15 @@ class WinMigrateWizard:
             1 for r in self.data.rows if r.secret and r.item_id in self.data.selected
         )
         elevated = elevate.is_windows() and elevate.is_elevated()
-        shadow = "yes" if (self.use_vss.get() and elevated) else "no"
+        # "Shadow copy: no" was accurate and meant nothing to the person
+        # reading it. What they want to know is what happens to the files their
+        # programs have open -- a mailbox, a browser's history -- so say that.
+        if not self.use_vss.get():
+            open_files = "skipped (you turned this off)"
+        elif elevated:
+            open_files = "copied as well"
+        else:
+            open_files = "may be skipped (see below)"
         # Built in order rather than inserted at counted positions: two
         # optional lines addressed by index is a summary that reorders itself
         # the first time both of them appear.
@@ -2018,8 +2156,13 @@ class WinMigrateWizard:
             "",
             f"Items:        {len(self.data.selected)} selected",
             f"Size:         {humanize.bytes_(total_bytes)} in {total_files:,} files",
-            f"Encrypted-only items: {secret}",
         ]
+        if secret:
+            # "Encrypted-only items: 2" -- when the whole backup is encrypted --
+            # read as though the rest were not. These are the ones never written
+            # anywhere but inside the lock, not even into the file listing
+            # beside it.
+            lines.append(f"Private:      {secret} item(s), never listed outside the lock")
         if self.data.passwords_added:
             lines.append(
                 "Passwords:    exported from "
@@ -2027,9 +2170,9 @@ class WinMigrateWizard:
                 + " (encrypted only)"
             )
         lines += [
-            f"Shadow copy:  {shadow}",
+            f"Open files:   {open_files}",
             "",
-            "The backup is encrypted with the passphrase you typed. Nothing is",
+            "The backup is locked with the password you chose. Nothing is",
             "uploaded anywhere; the file stays where you put it.",
         ]
         if self.use_vss.get() and not elevated:
@@ -2049,10 +2192,11 @@ class WinMigrateWizard:
             f"Contents:     {report.captured_files:,} files, "
             f"{humanize.bytes_(report.captured_bytes)}",
             f"File size:    {humanize.bytes_(report.bundle_bytes)}",
-            f"Shadow copy:  {'yes' if report.used_shadow_copy else 'no'}",
+            "Open files:   "
+            + ("copied as well" if report.used_shadow_copy else "any in use were skipped"),
             "",
             f"Keep {report.manifest_path.name} beside the backup. It lets the backup "
-            "be checked without the passphrase.",
+            "be checked without the password.",
         ]
         # The capture's own warnings, which only the log and the console version
         # were showing: a shadow copy that could not be read means files held
@@ -2752,7 +2896,7 @@ class WinMigrateWizard:
             lines += ["", "This was a practice run. Nothing was written."]
         if self.log_path is not None:
             lines += ["", f"Log: {self.log_path}"]
-        self.restore_done_text.configure(text="\n".join(lines))
+        self.restore_done_text.configure(text=typeset("\n".join(lines)))
 
         if getattr(report, "artifacts", None) is not None:
             self.reinstall_button.pack(
@@ -2771,12 +2915,21 @@ class WinMigrateWizard:
                 "licences, anything the operating system deliberately puts a person "
                 "in front of:\n\n",
             )
+            # Titles in bold, so the list reads as a list of jobs with the
+            # explanation under each, rather than one block to be read in full
+            # before anybody can tell how many things there are.
+            self.followup_box.tag_configure(
+                "title", font=(self.family, theme.BODY_SIZE, "bold")
+            )
+            self.followup_box.tag_configure("why", foreground=self.palette.ink_soft)
             for number, followup in enumerate(followups, start=1):
-                self.followup_box.insert("end", f"{number}. {followup.title}\n")
+                self.followup_box.insert(
+                    "end", f"{number}. {typeset(followup.title)}\n", ("title",)
+                )
                 if followup.why:
-                    self.followup_box.insert("end", f"   {followup.why}\n")
+                    self.followup_box.insert("end", f"{typeset(followup.why)}\n", ("why",))
                 for line in followup.steps:
-                    self.followup_box.insert("end", f"     • {line}\n")
+                    self.followup_box.insert("end", f"   •  {typeset(line)}\n")
                 self.followup_box.insert("end", "\n")
         else:
             self.followup_box.insert("end", "Nothing else needs doing.")
@@ -2966,7 +3119,7 @@ class WinMigrateWizard:
             messagebox.showerror(
                 "WinMigrate",
                 f"The backup could not be opened.\n\n{payload}\n\n"
-                "The most likely reason is the passphrase.",
+                "The most likely reason is the password.",
             )
             self._show(Step.SOURCE)
         elif kind == "restore-bytes":

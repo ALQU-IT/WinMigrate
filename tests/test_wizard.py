@@ -91,9 +91,11 @@ def test_you_cannot_leave_select_having_chosen_nothing():
 @pytest.mark.parametrize(
     "passphrase, confirm, expect_ok, expect_word",
     [
-        ("", "", False, "required"),
-        ("hunter2", "", False, "match"),
-        ("hunter2", "hunter3", False, "match"),
+        # Each case its own sentence, in words rather than jargon: "choose" when
+        # there is nothing, "not the same" when the two disagree.
+        ("", "", False, "choose a password"),
+        ("hunter2", "", False, "not the same"),
+        ("hunter2", "hunter3", False, "not the same"),
         ("hunter2", "hunter2", True, ""),
     ],
 )
@@ -232,7 +234,7 @@ def test_you_cannot_open_a_backup_without_naming_one(tmp_path: Path):
     bundle.write_bytes(b"x")
     data.bundle_path = str(bundle)
     verdict = check(Step.SOURCE, data)
-    assert verdict.ok is False and "passphrase" in verdict.message.lower()
+    assert verdict.ok is False and "password" in verdict.message.lower()
 
     data.bundle_passphrase = "hunter2"
     assert check(Step.SOURCE, data).ok is True
@@ -404,7 +406,7 @@ def test_neither_confirm_page_lets_an_empty_passphrase_through(tmp_path: Path):
     """
     backup = WizardData(output_path=str(tmp_path / "b.dat"), passphrase="")
     verdict = check(Step.CONFIRM, backup)
-    assert verdict.ok is False and "passphrase" in verdict.message.lower()
+    assert verdict.ok is False and "password" in verdict.message.lower()
     backup.passphrase = "hunter2"
     assert check(Step.CONFIRM, backup).ok is True
 
@@ -412,7 +414,7 @@ def test_neither_confirm_page_lets_an_empty_passphrase_through(tmp_path: Path):
         mode=Mode.RESTORE, destination=str(tmp_path), bundle_passphrase=""
     )
     verdict = check(Step.RESTORE_CONFIRM, restore)
-    assert verdict.ok is False and "passphrase" in verdict.message.lower()
+    assert verdict.ok is False and "password" in verdict.message.lower()
     restore.bundle_passphrase = "hunter2"
     assert check(Step.RESTORE_CONFIRM, restore).ok is True
 

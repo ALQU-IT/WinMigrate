@@ -348,7 +348,7 @@ def check(step: Step, data: WizardData) -> Check:
         if not bundle.is_file():
             return Check(False, f"{bundle.name} is not there.")
         if not data.bundle_passphrase:
-            return Check(False, "The backup's passphrase is needed to open it.")
+            return Check(False, "The backup's password is needed to open it.")
         return Check(True)
 
     if step is Step.RESTORE_SELECT:
@@ -363,7 +363,7 @@ def check(step: Step, data: WizardData) -> Check:
         # with "the passphrase is wrong, or the file has been altered" -- which
         # is untrue twice over and sends the user looking at their backup.
         if not data.bundle_passphrase:
-            return Check(False, "Go back and enter the backup's passphrase again.")
+            return Check(False, "Go back and type the backup's password again.")
         if not data.destination.strip():
             return Check(False, "Choose where the files should go.")
         # The parent has to exist; the destination itself is created.
@@ -418,16 +418,16 @@ def check(step: Step, data: WizardData) -> Check:
                 "name, or tick the box to replace it.",
             )
         if not data.passphrase:
-            return Check(False, "A passphrase is required — the backup is always encrypted.")
+            return Check(False, "Choose a password — the backup is always locked with one.")
         if data.passphrase != data.passphrase_confirm:
-            return Check(False, "The two passphrases do not match.")
+            return Check(False, "The two passwords are not the same.")
         return Check(True)
 
     if step is Step.CONFIRM:
         # The same guard on the way out. Nothing should be able to reach the
         # encryption with an empty passphrase, whatever route it took here.
         if not data.passphrase:
-            return Check(False, "Go back and enter a passphrase.")
+            return Check(False, "Go back and choose a password.")
         return Check(True)
 
     if step is Step.DONE:
