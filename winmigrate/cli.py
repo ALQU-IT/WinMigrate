@@ -845,6 +845,40 @@ def cmd_presets(args: argparse.Namespace, console: Console) -> int:
     return 0
 
 
+def _put_back_login_programs(directory: Path, console: Console) -> None:
+    """Re-add the login programs whose programs this install just brought.
+
+    The restore wrote them before anything was installed and skipped every one
+    as a program this machine does not have; the window asks again after its
+    own install, and this is the same second question for the command line.
+    Each is named on its own line, as it is in the restore report, because a
+    Run entry is a command Windows will execute at every login.
+    """
+    from . import apply as apply_mod
+    from . import reinstall as reinstall_mod
+
+    path = directory / reinstall_mod.STARTUP_FILE
+    if not path.is_file():
+        return
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        console.print(f"[yellow]Could not read {path.name}: {exc}[/yellow]")
+        return
+    if not isinstance(record, dict):
+        return
+    results = apply_mod.apply_startup(record)
+    if not results:
+        return
+    console.print("\n[bold]Programs that start when you log in[/bold]")
+    for result in results:
+        mark = {"applied": "[green]put back[/green]", "skipped": "[dim]left out[/dim]"}.get(
+            result.outcome.value, f"[red]{result.outcome.value}[/red]"
+        )
+        detail = f" -- {result.detail}" if result.detail else ""
+        console.print(f"  {mark}  {result.name}{detail}")
+
+
 def cmd_reinstall(args: argparse.Namespace, console: Console) -> int:
     """Replay the reinstall files a restore wrote. Always asks before installing."""
     from . import reinstall as reinstall_mod
@@ -905,6 +939,7 @@ def cmd_reinstall(args: argparse.Namespace, console: Console) -> int:
                     "the others still installed.[/dim]"
                 )
                 status = status or 0
+            _put_back_login_programs(directory, console)
 
     if args.office is not None:
         if artifacts.office_configuration is None:

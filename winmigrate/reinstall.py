@@ -29,6 +29,10 @@ ARTIFACTS_DIRECTORY = "WinMigrate-Reinstall"
 WINGET_IMPORT_FILE = "winget-import.json"
 OFFICE_CONFIG_FILE = "office-configuration.xml"
 MANUAL_LIST_FILE = "reinstall-by-hand.md"
+#: The login programs, kept beside the install files so the command-line
+#: install can put them back once there are programs for them to start. Not a
+#: secret: the same record is in the plaintext listing beside every bundle.
+STARTUP_FILE = "startup-entries.json"
 
 WINGET_IMPORT_TIMEOUT = 7200
 
@@ -64,6 +68,14 @@ def write_artifacts(manifest: dict[str, Any], destination: Path) -> Artifacts:
         return artifacts
 
     directory.mkdir(parents=True, exist_ok=True)
+
+    # A restore writes the login programs before any of them are installed, so
+    # every one is skipped then. The window asks again after its own install;
+    # the command-line install runs in another process, later, with no manifest
+    # to ask from -- so the entries wait here for it.
+    startup = _startup_record(manifest)
+    if startup:
+        (directory / STARTUP_FILE).write_text(json.dumps(startup, indent=2), encoding="utf-8")
 
     if software:
         export = software.get("winget_export")
@@ -228,6 +240,17 @@ def without_versions(export: Any) -> Any:
 def _as_list(value: Any) -> list[Any]:
     """``value`` if it is a list, else nothing. A string is not a list of apps."""
     return value if isinstance(value, list) else []
+
+
+def _startup_record(manifest: dict[str, Any]) -> dict[str, Any] | None:
+    """The Run entries record, if the bundle has one with anything in it."""
+    for item in _as_list(manifest.get("items")):
+        if isinstance(item, dict) and item.get("id") == "settings:startup_run":
+            record = item.get("record")
+            if isinstance(record, dict) and isinstance(record.get("entries"), dict) \
+                    and record["entries"]:
+                return record
+    return None
 
 
 def _record_for(manifest: dict[str, Any], category: str) -> dict[str, Any] | None:

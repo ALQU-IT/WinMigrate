@@ -523,3 +523,59 @@ def test_every_optional_flag_can_say_what_its_absence_costs():
     which is the line that started this."""
     for flag in reinstall.OPTIONAL_FLAGS:
         assert flag in reinstall.FLAG_CONSEQUENCES, flag
+
+
+# --- the login programs, for an install run from the command line ----------
+def test_the_login_programs_wait_beside_the_install_files(tmp_path: Path):
+    """The window asks again about login programs after its own install. The
+    command-line install is a separate process, later, with no manifest -- so
+    the entries have to be left where it will look."""
+    manifest = manifest_with(("software", SOFTWARE_RECORD))
+    manifest["items"].append({
+        "id": "settings:startup_run", "category": "startup", "kind": "record",
+        "record": {"entries": {"Notepad++": r"C:\Program Files\Notepad++\notepad++.exe"}},
+    })
+
+    artifacts = reinstall.write_artifacts(manifest, tmp_path)
+
+    written = json.loads(
+        (artifacts.directory / reinstall.STARTUP_FILE).read_text(encoding="utf-8")
+    )
+    assert written == {"entries": {"Notepad++": r"C:\Program Files\Notepad++\notepad++.exe"}}
+
+
+def test_no_login_programs_means_no_file(tmp_path: Path):
+    artifacts = reinstall.write_artifacts(manifest_with(("software", SOFTWARE_RECORD)), tmp_path)
+    assert not (artifacts.directory / reinstall.STARTUP_FILE).exists()
+
+
+def test_the_command_line_install_puts_the_login_programs_back_afterwards(
+    tmp_path: Path, monkeypatch
+):
+    """The same second question the window asks, for the path you take when
+    you install from a command line -- which is the path that was taken."""
+    from winmigrate import apply as apply_mod
+    from winmigrate.cli import main
+
+    directory = tmp_path / reinstall.ARTIFACTS_DIRECTORY
+    directory.mkdir()
+    (directory / reinstall.WINGET_IMPORT_FILE).write_text(
+        json.dumps({"Sources": [{"Packages": [{"PackageIdentifier": "Notepad++.Notepad++"}]}]}),
+        encoding="utf-8",
+    )
+    record = {"entries": {"Notepad++": r"C:\Program Files\Notepad++\notepad++.exe"}}
+    (directory / reinstall.STARTUP_FILE).write_text(json.dumps(record), encoding="utf-8")
+
+    order: list[str] = []
+    monkeypatch.setattr(
+        reinstall, "run_winget_import",
+        lambda path, runner=None: order.append("install") or CommandResult([], 0, "done"),
+    )
+    monkeypatch.setattr(
+        apply_mod, "apply_startup",
+        lambda rec, env=None, only=None: order.append(("startup", rec)) or [],
+    )
+
+    assert main(["reinstall", str(directory), "--apps", "--yes"]) == 0
+    # After the install, not before: before it, there is nothing to start.
+    assert order == ["install", ("startup", record)]
