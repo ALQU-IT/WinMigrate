@@ -2303,3 +2303,53 @@ def test_the_wheel_over_a_list_scrolls_the_list_and_not_the_page(monkeypatch, pr
     over_page = type("Event", (), {"delta": -120, "num": 0, "widget": wizard.page_canvas})()
     wizard._wheel(over_page)
     assert scrolled == [(3, "units")]
+
+
+def test_the_restore_page_warns_when_a_browser_here_is_already_in_use(
+    monkeypatch, profile: Path, tmp_path: Path
+):
+    """Said before the restore, because afterwards the only symptom is a
+    browser not quite as it was, with nothing to say why."""
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    folder = tmp_path / "AppData/Local/Microsoft/Edge/User Data/Default"
+    folder.mkdir(parents=True)
+    (folder / "Preferences").write_text("{}", encoding="utf-8")
+    wizard.manifest = {"items": [{
+        "id": "browser:edge:default", "category": "browser_profile", "kind": "tree",
+        "action": "capture", "title": "Microsoft Edge — Person 1",
+        "archive_path": "secrets/AppData/Local/Microsoft/Edge/User Data/Default",
+    }]}
+    wizard.data.restore_selected = {"browser:edge:default"}
+    wizard.destination_var.set(str(tmp_path))
+
+    wizard._refresh_restore_summary()
+    text = wizard.restore_summary.cget("text")
+    assert "Microsoft Edge — Person 1 has already been used on this computer" in text
+    # It says what to do, and what that costs: Replace is not browser-only.
+    assert "Replace files that are already here and differ" in text
+    assert "not only the browser" in text
+
+    # Ticking Replace is the remedy, so the warning goes.
+    wizard.overwrite_var.set(True)
+    wizard._refresh_restore_summary()
+    assert "already been used" not in wizard.restore_summary.cget("text")
+
+    # And a practice run writes nothing, so there is nothing to warn about.
+    wizard.overwrite_var.set(False)
+    wizard.dry_run_var.set(True)
+    wizard._refresh_restore_summary()
+    assert "already been used" not in wizard.restore_summary.cget("text")
+
+
+def test_enter_in_the_destination_field_does_not_start_the_restore(
+    monkeypatch, profile: Path
+):
+    """Enter after typing a path means "use this one". Reaching the window's own
+    Enter binding would have started writing before the page showed what that
+    folder holds."""
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    refreshed: list[bool] = []
+    monkeypatch.setattr(wizard, "_refresh_restore_summary", lambda: refreshed.append(True))
+
+    assert wizard._destination_entered() == "break"
+    assert refreshed == [True]

@@ -868,9 +868,13 @@ class WinMigrateWizard:
         row = ttk.Frame(page, style="Page.TFrame")
         row.pack(fill="x", pady=(4, 2))
         self.destination_var = tk.StringVar(value="")
-        ttk.Entry(row, textvariable=self.destination_var).pack(
-            side="left", fill="x", expand=True
-        )
+        destination_entry = ttk.Entry(row, textvariable=self.destination_var)
+        destination_entry.pack(side="left", fill="x", expand=True)
+        # A path typed rather than picked has to update the page as well: the
+        # "Into:" line and the warnings under it are all about this folder, and
+        # only "Change…" was refreshing them.
+        destination_entry.bind("<FocusOut>", lambda _e: self._refresh_restore_summary())
+        destination_entry.bind("<Return>", self._destination_entered)
         ttk.Button(row, text="Change…", command=self._pick_destination).pack(
             side="left", padx=(8, 0)
         )
@@ -2445,6 +2449,7 @@ class WinMigrateWizard:
                 "going back are the ones they keep open, and a program writing to "
                 "them at the same time can damage its own data.",
             ]
+        lines += self._profiles_in_use_warning()
         short = self._room_shortfall(total_bytes)
         if short:
             lines += ["", short]
@@ -2462,6 +2467,57 @@ class WinMigrateWizard:
             lines += ["", "Files already here that differ will be kept, not replaced."]
         self.restore_summary.configure(text="\n".join(lines))
         self._refresh_buttons()
+
+    def _destination_entered(self, _event: Any = None) -> str:
+        """Enter in the destination field takes the path, and goes no further.
+
+        Enter moves the window on everywhere else, and on this page moving on
+        means starting the restore. Pressing it after typing a path is a reflex
+        that means "use this one" -- and it would have started writing before
+        the page had shown what that folder holds, including the warning about
+        a browser already in use there. "break" keeps it from reaching the
+        window's own binding.
+        """
+        self._refresh_restore_summary()
+        return "break"
+
+    def _profiles_in_use_warning(self) -> list[str]:
+        """Warn when a browser here has already been used, and what that costs.
+
+        Files already on this machine are kept unless "Replace" is ticked. For a
+        browser that has been opened here -- Edge nearly always has -- that
+        keeps its fresh settings and history in place of the old ones, and the
+        profile comes back only in part. Said here, before the restore, because
+        afterwards the only symptom is a browser that is not quite as it was,
+        with nothing to say why.
+
+        Not said when it does not apply: on a practice run nothing is written,
+        and with Replace ticked the old profile's files do go back.
+        """
+        from ..restore import profiles_already_here  # noqa: PLC0415
+
+        raw = self.destination_var.get().strip()
+        if not raw or self.dry_run_var.get() or self.overwrite_var.get():
+            return []
+        try:
+            in_use = profiles_already_here(
+                self.manifest or {}, Path(raw),
+                tuple(sorted(self.data.restore_selected)),
+            )
+        except OSError:
+            return []
+        if not in_use:
+            return []
+        named = ", ".join(in_use)
+        return [
+            "",
+            f"\u26a0 {named} {'has' if len(in_use) == 1 else 'have'} already been "
+            "used on this computer. Because files already here are kept, part of "
+            "the old profile will not come back \u2014 usually its settings and "
+            "history. To bring all of it back, tick 'Replace files that are "
+            "already here and differ' above. That applies to everything in this "
+            "restore, not only the browser.",
+        ]
 
     def _record_ids(self) -> set[str]:
         """The manifest's record items -- printers, drives, the software list.

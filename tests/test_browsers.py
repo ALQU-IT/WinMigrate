@@ -849,3 +849,61 @@ def test_an_unticked_profile_is_not_renamed_on_the_new_machine(tmp_path):
         encoding="utf-8"))["profile"]["info_cache"]
     assert cache["Default"]["name"] == "Person 1"
     assert cache["Profile 1"]["name"] == "Demo Work"
+
+
+# --- a browser already used on the new machine -------------------------------
+EDGE = "secrets/AppData/Local/Microsoft/Edge/User Data/Default"
+
+
+def _edge_manifest(**overrides):
+    item = {
+        "id": "browser:edge:default", "category": "browser_profile", "kind": "tree",
+        "action": "capture", "title": "Microsoft Edge — Person 1", "archive_path": EDGE,
+    }
+    item.update(overrides)
+    return {"items": [item]}
+
+
+def test_a_browser_opened_on_the_new_machine_is_noticed(tmp_path):
+    """Edge comes with Windows and has usually been opened, if only to get past
+    its welcome page. That writes its own Preferences into the profile folder,
+    which a restore then keeps -- so part of the old profile does not return."""
+    folder = tmp_path / "AppData/Local/Microsoft/Edge/User Data/Default"
+    folder.mkdir(parents=True)
+    (folder / "Preferences").write_text("{}", encoding="utf-8")
+
+    assert restore_mod.profiles_already_here(_edge_manifest(), tmp_path) == [
+        "Microsoft Edge — Person 1"
+    ]
+
+
+def test_a_browser_never_opened_here_is_not_warned_about(tmp_path):
+    """Installed but never run, or not installed yet: nothing to keep, so the
+    whole profile goes back and there is nothing to warn about."""
+    (tmp_path / "AppData/Local/Microsoft/Edge/User Data/Default").mkdir(parents=True)
+
+    assert restore_mod.profiles_already_here(_edge_manifest(), tmp_path) == []
+
+
+def test_only_the_profiles_being_restored_count(tmp_path):
+    """A profile left unticked is not coming back, so it cannot come back half."""
+    folder = tmp_path / "AppData/Local/Microsoft/Edge/User Data/Default"
+    folder.mkdir(parents=True)
+    (folder / "History").write_bytes(b"x")
+
+    assert restore_mod.profiles_already_here(
+        _edge_manifest(), tmp_path, wanted=("files:documents",)
+    ) == []
+
+
+def test_the_redacted_listing_is_not_mistaken_for_an_answer(tmp_path):
+    """Browser profiles are encrypted-only, and their entries in the plaintext
+    listing carry no path. Checked from there, every one would look absent --
+    so this has to be asked of the real manifest, and says nothing otherwise."""
+    folder = tmp_path / "AppData/Local/Microsoft/Edge/User Data/Default"
+    folder.mkdir(parents=True)
+    (folder / "Preferences").write_text("{}", encoding="utf-8")
+
+    assert restore_mod.profiles_already_here(
+        _edge_manifest(archive_path=None), tmp_path
+    ) == []

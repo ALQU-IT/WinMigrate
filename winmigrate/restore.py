@@ -261,6 +261,50 @@ def programs_to_close(manifest: dict[str, Any], wanted: tuple[str, ...] = ()) ->
     return sorted(names)
 
 
+#: Files a Chromium profile writes the first time the browser is opened. Any
+#: one of them in the destination means the browser has been run there.
+FIRST_RUN_FILES = ("Preferences", "History", "Bookmarks", "Web Data")
+
+
+def profiles_already_here(
+    manifest: dict[str, Any], destination: Path, wanted: tuple[str, ...] = ()
+) -> list[str]:
+    """Browser profiles this restore would put back over ones already in use.
+
+    A restore keeps files that are already there unless told to replace them,
+    which is the right rule for documents and the wrong result for a browser
+    that has been opened on the new machine. Opening it -- and Edge comes with
+    Windows and usually has been, if only to get past its welcome page --
+    writes its own Preferences, History and the rest into the profile folder.
+    Those are then kept, the old machine's are left out, and the profile comes
+    back half: bookmarks perhaps, settings and history not.
+
+    Returns the titles of the affected profiles, for a warning. Asked of the
+    manifest rather than the sidecar: browser profiles are encrypted-only, and
+    their entries in the plaintext listing carry no path to check.
+    """
+    found: list[str] = []
+    for item in manifest.get("items", []):
+        if not isinstance(item, dict) or item.get("action") != "capture":
+            continue
+        if str(item.get("category", "")) != "browser_profile":
+            continue
+        if item.get("kind") not in ("tree", None):
+            continue
+        if wanted and item.get("id") not in wanted:
+            continue
+        archive_path = item.get("archive_path")
+        if not archive_path:
+            continue
+        folder = _target_for(str(archive_path), destination)
+        if folder is None:
+            continue
+        if any((folder / name).exists() for name in FIRST_RUN_FILES):
+            title = str(item.get("title") or item.get("id") or "a browser profile")
+            found.append(title)
+    return sorted(found)
+
+
 #: Which record each kind of applied setting comes from, and so which follow-up
 #: it answers. The follow-up's id is the record's with ``:guided`` on the end --
 #: :func:`winmigrate.scan.syssettings._guided_followup` mints it that way, and a
