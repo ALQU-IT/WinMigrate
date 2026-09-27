@@ -161,7 +161,16 @@ def console_command() -> str:
         return "winmigrate"
     beside = Path(sys.executable).with_name(CONSOLE_BUILD)
     if beside.is_file():
-        return f'"{beside}"' if " " in str(beside) else str(beside)
+        if " " not in str(beside):
+            return str(beside)
+        # A path with a space has to be quoted, and a quoted path is not a
+        # command in PowerShell -- "C:\Users\Bob Smith\...exe" reinstall is a
+        # string followed by a syntax error. The call operator makes it one.
+        # PowerShell is what Windows 11 opens by default and what a right-click
+        # in a folder offers; cmd.exe, which would reject the "&", is the one
+        # that has to be gone looking for.
+        return f'& "{beside}"'
+
     # No console build next to us. Naming a file that is not there is worse
     # than naming the window, which now explains itself when asked to run a
     # command it cannot.

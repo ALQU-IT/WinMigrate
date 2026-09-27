@@ -104,9 +104,11 @@ def test_frozen_it_names_the_console_build_and_not_the_window(monkeypatch, tmp_p
     assert str(tmp_path) in command
 
 
-def test_a_path_with_a_space_in_it_is_quoted(monkeypatch, tmp_path):
+def test_a_path_with_a_space_in_it_is_quoted_and_callable_in_powershell(monkeypatch, tmp_path):
     """Program Files, Bob Smith, OneDrive - Company. Unquoted, the shell reads
-    the first word as the program and the rest as arguments."""
+    the first word as the program and the rest as arguments. Quoted alone, it
+    is not a command in PowerShell at all -- a string followed by a syntax
+    error -- so it goes through the call operator."""
     folder = tmp_path / "My Tools"
     folder.mkdir()
     window = folder / "WinMigrate.exe"
@@ -115,8 +117,10 @@ def test_a_path_with_a_space_in_it_is_quoted(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "executable", str(window))
 
-    assert reinstall.console_command().startswith('"')
-    assert reinstall.console_command().endswith('"')
+    command = reinstall.console_command()
+    assert command.startswith('& "')
+    assert command.endswith('"')
+    assert str(folder / reinstall.CONSOLE_BUILD) in command
 
 
 def test_without_a_console_build_beside_it_the_window_is_named_after_all(
@@ -171,3 +175,19 @@ def test_a_console_command_never_opens_the_window(monkeypatch):
     assert opened == [], "the window opened for a command it cannot run"
     assert code == 2
     assert said and reinstall.CONSOLE_BUILD in said[0]
+
+
+def test_a_path_without_a_space_is_given_bare(monkeypatch, tmp_path):
+    """The call operator is PowerShell's; cmd.exe rejects it. Only a path that
+    needs quoting gets it, so the common case -- a USB stick, E:\\WinMigrate --
+    works in either."""
+    folder = tmp_path / "WinMigrate"
+    folder.mkdir()
+    (folder / "WinMigrate.exe").write_bytes(b"MZ")
+    (folder / reinstall.CONSOLE_BUILD).write_bytes(b"MZ")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(folder / "WinMigrate.exe"))
+
+    assert " " not in str(folder), "the fixture itself must be space-free for this test"
+    command = reinstall.console_command()
+    assert command == str(folder / reinstall.CONSOLE_BUILD)

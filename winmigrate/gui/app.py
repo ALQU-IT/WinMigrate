@@ -431,9 +431,24 @@ class WinMigrateWizard:
             self.page_scroll.pack_forget()
             self._scrollbar_shown = False
 
+    #: Widgets that scroll themselves. The page's wheel binding is on "all", so
+    #: it fires for every widget in the window as well as each one's own; over
+    #: a list or a box of text that scrolls, both moved at once, and the line
+    #: somebody was reading slid away in two directions.
+    SCROLLS_ITSELF = frozenset({"Text", "Treeview", "Listbox", "Canvas"})
+
     def _wheel(self, event: Any) -> None:
         """Scroll the page under the wheel, when there is anywhere to scroll."""
         if not self._scrollbar_shown:
+            return
+        widget = getattr(event, "widget", None)
+        try:
+            owner = widget.winfo_class() if widget is not None else ""
+        except Exception:  # noqa: BLE001 -- a widget destroyed mid-event
+            owner = ""
+        # The page canvas is itself a Canvas, and is the one widget of that
+        # class this should still scroll.
+        if owner in self.SCROLLS_ITSELF and widget is not self.page_canvas:
             return
         delta = getattr(event, "delta", 0)
         number = getattr(event, "num", 0)

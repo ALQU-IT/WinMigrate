@@ -742,3 +742,110 @@ def test_a_bundle_from_before_the_name_travelled_still_says_something(tmp_path):
     (result,) = apply_mod.apply_browser_profiles(record, destination)
 
     assert "Brave-Browser" in result.name
+
+
+def test_a_profile_already_here_takes_the_old_name_but_not_the_old_account(tmp_path):
+    """The new machine's Default may already be signed in to a different
+    account. Carrying the old entry's user_name and gaia_id onto it would have
+    the switcher name one account while the profile is signed in to another.
+    The name and the avatar are how the user recognises it; those travel."""
+    destination = tmp_path / "new"
+    relative = "AppData/Local/BraveSoftware/Brave-Browser/User Data"
+    user_data = destination / relative
+    (user_data / "Default").mkdir(parents=True)
+    (user_data / "Local State").write_text(
+        json.dumps({"profile": {"info_cache": {"Default": {
+            "name": "Person 1", "user_name": "new@example.com", "gaia_id": "NEW",
+        }}}}),
+        encoding="utf-8",
+    )
+    record = {"browser": "Brave", "user_data": relative, "profiles": {"Default": {
+        "name": "private", "avatar_icon": "old-avatar",
+        "user_name": "old@example.com", "gaia_id": "OLD",
+    }}}
+
+    apply_mod.apply_browser_profiles(record, destination)
+
+    entry = json.loads((user_data / "Local State").read_text(encoding="utf-8"))[
+        "profile"]["info_cache"]["Default"]
+    assert entry["name"] == "private"
+    assert entry["avatar_icon"] == "old-avatar"
+    assert entry["user_name"] == "new@example.com"
+    assert entry["gaia_id"] == "NEW"
+
+
+def test_a_profile_new_to_this_machine_arrives_whole(tmp_path):
+    """Nothing here to disagree with, so the entry is carried as it was --
+    that is the profile the user had, account and all."""
+    destination = tmp_path / "new"
+    relative = "AppData/Local/BraveSoftware/Brave-Browser/User Data"
+    (destination / relative / "Profile 1").mkdir(parents=True)
+    record = {"browser": "Brave", "user_data": relative, "profiles": {"Profile 1": {
+        "name": "Demo Work", "user_name": "work@example.com",
+    }}}
+
+    apply_mod.apply_browser_profiles(record, destination)
+
+    entry = json.loads(
+        (destination / relative / "Local State").read_text(encoding="utf-8")
+    )["profile"]["info_cache"]["Profile 1"]
+    assert entry == {"name": "Demo Work", "user_name": "work@example.com"}
+
+
+def _two_profile_bundle(tmp_path):
+    """A real bundle holding two Brave profiles and their list."""
+    source = tmp_path / "old"
+    user_data = _brave(source, {"Default": "private", "Profile 1": "Demo Work"})
+    for folder in ("Default", "Profile 1"):
+        (user_data / folder / "Bookmarks").write_text("{}", encoding="utf-8")
+    env = Environment.fixture(source, {})
+    config = ScanConfig(profile_root=source, include_software=False)
+    scan = run_scan(config, env)
+    bundle = tmp_path / "b.dat"
+    capture_mod.capture(
+        scan, CaptureOptions(output=bundle, passphrase=PASSPHRASE, use_vss=False), config, env
+    )
+    return bundle
+
+
+def test_one_profile_named_on_the_command_line_brings_its_list_with_it(tmp_path):
+    """--item names the profile, not the list; nobody selects the list. Without
+    it the profile is on disk and invisible, the very bug the list fixes."""
+    bundle = _two_profile_bundle(tmp_path)
+    destination = tmp_path / "new"
+    destination.mkdir()
+
+    report = restore_mod.restore(RestoreOptions(
+        bundle=bundle, passphrase=PASSPHRASE, destination=destination,
+        items=("browser:brave:profile-1",),
+    ))
+
+    assert report.ok
+    state = json.loads((destination / "AppData/Local/BraveSoftware/Brave-Browser"
+                        "/User Data/Local State").read_text(encoding="utf-8"))
+    # The profile asked for is listed; the one not asked for is not.
+    assert sorted(state["profile"]["info_cache"]) == ["Profile 1"]
+
+
+def test_an_unticked_profile_is_not_renamed_on_the_new_machine(tmp_path):
+    """The new machine has its own Default. Leaving the old Default unticked
+    must leave the new one's name alone."""
+    bundle = _two_profile_bundle(tmp_path)
+    destination = tmp_path / "new"
+    relative = "AppData/Local/BraveSoftware/Brave-Browser/User Data"
+    (destination / relative / "Default").mkdir(parents=True)
+    (destination / relative / "Local State").write_text(
+        json.dumps({"profile": {"info_cache": {"Default": {"name": "Person 1"}}}}),
+        encoding="utf-8",
+    )
+
+    report = restore_mod.restore(RestoreOptions(
+        bundle=bundle, passphrase=PASSPHRASE, destination=destination,
+        items=("browser:brave:profile-1", "browser:brave:profile_list"),
+    ))
+
+    assert report.ok
+    cache = json.loads((destination / relative / "Local State").read_text(
+        encoding="utf-8"))["profile"]["info_cache"]
+    assert cache["Default"]["name"] == "Person 1"
+    assert cache["Profile 1"]["name"] == "Demo Work"

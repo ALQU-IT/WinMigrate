@@ -81,6 +81,9 @@ class Widget:
     def bind_all(self, *args, **kwargs):
         pass
 
+    def winfo_class(self):
+        return type(self).__name__
+
     def unbind_all(self, *args, **kwargs):
         pass
 

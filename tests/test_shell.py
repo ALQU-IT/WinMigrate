@@ -356,3 +356,38 @@ def test_an_empty_pinned_folder_counts_as_not_there(tmp_path: Path):
     ).mkdir(parents=True)
 
     assert apply_mod.taskbar_pins_present(env_with(tmp_path)) is False
+
+
+def test_the_shortcuts_windows_ships_with_do_not_fool_the_check(tmp_path: Path):
+    """Every Windows has File Explorer and Edge pinned already. The first
+    version of the guard only asked whether that folder held any shortcuts, so
+    on a real machine it always said yes -- including after a restore aimed at
+    some other folder, which is the one case it existed for."""
+    profile = tmp_path / "profile"
+    env = env_with(profile, pinned=True)  # the machine's own pins, not the backup's
+    elsewhere = tmp_path / "restored-into-a-folder"
+    blob = base64.b64encode(b"pins").decode()
+
+    (result,) = apply_mod.apply_shell_layout(
+        {"values": {"Favorites": {"base64": blob}}}, None, None, env,
+        destination=elsewhere,
+    )
+
+    assert result.outcome is Outcome.SKIPPED
+    assert TASKBAND not in env.registry
+
+
+def test_a_restore_into_the_profile_itself_writes_the_pins(tmp_path: Path):
+    """The ordinary case, and the window's default: the destination is the
+    profile, so the shortcuts are where Explorer reads them."""
+    profile = tmp_path / "profile"
+    env = env_with(profile, pinned=True)
+    blob = base64.b64encode(b"pins").decode()
+
+    results = apply_mod.apply_shell_layout(
+        {"values": {"Favorites": {"base64": blob}}}, None, None, env,
+        destination=profile,
+    )
+
+    assert results[0].outcome is Outcome.APPLIED
+    assert env.registry[TASKBAND]["Favorites"] == b"pins"

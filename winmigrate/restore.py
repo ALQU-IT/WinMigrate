@@ -275,6 +275,46 @@ APPLIED_KINDS: dict[str, str] = {
 GUIDED_SUFFIX = ":guided"
 
 
+def _record_wanted(item_id: str, wanted: tuple[str, ...]) -> bool:
+    """Is this record part of what the restore was asked for?
+
+    Named, or -- for a browser's list of profiles -- implied. Nobody selects
+    that list; they select profiles, and a profile put back without its entry in
+    the list is on disk and invisible to the browser. The window adds every
+    record to its selection anyway, but "--item browser:brave:profile-1" on the
+    command line names the profile alone, and would have brought it back
+    exactly as invisible as the bug the list exists to fix.
+    """
+    if item_id in wanted:
+        return True
+    if item_id.startswith("browser:") and item_id.endswith(":profile_list"):
+        prefix = item_id.rsplit(":", 1)[0] + ":"
+        return any(w.startswith(prefix) for w in wanted)
+    return False
+
+
+def _chosen_profiles(item_id: str, record: dict[str, Any], wanted: tuple[str, ...]) -> dict:
+    """The browser's profile list, narrowed to the profiles this restore put back.
+
+    The list is not something the user ticks -- it has no files of its own --
+    but the profiles in it are. Applied whole, a profile left unticked would
+    still be renamed on the new machine whenever a folder of the same name was
+    already there, which is most often the one every browser starts with.
+    """
+    if not wanted:
+        return record
+    from .scan.browsers import _slug  # noqa: PLC0415
+
+    key = item_id.split(":")[1]
+    wanted_set = set(wanted)
+    profiles = {
+        folder: entry
+        for folder, entry in (record.get("profiles") or {}).items()
+        if f"browser:{key}:{_slug(folder)}" in wanted_set
+    }
+    return {**record, "profiles": profiles}
+
+
 def _start_menu_record(record: dict[str, Any] | None, destination: Path) -> dict | None:
     """The Start-menu record, told where the restore put its file.
 
@@ -400,7 +440,7 @@ def _apply_settings(report: RestoreReport, destination: Path, wanted: tuple[str,
         item.get("id"): item.get("record")
         for item in manifest.get("items", [])
         if isinstance(item, dict) and isinstance(item.get("record"), dict)
-        and (not wanted or item.get("id") in wanted)
+        and (not wanted or _record_wanted(str(item.get("id")), wanted))
     }
 
     try:
@@ -418,13 +458,16 @@ def _apply_settings(report: RestoreReport, destination: Path, wanted: tuple[str,
                     records.get("shell:taskbar"),
                     records.get("shell:desktop_layout"),
                     _start_menu_record(records.get("shell:start_menu"), destination),
+                    destination=destination,
                 )
             )
         # Dynamic ids -- one per Chromium browser -- so matched by shape.
         for item_id, browser_record in sorted(records.items()):
             if item_id.startswith("browser:") and item_id.endswith(":profile_list"):
                 report.applied.extend(
-                    apply_mod.apply_browser_profiles(browser_record, destination)
+                    apply_mod.apply_browser_profiles(
+                        _chosen_profiles(item_id, browser_record, wanted), destination
+                    )
                 )
         if "settings:startup_run" in records:
             report.applied.extend(apply_mod.apply_startup(records["settings:startup_run"]))

@@ -2284,3 +2284,22 @@ def test_the_last_page_offers_one_way_out_not_two(monkeypatch, profile: Path):
     # And it comes back on any page where Cancel means something.
     wizard._show(Step.CHOOSE)
     assert wizard.cancel_button._packed is True
+
+
+def test_the_wheel_over_a_list_scrolls_the_list_and_not_the_page(monkeypatch, profile: Path):
+    """The page's wheel binding fires for every widget in the window. Over a
+    list that scrolls itself, both moved at once."""
+    from guistub import Treeview
+
+    wizard, _ = open_window(monkeypatch, {"profile_root": str(profile)})
+    scrolled: list = []
+    wizard.page_canvas.yview_scroll = lambda *args: scrolled.append(args)
+    wizard._page_scrolled("0.0", "0.5")
+
+    over_list = type("Event", (), {"delta": -120, "num": 0, "widget": Treeview()})()
+    wizard._wheel(over_list)
+    assert scrolled == []
+
+    over_page = type("Event", (), {"delta": -120, "num": 0, "widget": wizard.page_canvas})()
+    wizard._wheel(over_page)
+    assert scrolled == [(3, "units")]

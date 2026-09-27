@@ -305,7 +305,7 @@ def apply_environment(record: dict[str, Any], env=None) -> list[Result]:
 
 
 # --- the taskbar and the desktop -------------------------------------------
-def taskbar_pins_present(env) -> bool:
+def taskbar_pins_present(env, destination: Path | None = None) -> bool:
     """Are the shortcut files the taskbar pins point at actually in place?
 
     The taskbar is two halves that live in different places. The pins are an
@@ -319,10 +319,23 @@ def taskbar_pins_present(env) -> bool:
     that is where a registry is. The files land wherever the restore was told
     to put them. When those are not the same place, writing the pins builds a
     taskbar of shortcuts to nothing.
+
+    Checked against the restore's destination, not only the folder. The first
+    version of this asked only whether that folder had shortcuts in it -- and
+    every Windows ships with File Explorer and Edge pinned there, so on a real
+    machine the answer was yes whatever the restore had done, and the check
+    never fired. The question is whether *this* restore put its shortcuts where
+    Explorer reads them. That also catches a roaming profile redirected to a
+    server, which Explorer reads from and a restore into the local profile
+    does not write to.
     """
     from .scan.shell import PINNED_FOLDER  # noqa: PLC0415
 
     folder = env.appdata_roaming().joinpath(*PINNED_FOLDER, "TaskBar")
+    if destination is not None:
+        restored = destination.joinpath("AppData", "Roaming", *PINNED_FOLDER, "TaskBar")
+        if pathutil.normalize_key(restored) != pathutil.normalize_key(folder):
+            return False
     try:
         return any(folder.glob("*.lnk"))
     except OSError:
@@ -334,6 +347,7 @@ def apply_shell_layout(
     desktop: dict[str, Any] | None,
     start_menu: dict[str, Any] | None,
     env=None,
+    destination: Path | None = None,
 ) -> list[Result]:
     """Put the taskbar and desktop layout back, and let Explorer see it.
 
@@ -363,7 +377,7 @@ def apply_shell_layout(
 
     results: list[Result] = []
     if taskbar:
-        if taskbar_pins_present(env):
+        if taskbar_pins_present(env, destination):
             results.append(
                 _write_blobs(env, TASKBAND_KEY, taskbar, "your taskbar", TASKBAND_VALUES)
             )
@@ -647,6 +661,15 @@ def supersede(applied: list[Result], fresh: list[Result]) -> list[Result]:
 
 
 # --- which browser profiles exist ------------------------------------------
+#: What of a Chromium profile's entry is about how it looks rather than whose
+#: it is -- the part safe to carry onto a profile the new machine already has.
+PROFILE_LOOKS = frozenset({
+    "name", "shortcut_name", "avatar_icon", "is_using_default_name",
+    "is_using_default_avatar", "default_avatar_fill_color",
+    "default_avatar_stroke_color", "profile_highlight_color",
+})
+
+
 def apply_browser_profiles(record: dict[str, Any], destination: Path) -> list[Result]:
     """Add the restored profiles to the browser's own list of them.
 
@@ -711,12 +734,17 @@ def apply_browser_profiles(record: dict[str, Any], destination: Path) -> list[Re
         known = cache.get(folder)
         if isinstance(known, dict):
             # Almost always the new machine's own "Default", which it made on
-            # first run and called "Person 1". The folder's contents are the
-            # old machine's by now, so the name the user knows it by is the old
-            # one -- a migration that leaves it reading "Person 1" has restored
-            # the profile and not the profile's identity. Anything this bundle
-            # has no opinion about is left as the new machine set it.
-            merged = {**known, **entry}
+            # first run and called "Person 1". The name the user knows it by is
+            # the old one -- a migration that leaves it reading "Person 1" has
+            # restored the profile and not the profile's identity.
+            #
+            # Only how it looks, though. The rest of an entry describes the
+            # account the profile is signed in to -- user_name, gaia_id -- and
+            # on the new machine that may already be a different account.
+            # Carrying the old one's over would have the switcher name one
+            # account while the profile itself is signed in to another.
+            presentation = {k: v for k, v in entry.items() if k in PROFILE_LOOKS}
+            merged = {**known, **presentation}
             if merged != known:
                 cache[folder] = merged
                 renamed.append(folder)
