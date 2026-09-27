@@ -417,3 +417,81 @@ def photo_data(pixels: list[list[str]]) -> str:
     is one.
     """
     return " ".join("{" + " ".join(row) + "}" for row in pixels)
+
+
+#: A tick, as two strokes through three points of a unit square. Short down-
+#: stroke, long up-stroke, and placed a little low of centre, which is where the
+#: eye expects a hand-drawn one to sit.
+TICK_POINTS: tuple[tuple[float, float], ...] = ((0.24, 0.53), (0.43, 0.71), (0.77, 0.32))
+
+
+def _distance_to_segment(px, py, ax, ay, bx, by) -> float:
+    dx, dy = bx - ax, by - ay
+    length = dx * dx + dy * dy
+    if length == 0:
+        return math.hypot(px - ax, py - ay)
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / length))
+    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+
+def tick_coverage(size: int, stroke: float, samples: int = 4) -> list[list[float]]:
+    """How much of each pixel a tick mark covers, for a ``size`` square.
+
+    Drawn rather than taken from a font. ttk's own clam indicator draws a
+    cross in a ticked box, and to most people a cross in a box means "no" --
+    the opposite of what the box is saying. A tick is the one mark nobody has to
+    think about.
+    """
+    if size <= 0:
+        return []
+    points = [(x * size, y * size) for x, y in TICK_POINTS]
+    segments = list(zip(points, points[1:]))
+    half = stroke / 2
+    step = 1.0 / max(1, samples)
+    rows: list[list[float]] = []
+    for pixel_y in range(size):
+        row = []
+        for pixel_x in range(size):
+            inside = 0
+            for sub_y in range(samples):
+                y = pixel_y + step / 2 + sub_y * step
+                for sub_x in range(samples):
+                    x = pixel_x + step / 2 + sub_x * step
+                    if any(_distance_to_segment(x, y, *a, *b) <= half for a, b in segments):
+                        inside += 1
+            row.append(inside / (samples * samples))
+        rows.append(row)
+    return rows
+
+
+def tick_box_pixels(
+    size: int, radius: float, *, behind: str, face: str, rim: str,
+    mark: str | None = None, rim_width: float = 1.4,
+) -> list[list[str]]:
+    """A tick box as flat pixels: a rounded square, its rim, and maybe a tick.
+
+    ``behind`` is the panel the box sits on, and fills the corners, because a
+    photo image has no alpha. ``face`` is the inside, ``rim`` the outline --
+    for a ticked box both are the accent, so it reads as one filled shape --
+    and ``mark``, when given, is the colour the tick is drawn in.
+    """
+    outer = rounded_coverage(size, size, radius)
+    inset = rim_width
+    inner_size = max(1, round(size - 2 * inset))
+    inner = rounded_coverage(inner_size, inner_size, max(0.0, radius - inset))
+    offset = (size - inner_size) / 2
+    tick = tick_coverage(size, stroke=max(1.6, size * 0.14)) if mark else None
+
+    pixels: list[list[str]] = []
+    for y in range(size):
+        row = []
+        for x in range(size):
+            colour = blend(behind, rim, outer[y][x])
+            iy, ix = round(y - offset), round(x - offset)
+            if 0 <= iy < inner_size and 0 <= ix < inner_size:
+                colour = blend(colour, face, inner[iy][ix])
+            if tick is not None:
+                colour = blend(colour, mark, tick[y][x])
+            row.append(colour)
+        pixels.append(row)
+    return pixels

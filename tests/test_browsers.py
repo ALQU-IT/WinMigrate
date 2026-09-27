@@ -494,7 +494,10 @@ def test_the_password_store_key_is_never_read_let_alone_carried(tmp_path):
     listing = [i for i in items if i.id == "browser:brave:profile_list"][0]
 
     assert "SECRET-KEY" not in json.dumps(listing.record)
-    assert set(listing.record) == {"user_data", "profiles"}
+    # Exactly these. "browser" is the title from this program's own table of
+    # browsers, not anything read out of Local State.
+    assert set(listing.record) == {"browser", "user_data", "profiles"}
+    assert listing.record["browser"] == "Brave"
     # And it is encrypted-only, like the profile folders it describes.
     assert listing.sensitivity is Sensitivity.SECRET
 
@@ -709,3 +712,33 @@ def test_a_synced_profile_is_told_the_opposite_and_correctly(tmp_path):
 
     assert "sync down on sign-in" in password.title
     assert "old machine" not in " ".join(password.steps).lower()
+
+
+
+def test_the_report_names_the_browser_not_the_folder(tmp_path):
+    """"User Data" is the folder's name in every Chromium browser there is. A
+    report line reading "Settings put back: browser User Data" names nothing
+    and cannot be acted on."""
+    destination = tmp_path / "new"
+    relative = "AppData/Local/BraveSoftware/Brave-Browser/User Data"
+    (destination / relative / "Default").mkdir(parents=True)
+    record = {"browser": "Brave", "user_data": relative,
+              "profiles": {"Default": {"name": "private"}}}
+
+    (result,) = apply_mod.apply_browser_profiles(record, destination)
+
+    assert "Brave" in result.name
+    assert "User Data" not in result.name
+
+
+def test_a_bundle_from_before_the_name_travelled_still_says_something(tmp_path):
+    """Captured with the build that carried the list but not the name. The
+    folder above User Data is at least the browser's own directory."""
+    destination = tmp_path / "new"
+    relative = "AppData/Local/BraveSoftware/Brave-Browser/User Data"
+    (destination / relative / "Default").mkdir(parents=True)
+    record = {"user_data": relative, "profiles": {"Default": {"name": "private"}}}
+
+    (result,) = apply_mod.apply_browser_profiles(record, destination)
+
+    assert "Brave-Browser" in result.name

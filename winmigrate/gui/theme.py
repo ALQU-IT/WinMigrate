@@ -196,8 +196,10 @@ def font_family(probe=None) -> str:
 def apply(style, family: str, palette: Palette = LIGHT) -> None:
     """Configure the ttk styles the window uses, in one palette or the other.
 
-    ``style`` is a ``ttk.Style``. Only named styles are touched, never the
-    defaults, so anything not explicitly styled still looks like the platform.
+    ``style`` is a ``ttk.Style``. Named styles, and one default: ``TButton``.
+    Leaving the defaults alone made sense while unstyled widgets would look like
+    the platform. Under clam they look like clam, which beside the rest of this
+    window reads as a leftover, so the plain button is styled to match.
 
     "clam" underneath, in both themes. It used to be "vista" for the light one,
     on the reasoning that a widget drawn by Windows looks more at home than a
@@ -278,6 +280,17 @@ def apply(style, family: str, palette: Palette = LIGHT) -> None:
         relief="flat",
         focuscolor=palette.accent,
     )
+    style.configure(
+        "TButton",
+        font=(family, BODY_SIZE),
+        padding=(14, 7),
+        background=glass.blend(surfaces.page, palette.ink, 0.06),
+        foreground=palette.ink,
+        borderwidth=0,
+        relief="flat",
+        focuscolor=palette.accent,
+    )
+    style.map("TButton", foreground=[("disabled", palette.ink_faint)])
     style.map(
         "Wizard.TButton",
         background=[
@@ -602,6 +615,17 @@ def round_buttons(style, tk, palette: Palette) -> bool:
         # hole and the row stops reading as three buttons.
         "quietOff": (glass.blend(surfaces.band, palette.ink, 0.02), surfaces.band),
     }
+    # The same quiet button again, for the ones on the page rather than in the
+    # button band. Its corners have to be painted the page's colour, not the
+    # band's -- the two panels are different shades, and a button carried across
+    # with the wrong corners shows four small patches of the wrong panel.
+    page_quiet = glass.blend(surfaces.page, palette.ink, 0.06)
+    faces.update({
+        "page": (page_quiet, surfaces.page),
+        "pageActive": (glass.blend(page_quiet, palette.ink, 0.06), surfaces.page),
+        "pagePressed": (glass.blend(page_quiet, palette.ink, 0.12), surfaces.page),
+        "pageOff": (glass.blend(surfaces.page, palette.ink, 0.02), surfaces.page),
+    })
     try:
         for name, (fill, behind) in faces.items():
             image = tk.PhotoImage(width=_BUTTON_ART, height=_BUTTON_ART)
@@ -612,7 +636,12 @@ def round_buttons(style, tk, palette: Palette) -> bool:
             )
             _button_images[name] = image
 
-        for style_name, prefix in (("Accent.TButton", "accent"), ("Wizard.TButton", "quiet")):
+        # "TButton" is every button that was not given a style: the ones on the
+        # pages -- Select all, Open Brave, Choose the exported file. They were
+        # left square and bevelled beside rounded ones in the band, which made
+        # the window look half finished.
+        for style_name, prefix in (("Accent.TButton", "accent"), ("Wizard.TButton", "quiet"),
+                                   ("TButton", "page")):
             element = f"{prefix}.roundedbutton"
             style.element_create(
                 element, "image", _button_images[prefix],
@@ -634,5 +663,83 @@ def round_buttons(style, tk, palette: Palette) -> bool:
             ])
     except Exception as exc:  # noqa: BLE001 -- square buttons beat no buttons
         log.info("rounded buttons are not available here: %s", exc)
+        return False
+    return True
+
+
+# --- tick boxes -------------------------------------------------------------
+#: The box's size at 100% display scaling. Unlike a button it is not
+#: nine-patched -- a tick box does not stretch -- so it is drawn at the size it
+#: will be shown, scaled with the display rather than left at 16 pixels beside
+#: text that grew.
+TICK_BOX = 16
+
+
+def tick_boxes(style, tk, palette: Palette, scale: float = 1.0) -> bool:
+    """Replace clam's tick-box indicator with one that shows a tick.
+
+    clam draws a *cross* in a ticked box. To most people a cross in a box means
+    "no", "excluded", "not this one" -- the exact opposite of what the box is
+    saying -- and every option on the first two pages is one of these.
+    "Copy files that programs are using (recommended)", ticked, looked like
+    somebody had crossed it out.
+
+    ``scale`` is display pixels per point relative to 96 dpi, as the window
+    computed it; the artwork is drawn at that size because it cannot stretch.
+    Fails soft, like the buttons: a Tk that refuses leaves clam's own box.
+    """
+    surfaces = surfaces_for(palette)
+    size = max(12, round(TICK_BOX * scale))
+    radius = max(2.0, size * 0.22)
+    try:
+        for style_name, behind in (
+            ("Wizard.TCheckbutton", surfaces.page),
+            ("Band.TCheckbutton", surfaces.band),
+        ):
+            empty = glass.blend(behind, palette.ink, 0.05)
+            hover = glass.blend(behind, palette.accent, 0.12)
+            dimmed_accent = glass.blend(behind, palette.accent, 0.35)
+            faces = {
+                "off": dict(face=empty, rim=glass.blend(behind, palette.ink, 0.35)),
+                "hover": dict(face=hover, rim=palette.accent),
+                "on": dict(face=palette.accent, rim=palette.accent, mark=palette.accent_ink),
+                "offDisabled": dict(face=behind, rim=glass.blend(behind, palette.ink, 0.15)),
+                "onDisabled": dict(face=dimmed_accent, rim=dimmed_accent, mark=behind),
+            }
+            # The space between the box and its words is part of the picture:
+            # clam's own indicator carried it as a margin, and that option does
+            # not apply to an image element.
+            gap = max(6, round(8 * scale))
+            images = {}
+            for state, colours in faces.items():
+                box = glass.tick_box_pixels(size, radius, behind=behind, **colours)
+                padded = [row + [behind] * gap for row in box]
+                image = tk.PhotoImage(width=size + gap, height=size)
+                image.put(glass.photo_data(padded))
+                images[state] = image
+                _button_images[f"{style_name}:{state}"] = image
+
+            element = f"{style_name}.tickbox"
+            style.element_create(
+                element, "image", images["off"],
+                # Most specific first: ttk takes the first spec that matches, and
+                # a bare "selected" would also paint a disabled, ticked box as
+                # though it were live.
+                ("disabled selected", images["onDisabled"]),
+                ("disabled", images["offDisabled"]),
+                ("selected", images["on"]),
+                ("active", images["hover"]),
+                sticky="", padding=0,
+            )
+            style.layout(style_name, [
+                ("Checkbutton.padding", {"sticky": "nswe", "children": [
+                    (element, {"side": "left", "sticky": ""}),
+                    ("Checkbutton.focus", {"side": "left", "sticky": "", "children": [
+                        ("Checkbutton.label", {"sticky": "nswe"}),
+                    ]}),
+                ]}),
+            ])
+    except Exception as exc:  # noqa: BLE001 -- clam's box beats no box
+        log.info("drawn tick boxes are not available here: %s", exc)
         return False
     return True

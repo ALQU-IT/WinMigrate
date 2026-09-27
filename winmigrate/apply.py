@@ -671,6 +671,13 @@ def apply_browser_profiles(record: dict[str, Any], destination: Path) -> list[Re
         return []
 
     target = destination.joinpath(*relative.split("/")) / "Local State"
+    # What the report calls it. "User Data" is the folder's name in every
+    # Chromium browser, so on its own it names nothing -- and a report line
+    # reading "Settings put back: browser User Data" is one nobody can act on.
+    # A bundle written before the name travelled falls back to the folder above
+    # it, which is at least "Brave-Browser".
+    label = str(record.get("browser") or "").strip() or target.parent.parent.name
+    label = f"{label}: which profiles exist"
     try:
         state = json.loads(target.read_text(encoding="utf-8", errors="replace"))
         if not isinstance(state, dict):
@@ -723,20 +730,20 @@ def apply_browser_profiles(record: dict[str, Any], destination: Path) -> list[Re
         section["profiles_order"] = order + [f for f in added if f not in order]
 
     if not added and not renamed:
-        return [Result("browser", target.parent.name, Outcome.SKIPPED,
+        return [Result("browser", label, Outcome.SKIPPED,
                        "the browser's list already matches what was restored")]
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(state, indent=2), encoding="utf-8")
     except OSError as exc:
-        return [Result("browser", target.parent.name, Outcome.FAILED, str(exc))]
+        return [Result("browser", label, Outcome.FAILED, str(exc))]
     parts = []
     if added:
         parts.append(f"{len(added)} added ({', '.join(added)})")
     if renamed:
         parts.append(f"{len(renamed)} renamed to match the old machine "
                      f"({', '.join(renamed)})")
-    return [Result("browser", target.parent.name, Outcome.APPLIED, "; ".join(parts))]
+    return [Result("browser", label, Outcome.APPLIED, "; ".join(parts))]
 
 
 # --- how Windows looks and responds ----------------------------------------

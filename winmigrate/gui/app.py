@@ -214,6 +214,10 @@ class WinMigrateWizard:
         # After apply(), which sets the colours these are drawn from, and needs
         # the tkinter module because the artwork is a photo image.
         theme.round_buttons(self.style, tk, self.palette)
+        # Scaling was set before any of this; the tick box is drawn at the size
+        # it will be shown, because unlike a button it cannot stretch.
+        theme.tick_boxes(self.style, tk, self.palette,
+                         self.scaling / (desktop.BASE_DPI / desktop.POINTS_PER_INCH))
         root.configure(background=self.palette.wash_top)
         log.info("theme: %s", "dark" if self.dark else "light")
 
@@ -637,6 +641,56 @@ class WinMigrateWizard:
             justify="left",
         ).pack(anchor="w", pady=(4, 0))
 
+    #: The item lists' columns: name, heading, width, anchor, stretch. The widths
+    #: add up to less than the narrowest page, which is the whole point of
+    #: writing them down in one place. They used to add up to 826 pixels in a
+    #: page 670 wide, and Tk does not complain about that -- it clips. The note
+    #: column, which is where "not on this machine" and "encrypted" are written,
+    #: was cut to "not on t", and the scrollbar went with it.
+    ITEM_COLUMNS: tuple[tuple[str, str, int, str, bool], ...] = (
+        ("pick", "", 30, "center", False),
+        ("title", "Item", 200, "w", True),
+        ("kind", "Kind", 110, "w", False),
+        ("size", "Size", 72, "e", False),
+        ("files", "Files", 52, "e", False),
+        ("note", "", 150, "w", True),
+    )
+    #: Rows shown before the list scrolls. Enough for a typical profile's
+    #: folders and browsers, and few enough that the buttons under the list stay
+    #: on screen at the window's smallest size.
+    ITEM_ROWS = 11
+
+    def _item_list(self, page: Any) -> Any:
+        """A list of things to tick, with a scrollbar that stays visible.
+
+        One builder for both lists, because there were two copies and both were
+        wrong the same way. The scrollbar is packed *before* the list. Pack hands
+        out space in the order widgets are packed, so a list packed first takes
+        everything it asks for and the scrollbar after it gets whatever is left
+        -- which, with a list asking for more than the page has, was nothing.
+        The rows past the eleventh were then unreachable, with no sign there was
+        anything below. On the backup page that was where the browser profiles
+        were.
+        """
+        ttk = self.ttk
+        holder = ttk.Frame(page, style="Page.TFrame")
+        holder.pack(fill="both", expand=True)
+        tree = ttk.Treeview(
+            holder, columns=[c[0] for c in self.ITEM_COLUMNS], show="headings",
+            selectmode="none", style="Wizard.Treeview", height=self.ITEM_ROWS,
+        )
+        for name, heading, width, anchor, stretch in self.ITEM_COLUMNS:
+            tree.heading(name, text=heading)
+            tree.column(name, width=width, minwidth=24, anchor=anchor, stretch=stretch)
+        bar = ttk.Scrollbar(
+            holder, orient="vertical", command=tree.yview,
+            style="Wizard.Vertical.TScrollbar",
+        )
+        tree.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        tree.pack(side="left", fill="both", expand=True)
+        return tree
+
     def _page_opening(self, page: Any) -> None:
         ttk = self.ttk
         self.open_bar = ttk.Progressbar(page, mode="indeterminate")
@@ -646,27 +700,7 @@ class WinMigrateWizard:
 
     def _page_restore_select(self, page: Any) -> None:
         ttk = self.ttk
-        holder = ttk.Frame(page, style="Page.TFrame")
-        holder.pack(fill="both", expand=True)
-        columns = ("pick", "title", "kind", "size", "files", "note")
-        self.restore_tree = ttk.Treeview(
-            holder, columns=columns, show="headings", selectmode="none",
-            style="Wizard.Treeview",
-        )
-        for name, heading, width, anchor, stretch in (
-            ("pick", "", 36, "center", False),
-            ("title", "Item", 300, "w", True),
-            ("kind", "Kind", 120, "w", False),
-            ("size", "Size", 90, "e", False),
-            ("files", "Files", 80, "e", False),
-            ("note", "", 200, "w", True),
-        ):
-            self.restore_tree.heading(name, text=heading)
-            self.restore_tree.column(name, width=width, anchor=anchor, stretch=stretch)
-        bar = ttk.Scrollbar(holder, orient="vertical", command=self.restore_tree.yview)
-        self.restore_tree.configure(yscrollcommand=bar.set)
-        self.restore_tree.pack(side="left", fill="both", expand=True)
-        bar.pack(side="right", fill="y")
+        self.restore_tree = self._item_list(page)
         self.restore_tree.tag_configure("secret", foreground=self.palette.secret)
         self.restore_tree.bind("<Button-1>", self._on_restore_tree_click)
 
@@ -908,27 +942,7 @@ class WinMigrateWizard:
 
     def _page_select(self, page: Any) -> None:
         ttk = self.ttk
-        holder = ttk.Frame(page, style="Page.TFrame")
-        holder.pack(fill="both", expand=True)
-        columns = ("pick", "title", "kind", "size", "files", "note")
-        self.tree = ttk.Treeview(
-            holder, columns=columns, show="headings", selectmode="none",
-            style="Wizard.Treeview",
-        )
-        for name, heading, width, anchor, stretch in (
-            ("pick", "", 36, "center", False),
-            ("title", "Item", 300, "w", True),
-            ("kind", "Kind", 120, "w", False),
-            ("size", "Size", 90, "e", False),
-            ("files", "Files", 80, "e", False),
-            ("note", "", 200, "w", True),
-        ):
-            self.tree.heading(name, text=heading)
-            self.tree.column(name, width=width, anchor=anchor, stretch=stretch)
-        bar = ttk.Scrollbar(holder, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=bar.set)
-        self.tree.pack(side="left", fill="both", expand=True)
-        bar.pack(side="right", fill="y")
+        self.tree = self._item_list(page)
         self.tree.tag_configure("secret", foreground=self.palette.secret)
         self.tree.tag_configure("blocked", foreground=self.palette.ink_faint)
         self.tree.bind("<Button-1>", self._on_tree_click)
@@ -2065,7 +2079,11 @@ class WinMigrateWizard:
                 "",
                 "⚠ The backup was written, but the check could not be completed: "
                 f"{self.verify_failure}",
-                "  Run 'winmigrate verify' on it before relying on it.",
+                # The window cannot check a backup it did not just write, so this
+                # one stays a command -- named after the binary that can run it,
+                # for the same reason the reinstall command is.
+                f'  Check it before relying on it: {self._program_name()} verify '
+                f'"{self.output_var.get()}"',
             ]
         checked = self.verify_report
         if checked is not None:
@@ -2100,9 +2118,14 @@ class WinMigrateWizard:
         if followups:
             lines += [
                 "",
-                f"{followups} thing(s) still need you on the new machine — signing "
-                "in to accounts, reinstalling software. Run 'winmigrate restore' there "
-                "and it will list them.",
+                # Not a command to type. This page is read by somebody who used
+                # the window, and on the new machine they will use the window
+                # again -- "winmigrate restore" is the console build's name for
+                # it, and typed at a WinMigrate.exe it opens a backup wizard.
+                f"{followups} thing(s) will still need you on the new computer — "
+                "mostly signing in to accounts. Open WinMigrate there, choose "
+                "'Restore a backup onto this machine', and it will list them "
+                "when it has finished.",
             ]
         return "\n".join(lines)
 

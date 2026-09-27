@@ -715,3 +715,30 @@ def test_the_proposed_name_still_carries_host_user_and_a_timestamp(monkeypatch):
     # drive root is not a root, so joining it is not the same string.
     assert path.name == "oma-pc-oma-20260916-083000.dat"
     assert str(path.parent).startswith("F:")
+
+
+def test_the_window_never_tells_anyone_to_type_the_bare_program_name():
+    """The window is WinMigrate.exe, a windowed binary that cannot run commands.
+    "Run 'winmigrate restore' there" and "Run 'winmigrate verify'" were both on
+    screen; typed at the window, either one opens a backup wizard.
+
+    Anything the window asks somebody to type goes through _program_name(),
+    which names the console build beside it. A literal 'winmigrate <command>'
+    in the window's text is the mistake, wherever it turns up next.
+    """
+    import ast
+    import re
+
+    # String literals only -- comments explaining why this rule exists quote
+    # the very sentence it forbids, and are not on screen.
+    pattern = re.compile(r"\bwinmigrate (?:restore|verify|reinstall|capture|scan)\b")
+    found = [
+        (node.lineno, node.value)
+        for node in ast.walk(ast.parse(_app_source()))
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        and pattern.search(node.value)
+        # Docstrings describe the window; they are not in it.
+        and not node.value.lstrip().startswith(("The ", "A ", "Not "))
+        and "\n\n" not in node.value
+    ]
+    assert found == [], found

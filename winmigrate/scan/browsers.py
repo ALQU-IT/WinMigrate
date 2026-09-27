@@ -624,7 +624,11 @@ def _profile_list_items(
             kind=Kind.RECORD,
             title=f"{group[0].browser_title} — which profiles exist ({len(entries)})",
             sensitivity=Sensitivity.SECRET,
-            record={"user_data": relative, "profiles": entries},
+            # The browser's name travels with the list so the restore report can
+            # say "Brave" rather than naming the folder it wrote into, which is
+            # called "User Data" for every Chromium browser there is.
+            record={"browser": group[0].browser_title, "user_data": relative,
+                    "profiles": entries},
             restore=RestoreSpec(
                 target=f"%USERPROFILE%\\{relative.replace('/', chr(92))}\\Local State",
                 strategy=RestoreStrategy.MERGE,
