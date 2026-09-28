@@ -379,3 +379,26 @@ def _ok():
     from winmigrate.util.process import CommandResult
 
     return CommandResult(["x"], 0)
+
+
+def test_a_share_that_wants_a_password_says_what_to_do_about_it():
+    """"Systemfehler 1223 aufgetreten." is what net use says, in German, when
+    the share wants credentials it was not given. The number is the part that
+    is the same in every language, and the user needs the next step."""
+    from winmigrate.util.process import CommandResult
+
+    def runner(command, timeout=0):
+        return CommandResult(command, 2, "", "Systemfehler 1223 aufgetreten.\n\nAbgebrochen.")
+
+    (result,) = apply_mod.apply_mapped_drives(
+        {"drives": {"Y": "\\\\10.10.0.196\\extradata"}}, runner
+    )
+    assert result.outcome is Outcome.FAILED
+    assert "Map network drive" in result.detail
+    assert "1223" in result.detail
+
+
+def test_a_number_inside_an_address_is_not_an_error_number():
+    assert apply_mod.drive_problem("\\\\10.10.0.53\\x is odd") == "\\\\10.10.0.53\\x is odd"
+    assert "could not be reached" in apply_mod.drive_problem("System error 53 has occurred.")
+    assert apply_mod.drive_problem("") == ""

@@ -167,7 +167,10 @@ def executable_of(command: str) -> str:
     words = text.split(" ")
     for count in range(1, len(words) + 1):
         candidate = " ".join(words[:count])
-        if Path(pathutil.to_posix(candidate)).exists():
+        # A file, not merely something that exists: "C:\Program Files" is a
+        # folder on every machine, and stopping there read the GOG Galaxy entry
+        # as a program that was present, so it was put back before GOG was.
+        if Path(pathutil.to_posix(candidate)).is_file():
             return candidate
     # Nothing here matched, which on a restore is the normal case rather than
     # the odd one: these entries are put back before their programs have been

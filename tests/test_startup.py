@@ -238,3 +238,27 @@ def test_the_later_answer_replaces_the_earlier_one_in_the_report():
     assert startup_rows == [("Gone", Outcome.SKIPPED), ("Notepad++", Outcome.APPLIED)]
     # A result of another kind that happens to share a name is not touched.
     assert any(r.kind == "printer" and r.outcome is Outcome.APPLIED for r in settled)
+
+
+def test_a_folder_on_the_way_to_the_program_is_not_the_program(tmp_path: Path):
+    """GOG Galaxy's entry is unquoted: C:\\Program Files (x86)\\GOG Galaxy\\...
+    Growing it a word at a time reaches "C:\\Program Files", which is a folder
+    on every machine -- and the entry was put back as present, before GOG was
+    installed, because a folder exists."""
+    (tmp_path / "Program Files").mkdir()
+    command = f"{tmp_path}/Program Files (x86)/GOG Galaxy/GalaxyClient.exe /launchViaAutostart"
+
+    program = startup.executable_of(command)
+
+    assert program == f"{tmp_path}/Program Files (x86)/GOG Galaxy/GalaxyClient.exe"
+    env = env_with(tmp_path)
+    (result,) = apply_mod.apply_startup({"entries": {"GogGalaxy": command}}, env)
+    assert result.outcome is Outcome.SKIPPED
+
+
+def test_an_entry_that_names_a_folder_is_not_a_program_that_is_here(tmp_path: Path):
+    folder = tmp_path / "Somewhere"
+    folder.mkdir()
+    env = env_with(tmp_path)
+    (result,) = apply_mod.apply_startup({"entries": {"Odd": f'"{folder}" --go'}}, env)
+    assert result.outcome is Outcome.SKIPPED

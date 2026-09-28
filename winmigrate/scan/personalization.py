@@ -219,8 +219,11 @@ SETTINGS: tuple[Setting, ...] = (
             "Hidden files, file extensions, what Explorer opens to, and which "
             "buttons are on the taskbar."
         ),
+        # Not TaskbarDa, the Widgets button: current Windows 11 guards it, and
+        # a write from anything but Settings is refused with "access denied"
+        # every time. A value that can only fail is not worth carrying.
         values=("Hidden", "HideFileExt", "LaunchTo", "ShowTaskViewButton",
-                "TaskbarAl", "TaskbarDa", "TaskbarMn", "NavPaneShowAllFolders",
+                "TaskbarAl", "TaskbarMn", "NavPaneShowAllFolders",
                 "SeparateProcess", "ShowSuperHidden", "DontPrettyPath"),
     ),
 )

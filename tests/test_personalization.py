@@ -170,3 +170,21 @@ def test_a_setting_from_a_newer_version_is_named_rather_than_written_blind():
 def test_a_record_that_is_not_a_record_does_nothing():
     assert apply_mod.apply_personalization({}, env_with({})) == []
     assert apply_mod.apply_personalization({"settings": "nonsense"}, env_with({})) == []
+
+
+def test_the_widgets_button_is_left_to_windows():
+    """Windows 11 refuses every write to TaskbarDa from outside Settings, so a
+    backup that carries it earns an "access denied" warning on every restore.
+    An older backup that has it is not written, and says so."""
+    explorer = next(s for s in personalization.SETTINGS if s.slot == "explorer")
+    assert not explorer.wanted("TaskbarDa")
+
+    target = env_with({})
+    (result,) = apply_mod.apply_personalization(
+        {"settings": {"explorer": {"HideFileExt": 0, "TaskbarDa": 0}}}, target
+    )
+    written = target.registry[
+        r"HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+    ]
+    assert written == {"HideFileExt": 0}
+    assert "TaskbarDa" in result.detail

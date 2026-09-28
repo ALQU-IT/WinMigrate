@@ -191,9 +191,11 @@ def _safe_argument(text: str) -> bool:
 def apply_mapped_drives(record: dict[str, Any], runner=process.run) -> list[Result]:
     """Re-map the network drives, persistently, without credentials.
 
-    No password is supplied and none was captured. A share that needs one will
-    prompt the user the first time they open it, which is the operating system
-    asking for an identity -- exactly the line this tool does not cross.
+    No password is supplied and none was captured. A share that needs one
+    cannot be mapped from here -- ``net use`` has nobody to ask -- so it fails,
+    and the report says how to connect it once in File Explorer, where Windows
+    asks for the identity itself. That is exactly the line this tool does not
+    cross.
     """
     results: list[Result] = []
     for letter, remote in sorted((record.get("drives") or {}).items()):
@@ -223,9 +225,44 @@ def apply_mapped_drives(record: dict[str, Any], runner=process.run) -> list[Resu
         else:
             results.append(
                 Result("drive", f"{drive} {remote}", Outcome.FAILED,
-                       _first_line(completed.stderr or completed.stdout))
+                       drive_problem(completed.stderr or completed.stdout))
             )
     return results
+
+
+#: What ``net use`` failures mean for somebody who has to do something about
+#: them. Keyed by the Windows error number, because the words around it are in
+#: the machine's own language ("Systemfehler 1223 aufgetreten.") and the number
+#: is the one part that is not.
+_SIGN_IN_FIRST = (
+    "the share asks for a user name and password, which this tool never has. "
+    "Connect it once in File Explorer (This PC > Map network drive, with "
+    "'Reconnect at sign-in' ticked) and Windows will remember it"
+)
+DRIVE_PROBLEMS = {
+    5: _SIGN_IN_FIRST,
+    86: _SIGN_IN_FIRST,
+    1223: _SIGN_IN_FIRST,
+    1326: _SIGN_IN_FIRST,
+    53: "the server could not be reached from this machine -- is it on this network?",
+    67: "the server is there but has no share by that name any more",
+    85: "that drive letter is already in use on this machine",
+    1219: "this machine is already connected to that server as someone else",
+}
+
+
+def drive_problem(output: str | None) -> str:
+    """The reason a drive was not mapped, in words, with the original kept."""
+    import re  # noqa: PLC0415
+
+    first = _first_line(output)
+    # The first line only -- "System error 1223 has occurred." -- and never a
+    # number that is part of an address: \\10.10.0.53 is not error 53.
+    for number in re.findall(r"(?<![\d.])(\d{1,5})(?![\d.])", first):
+        meaning = DRIVE_PROBLEMS.get(int(number))
+        if meaning:
+            return f"{meaning} ({first})" if first else meaning
+    return first
 
 
 # --- environment variables -------------------------------------------------
@@ -598,7 +635,7 @@ def apply_startup(record: dict[str, Any], env=None, only=None) -> list[Result]:
         if only is not None and name not in only:
             continue
         program = executable_of(command)
-        if not program or not Path(pathutil.to_posix(pathutil.expand(program, env.environ))).exists():
+        if not program or not Path(pathutil.to_posix(pathutil.expand(program, env.environ))).is_file():
             results.append(
                 Result("startup", name, Outcome.SKIPPED,
                        f"{program or 'its program'} is not on this machine yet; "
