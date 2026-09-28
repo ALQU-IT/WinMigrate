@@ -202,6 +202,7 @@ class WinMigrateWizard:
         self.credential_entries: list | None = None
         self.credential_backup: Path | None = None
         self.install_lines: list[str] = []
+        self._install_counting = False
         self._install_stop = threading.Event()
         self.scan_result: ScanResult | None = None
         self.capture_report: Any = None
@@ -2695,6 +2696,8 @@ class WinMigrateWizard:
         self.install_output.configure(state="normal")
         self.install_output.delete("1.0", "end")
         self.install_output.configure(state="disabled")
+        self._install_counting = False
+        self.install_bar.configure(mode="indeterminate", value=0)
         self.install_bar.start(14)
         self.install_status.configure(text="Asking winget for the first package\u2026")
         log.info("installing software from %s", artifacts.winget_import)
@@ -2706,25 +2709,47 @@ class WinMigrateWizard:
 
     def _install_worker(self, import_file: Path) -> None:
         from .. import reinstall as reinstall_mod  # noqa: PLC0415
-        from ..util import process  # noqa: PLC0415
 
         try:
-            command = reinstall_mod.import_command(import_file)
-            if self._can_install_programs():
-                result = process.stream(
-                    command,
-                    lambda line: self.events.put(("install-line", line)),
-                    timeout=reinstall_mod.WINGET_IMPORT_TIMEOUT,
-                    cancelled=self._install_stop.is_set,
-                )
+            wanted = reinstall_mod.packages(import_file)
+            if not wanted:
+                run = reinstall_mod.InstallRun(0)
+            elif self._can_install_programs():
+                run = self._install_here(wanted)
             else:
-                result = self._install_elevated(command)
-            self.events.put(("installed", result))
+                run = self._install_elevated(import_file, wanted)
+            self.events.put(("installed", run))
         except Exception as exc:  # noqa: BLE001 -- surfaced in the window
             log.warning("the install could not be run", exc_info=True)
             self.events.put(("install-failed", str(exc)))
 
-    def _install_elevated(self, command: list[str]):
+    def _install_here(self, wanted: list) -> Any:
+        """Install each package from this process, which already has the rights."""
+        from .. import reinstall as reinstall_mod  # noqa: PLC0415
+        from ..util import process  # noqa: PLC0415
+
+        def runner(command: list[str], timeout: int):
+            return process.stream(
+                command,
+                lambda line: self.events.put(("install-line", line)),
+                timeout=timeout,
+                cancelled=self._install_stop.is_set,
+            )
+
+        results = reinstall_mod.install_packages(
+            wanted,
+            runner,
+            reinstall_mod.install_flags(),
+            on_start=lambda index, package: self.events.put(
+                ("install-progress", (index, len(wanted), package.identifier))
+            ),
+            on_result=lambda result: self.events.put(("install-result", result)),
+            cancelled=self._install_stop.is_set,
+        )
+        stopped = self._install_stop.is_set() or any(r.outcome == "stopped" for r in results)
+        return reinstall_mod.InstallRun(len(wanted), results, "stopped" if stopped else None)
+
+    def _install_elevated(self, import_file: Path, wanted: list) -> Any:
         """Install with administrator rights, asked for here rather than earlier.
 
         The tick on the first page is the tidy way: agree before anything has
@@ -2733,29 +2758,92 @@ class WinMigrateWizard:
         install -- reaches this button and presses it, and restarting the
         program now would throw away the restore that just finished.
 
-        So winget alone is elevated. Windows asks, winget runs in its own
-        window, and this waits for it. Its own window rather than this one's
-        output is not a compromise: winget showing its own progress beats a bar
-        somebody has to trust, and there is no pipe for it to inherit.
+        So a helper is elevated: the console build, installing one package at
+        a time (see :func:`reinstall.helper_command`). Windows asks once. The
+        helper shows its progress in its own window and writes each answer to
+        a file, which this reads as it goes, so this page follows along.
         """
-        from ..util import process  # noqa: PLC0415
+        from .. import reinstall as reinstall_mod  # noqa: PLC0415
 
+        total = len(wanted)
+        directory = import_file.parent
+        results_file = directory / reinstall_mod.RESULTS_FILE
+        try:
+            results_file.unlink()
+        except OSError:
+            pass
+        helper = reinstall_mod.helper_command(
+            import_file, results_file, directory / "install.log"
+        )
+        if helper is None:
+            log.warning("no console build beside this program; cannot install elevated")
+            return reinstall_mod.InstallRun(
+                total,
+                error=f"{reinstall_mod.CONSOLE_BUILD} is missing from the WinMigrate "
+                "folder, and it is what installs the programs",
+            )
         self.events.put(
             ("install-line", "Asking Windows for permission to install\u2026")
         )
-        handle = elevate.start_elevated(command[0], command[1:])
+        handle = elevate.start_elevated(helper[0], helper[1])
         if handle is None:
-            log.info("elevation declined; nothing was installed")
-            return process.CommandResult(command, None, error="declined")
+            problem = elevate.last_problem
+            log.info("the install helper did not start: %s", problem or "declined")
+            declined = not problem or "declined" in problem
+            return reinstall_mod.InstallRun(total, error="declined" if declined else problem)
         self.events.put(
             ("install-line",
-             "Installing with administrator rights, in its own window. "
-             "This one will say when it has finished.")
+             "Installing with administrator rights, in their own window. "
+             "This page follows along.")
         )
-        code = elevate.wait_for(handle, waiting=lambda: not self._install_stop.is_set())
+        self.events.put(("install-progress", (0, total, wanted[0].identifier)))
+        seen = 0
+
+        def follow() -> None:
+            nonlocal seen
+            results = reinstall_mod.read_results(results_file)
+            for result in results[seen:]:
+                self.events.put(("install-result", result))
+            if len(results) > seen and len(results) < total:
+                self.events.put(
+                    ("install-progress",
+                     (len(results), total, wanted[len(results)].identifier))
+                )
+            seen = max(seen, len(results))
+
+        def waiting() -> bool:
+            follow()
+            return not self._install_stop.is_set()
+
+        code = elevate.wait_for(handle, waiting=waiting)
+        follow()
+        results = reinstall_mod.read_results(results_file)
         if code is None:
-            return process.CommandResult(command, None, error="stopped")
-        return process.CommandResult(command, code, "")
+            # Stopped watching: the helper may well still be going.
+            return reinstall_mod.InstallRun(total, results, "stopped")
+        if not results:
+            log.warning("the install helper wrote no results (exit %s)", code)
+            return reinstall_mod.InstallRun(
+                total, results,
+                f"the installer stopped before installing anything (exit {code})"
+                if code else "the installer stopped before installing anything",
+            )
+        return reinstall_mod.InstallRun(total, results)
+
+    def _install_line(self, line: str) -> None:
+        """One more line in the install's running record on the page."""
+        self.install_lines.append(line)
+        if not self._install_counting:
+            self.install_status.configure(text=line)
+        self.install_output.configure(state="normal")
+        self.install_output.insert("end", line + "\n")
+        # Bounded, because ninety-seven installs write thousands of lines and
+        # the whole of it in a Text widget is a window that stops repainting.
+        # The log keeps all of it.
+        if len(self.install_lines) > 400:
+            self.install_output.delete("1.0", "2.0")
+        self.install_output.see("end")
+        self.install_output.configure(state="disabled")
 
     def _stop_install(self) -> None:
         """Stop at the next line. What is installed stays installed.
@@ -2775,46 +2863,63 @@ class WinMigrateWizard:
 
     def _install_lines(self) -> list[str]:
         """What the install did, for the page that reports a finished restore."""
-        result = self.install_result
-        if result is None:
+        run = self.install_result
+        if run is None:
             return []
-        if getattr(result, "unavailable", False):
+        if run.unavailable:
             return [
                 "",
                 "Software: winget is not on this machine, so nothing was installed. "
                 "Install 'App Installer' from the Microsoft Store and run the command "
                 "below.",
             ]
-        if result.error == "declined":
+        if run.error == "declined":
             return [
                 "",
                 "Software: nothing was installed \u2014 Windows was not given "
                 "permission. Press Install again and choose Yes, or run the "
                 "command below yourself.",
             ]
-        if result.error == "stopped":
+        if run.error and run.error != "stopped":
+            return ["", f"\u26a0 Software: the install did not finish \u2014 {run.error}"]
+
+        counts = run.counts
+        installed = counts.get("installed", 0)
+        already = counts.get("already", 0)
+        missed = [r for r in run.results if r.outcome in {"failed", "not_found"}]
+        untried = run.total - len(run.results)
+        summary = f"{installed} of {run.total} program(s) installed"
+        if already:
+            summary += f", {already} already here"
+        lines = ["", f"Software: {summary}."]
+        if run.error == "stopped":
             if self._can_install_programs():
-                return [
-                    "",
-                    "Software: you stopped the install. What had finished is installed.",
-                ]
-            # The elevated one is in a window this process cannot close.
-            return [
-                "",
-                "Software: you stopped watching the install. It is still running in "
-                "its own window \u2014 close that window to stop it.",
-            ]
-        if result.error:
-            return ["", f"\u26a0 Software: the install did not finish \u2014 {result.error}"]
-        if result.returncode:
-            # winget returns non-zero when any single package failed, which on a
-            # list this long is normal and is not the same as nothing working.
-            return [
-                "",
-                f"Software: winget finished with errors (exit {result.returncode}). "
-                "Some packages installed, some did not \u2014 the log has each one.",
-            ]
-        return ["", "Software: winget installed everything it had a package for."]
+                lines.append(
+                    "  You stopped the install. What had finished is installed"
+                    + (f"; {untried} were not tried." if untried else ".")
+                )
+            else:
+                # The elevated helper is in a window this process cannot close.
+                lines.append(
+                    "  You stopped watching; the install carries on in its own "
+                    "window \u2014 close that window to stop it."
+                )
+        for result in run.results:
+            if result.outcome == "installed" and result.detail:
+                lines.append(f"  {result.identifier}: {result.detail}")
+        if missed:
+            lines.append(f"  Not installed ({len(missed)}) \u2014 these need doing by hand:")
+            for result in missed:
+                lines.append(f"  \u26a0 {result.identifier}: {result.detail or 'failed'}")
+        if installed and not self._can_install_programs():
+            # Over-the-shoulder elevation runs as the administrator account, and
+            # a program that installs per user lands in *that* profile.
+            lines.append(
+                "  If a program is missing from your Start menu, it installed for "
+                "the administrator account whose password was typed; install it "
+                "again from your own account."
+            )
+        return lines
 
     def _settle_after_install(self) -> None:
         """Finish the jobs that could not be done before the software existed.
@@ -2838,7 +2943,9 @@ class WinMigrateWizard:
 
         result = self.install_result
         report = self.restore_report
-        if result is None or result.error or report is None:
+        # Only when something arrived: asking again about thirteen programs
+        # that are still not here reports the same thirteen skips twice.
+        if result is None or not result.installed_any or report is None:
             return
         record = self._manifest_record("settings:startup_run")
         if not record:
@@ -2870,7 +2977,7 @@ class WinMigrateWizard:
         from .. import apply as apply_mod  # noqa: PLC0415
 
         result = self.install_result
-        if result is None or result.error or not self.restore_report:
+        if result is None or not result.installed_any or not self.restore_report:
             return
         applied = getattr(self.restore_report, "applied", []) or []
         if not any(entry.kind == "layout" for entry in applied):
@@ -3226,25 +3333,36 @@ class WinMigrateWizard:
                 Step.SOFTWARE if self._software_to_install() else Step.RESTORE_DONE
             )
         elif kind == "install-line":
-            line = str(payload)
-            self.install_lines.append(line)
-            self.install_status.configure(text=line)
-            self.install_output.configure(state="normal")
-            self.install_output.insert("end", line + "\n")
-            # Bounded, because a ninety-seven package import writes thousands of
-            # lines and the whole of it in a Text widget is a window that stops
-            # repainting. The log keeps all of it.
-            if len(self.install_lines) > 400:
-                self.install_output.delete("1.0", "2.0")
-            self.install_output.see("end")
-            self.install_output.configure(state="disabled")
+            self._install_line(str(payload))
+        elif kind == "install-progress":
+            index, total, identifier = payload
+            # Once there is a count, the bar is the count and the line under it
+            # names the program; winget's own chatter goes to the box below.
+            self._install_counting = True
+            self.install_bar.stop()
+            self.install_bar.configure(mode="determinate", maximum=max(total, 1), value=index)
+            self.install_status.configure(
+                text=f"Installing {identifier} \u2014 {index + 1} of {total}"
+            )
+        elif kind == "install-result":
+            marks = {"installed": "\u2713", "already": "\u2713"}
+            mark = marks.get(payload.outcome, "\u26a0")
+            words = {
+                "installed": "installed", "already": "already here",
+                "not_found": "not in winget", "stopped": "stopped",
+            }.get(payload.outcome, "not installed")
+            detail = f" \u2014 {payload.detail}" if payload.detail and payload.outcome not in {
+                "already", "stopped"} else ""
+            self._install_line(f"{mark} {payload.identifier}: {words}{detail}")
         elif kind == "installed":
             self.install_bar.stop()
             self.install_result = payload
             if payload is not None:
                 log.info(
-                    "install finished: exit %s%s",
-                    payload.returncode,
+                    "install finished: %s of %s tried; %s%s",
+                    len(payload.results), payload.total,
+                    ", ".join(f"{count} {outcome}" for outcome, count
+                              in sorted(payload.counts.items())) or "nothing",
                     f" ({payload.error})" if payload.error else "",
                 )
             self._settle_after_install()

@@ -189,6 +189,61 @@ def console_command() -> str:
     return Path(sys.executable).name
 
 
+def helper_command(
+    import_file: Path, results_file: Path, log_file: Path | None = None
+) -> tuple[str, list[str]] | None:
+    """What the window elevates to install the programs: this tool, not winget.
+
+    Elevating winget itself means one Windows prompt per package, or one
+    ``winget import`` that a single awkward package stops dead. Elevating the
+    console build once, and letting it run :func:`install_packages`, costs one
+    prompt and keeps every package's answer separate. It writes them to
+    ``results_file`` as it goes, and the window reads them from there.
+
+    The console build rather than the window's own executable because it has a
+    console: the elevated helper shows, in its own window, which program it is
+    installing -- nothing this tool does happens out of sight.
+
+    A copy on a network share is copied next to the install files first. The
+    elevated session is a different logon -- often a different account, the
+    one whose password was just typed -- and a share that needed this user's
+    credentials is not open to it. The install files are on a local disk, in
+    this user's profile, which an administrator can always read.
+
+    None when there is no console build to run, which only a partial copy of
+    the package can cause.
+    """
+    import shutil  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+
+    arguments = [
+        "reinstall", str(import_file.parent), "--apps", "--yes",
+        "--results", str(results_file),
+    ]
+    if log_file is not None:
+        arguments += ["--log-file", str(log_file)]
+    if not getattr(sys, "frozen", False):
+        return sys.executable, ["-m", "winmigrate", *arguments]
+    console_build = Path(sys.executable).with_name(CONSOLE_BUILD)
+    if not console_build.is_file():
+        return None
+    try:
+        resolved = str(console_build.resolve())
+    except (OSError, RuntimeError):
+        resolved = str(console_build)
+    if resolved.startswith("\\\\"):
+        local = import_file.parent / CONSOLE_BUILD
+        try:
+            shutil.copy2(console_build, local)
+            log.info("copied %s to %s so the elevated helper can reach it",
+                     console_build, local)
+            return str(local), arguments
+        except OSError:
+            log.warning("could not copy %s next to the install files", console_build,
+                        exc_info=True)
+    return resolved, arguments
+
+
 def without_versions(export: Any) -> Any:
     """The export with each package's pinned version taken out.
 
@@ -491,8 +546,16 @@ def run_winget_import(import_file: Path, runner=process.run) -> process.CommandR
     return runner(import_command(import_file, runner), timeout=WINGET_IMPORT_TIMEOUT)
 
 
-def package_identifiers(import_file: Path) -> list[str]:
-    """The packages a winget export asks for, so a window can show the list.
+@dataclass(slots=True, frozen=True)
+class Package:
+    """One entry of a winget export: what it is, and which catalogue it is in."""
+
+    identifier: str
+    source: str = "winget"
+
+
+def packages(import_file: Path) -> list[Package]:
+    """The packages a winget export asks for, each with the source it came from.
 
     The export is a file this tool wrote, but it is read back off a disk that
     a restore has just written to; a malformed one means an empty list and a
@@ -503,15 +566,308 @@ def package_identifiers(import_file: Path) -> list[str]:
     except (OSError, ValueError):
         log.warning("could not read %s", import_file, exc_info=True)
         return []
-    names: list[str] = []
+    if not isinstance(export, dict):
+        return []
+    found: list[Package] = []
+    seen: set[str] = set()
     for source in _as_list(export.get("Sources")):
         if not isinstance(source, dict):
             continue
+        details = source.get("SourceDetails")
+        name = details.get("Name") if isinstance(details, dict) else None
+        name = name if isinstance(name, str) and name else "winget"
         for package in _as_list(source.get("Packages")):
             identifier = package.get("PackageIdentifier") if isinstance(package, dict) else None
-            if isinstance(identifier, str) and identifier:
-                names.append(identifier)
-    return names
+            if isinstance(identifier, str) and identifier and identifier not in seen:
+                seen.add(identifier)
+                found.append(Package(identifier, name))
+    return found
+
+
+def package_identifiers(import_file: Path) -> list[str]:
+    """The packages a winget export asks for, so a window can show the list."""
+    return [package.identifier for package in packages(import_file)]
+
+
+# --- installing one package at a time -------------------------------------
+#
+# ``winget import`` looked like the natural way to replay an export, and it
+# fails as a unit. It resolves every package before installing any, and a
+# single one it cannot install unattended stops the lot: on a real migration of
+# ninety-odd applications, one package whose manifest insists on being told
+# where to go (0x8A15005F) ended the import fourteen seconds in, with nothing
+# installed and no window left open to say why. The same goes for a package
+# the catalogue has since dropped, or one Windows already has.
+#
+# So each package is its own ``winget install``, and each answer is its own
+# line in the report. One that fails costs that one program, which is the most
+# any single package should be able to cost.
+
+#: How long one package may take. Generous -- an IDE or a game launcher can
+#: download gigabytes -- but finite, so one installer waiting on a dialog nobody
+#: can see does not hold up the other ninety.
+PACKAGE_TIMEOUT = 1800
+
+#: Where the window's elevated helper writes its answers, one JSON line per
+#: package, as it goes -- the window reads them while the helper runs.
+RESULTS_FILE = "install-results.jsonl"
+
+#: winget's documented return codes -- the ones this step answers differently.
+INSTALL_LOCATION_REQUIRED = 0x8A15005F
+NO_PACKAGE_FOUND = 0x8A150014
+#: "Already here" in its several spellings: the same package, a newer one, or
+#: one winget found and had nothing to upgrade it with. Not a failure: the
+#: program is on the machine, which is the whole of what was asked.
+ALREADY_HERE = frozenset({0x8A150061, 0x8A15002B, 0x8A15010D, 0x8A15010E})
+#: Installed, but Windows has to restart before it is finished.
+RESTART_TO_FINISH = frozenset({0x8A150109, 0x8A15010B})
+
+#: What the installer-level failures mean, in words somebody can act on.
+REASONS = {
+    NO_PACKAGE_FOUND: "winget no longer has this package -- it is on the by-hand list",
+    INSTALL_LOCATION_REQUIRED: "this package has to be told where to install",
+    0x8A150101: "the program is running; close it and try again",
+    0x8A150102: "another installation was in progress",
+    0x8A150103: "a file it needs was in use",
+    0x8A150104: "it needs something this machine does not have",
+    0x8A150105: "the disk is full",
+    0x8A150106: "there was not enough memory",
+    0x8A150107: "it needs an internet connection",
+    0x8A150108: "its installer failed; the publisher's support is the next step",
+    0x8A15010A: "Windows has to restart before it can install",
+    0x8A15010C: "its installer was cancelled",
+    0x8A15010F: "a policy on this machine blocks it",
+    0x8A150110: "a program it depends on did not install",
+    0x8A150111: "the program is in use",
+    0x8A150113: "it does not support this version of Windows",
+}
+
+#: Asked about for ``winget install``, as for the import. Every winget that has
+#: ``install`` has taken this for years, but asking costs one call and a wrong
+#: guess costs every package.
+INSTALL_OPTIONAL_FLAGS: tuple[str, ...] = (SILENT_FLAG,)
+
+
+@dataclass(slots=True)
+class PackageResult:
+    """What happened to one package.
+
+    ``outcome`` is one of ``installed``, ``already``, ``not_found``,
+    ``failed``, ``stopped`` or ``no_winget``.
+    """
+
+    identifier: str
+    outcome: str
+    detail: str = ""
+    code: int | None = None
+
+    @property
+    def present(self) -> bool:
+        """Is the program on this machine now?"""
+        return self.outcome in {"installed", "already"}
+
+    def to_json(self) -> str:
+        return json.dumps(
+            {"id": self.identifier, "outcome": self.outcome, "detail": self.detail,
+             "code": self.code},
+            ensure_ascii=False,
+        )
+
+    @classmethod
+    def from_json(cls, line: str) -> "PackageResult | None":
+        try:
+            data = json.loads(line)
+        except ValueError:
+            return None
+        if not isinstance(data, dict) or not isinstance(data.get("id"), str):
+            return None
+        code = data.get("code")
+        return cls(
+            data["id"], str(data.get("outcome") or "failed"), str(data.get("detail") or ""),
+            code if isinstance(code, int) else None,
+        )
+
+
+def install_flags(runner=process.run) -> tuple[str, ...]:
+    """Which of :data:`INSTALL_OPTIONAL_FLAGS` this machine's ``winget install`` takes."""
+    result = runner(["winget", "install", "-?"], timeout=60)
+    help_text = result.stdout or ""
+    return tuple(flag for flag in INSTALL_OPTIONAL_FLAGS if flag in help_text)
+
+
+def install_command(
+    package: Package, extra: "tuple[str, ...] | list[str]" = (), location: str | None = None
+) -> list[str]:
+    """The command that installs one package, unattended, at today's version.
+
+    ``--exact`` so that "Git.Git" is Git and not the first thing whose name
+    contains it; ``--source`` so that a Store app is fetched from the Store.
+    No ``--version``: somebody moving to a new machine wants the program back,
+    not last year's build of it.
+    """
+    command = [
+        "winget", "install",
+        "--id", package.identifier,
+        "--exact",
+        "--source", package.source,
+        "--accept-source-agreements",
+        "--accept-package-agreements",
+        "--disable-interactivity",
+    ]
+    if location:
+        command += ["--location", location]
+    command.extend(extra)
+    return command
+
+
+def default_location(package: Package, environ=None) -> str:
+    """Where a package that insists on being told gets installed.
+
+    Program Files, in a folder named after the package, which is where its own
+    installer would have put it had it been willing to choose. The old
+    machine's choice is not known -- winget's export does not record it -- and
+    asking somebody in the middle of ninety installs is exactly the
+    interruption this step exists to avoid. The report says where it went.
+    """
+    import os  # noqa: PLC0415
+
+    environ = os.environ if environ is None else environ
+    base = environ.get("ProgramFiles") or "C:\\Program Files"
+    name = package.identifier.rsplit(".", 1)[-1] or package.identifier
+    return f"{base}\\{name}"
+
+
+def classify(package: Package, result: process.CommandResult) -> PackageResult:
+    """Turn one ``winget install`` into an answer a person can read."""
+    if result.error == "stopped":
+        return PackageResult(package.identifier, "stopped", "stopped before it finished")
+    if result.unavailable:
+        return PackageResult(package.identifier, "no_winget", "winget is not on this machine")
+    if result.error:
+        return PackageResult(package.identifier, "failed", result.error)
+    code = (result.returncode or 0) & 0xFFFFFFFF
+    if code == 0:
+        return PackageResult(package.identifier, "installed", code=0)
+    if code in RESTART_TO_FINISH:
+        return PackageResult(
+            package.identifier, "installed", "restart the PC to finish installing it", code
+        )
+    if code in ALREADY_HERE:
+        return PackageResult(package.identifier, "already", "already on this machine", code)
+    if code == NO_PACKAGE_FOUND:
+        return PackageResult(package.identifier, "not_found", REASONS[code], code)
+    reason = REASONS.get(code) or f"winget stopped with 0x{code:08X}"
+    return PackageResult(package.identifier, "failed", reason, code)
+
+
+def install_packages(
+    wanted: list[Package],
+    runner=None,
+    flags: "tuple[str, ...] | None" = None,
+    on_start=None,
+    on_result=None,
+    cancelled=None,
+    environ=None,
+) -> list[PackageResult]:
+    """Install each package on its own, so that one failure costs one program.
+
+    ``runner`` runs one command and returns a :class:`process.CommandResult`;
+    the window hands in one that streams winget's output to the page.
+    ``on_start(index, package)`` and ``on_result(result)`` report progress,
+    and ``cancelled`` is asked between packages.
+
+    A package that insists on an install location is tried once more with one
+    (see :func:`default_location`) rather than written off: the migration's
+    whole point is that nobody has to sit there answering installers.
+    """
+    runner = runner or process.run
+    if flags is None:
+        flags = install_flags(runner)
+    results: list[PackageResult] = []
+    for index, package in enumerate(wanted):
+        if cancelled is not None and cancelled():
+            break
+        if on_start is not None:
+            on_start(index, package)
+        command = install_command(package, flags)
+        answer = classify(package, runner(command, timeout=PACKAGE_TIMEOUT))
+        if answer.code == INSTALL_LOCATION_REQUIRED:
+            location = default_location(package, environ)
+            log.info("%s needs an install location; trying %s", package.identifier, location)
+            retry = classify(
+                package,
+                runner(install_command(package, flags, location), timeout=PACKAGE_TIMEOUT),
+            )
+            if retry.present:
+                retry.detail = f"installed into {location}"
+            answer = retry
+        log.info("install %s: %s%s", package.identifier, answer.outcome,
+                 f" ({answer.detail})" if answer.detail else "")
+        results.append(answer)
+        if on_result is not None:
+            on_result(answer)
+        if answer.outcome in {"no_winget", "stopped"}:
+            # Asking a missing winget ninety more times tells nobody anything.
+            break
+    return results
+
+
+@dataclass(slots=True)
+class InstallRun:
+    """One press of Install: every package's answer, or why there were none.
+
+    ``error`` is None when the packages were tried, else ``declined`` (Windows
+    was not given permission), ``stopped``, or a sentence.
+    """
+
+    total: int
+    results: list[PackageResult] = field(default_factory=list)
+    error: str | None = None
+
+    @property
+    def unavailable(self) -> bool:
+        return any(result.outcome == "no_winget" for result in self.results)
+
+    @property
+    def installed_any(self) -> bool:
+        """Did this bring any program that was not here before?"""
+        return any(result.outcome == "installed" for result in self.results)
+
+    @property
+    def counts(self) -> dict[str, int]:
+        return tally(self.results)
+
+
+def read_results(path: Path) -> list[PackageResult]:
+    """The answers an install has written so far. A half-written line is skipped."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    results = []
+    for line in text.splitlines():
+        result = PackageResult.from_json(line) if line.strip() else None
+        if result is not None:
+            results.append(result)
+    return results
+
+
+def append_result(path: Path, result: PackageResult) -> None:
+    """Add one answer to the results file, straight away, for whoever is watching."""
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(result.to_json() + "\n")
+            handle.flush()
+    except OSError:
+        log.warning("could not write %s", path, exc_info=True)
+
+
+def tally(results: list[PackageResult]) -> dict[str, int]:
+    """How many packages ended each way."""
+    counts: dict[str, int] = {}
+    for result in results:
+        counts[result.outcome] = counts.get(result.outcome, 0) + 1
+    return counts
 
 
 def run_office_install(

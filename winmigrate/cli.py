@@ -178,7 +178,7 @@ def _add_reinstall_arguments(parser: argparse.ArgumentParser) -> None:
         help="the WinMigrate-Reinstall folder a restore wrote",
     )
     parser.add_argument(
-        "--apps", action="store_true", help="run winget import for the captured applications"
+        "--apps", action="store_true", help="install the captured applications with winget, one at a time"
     )
     parser.add_argument(
         "--office",
@@ -188,6 +188,10 @@ def _add_reinstall_arguments(parser: argparse.ArgumentParser) -> None:
         "(setup.exe comes from the Office Deployment Tool, which you download)",
     )
     parser.add_argument("--yes", action="store_true", help="do not ask for confirmation")
+    # How the window's elevated helper reports back: one JSON line per package,
+    # written as each finishes, which the window reads while it waits. Hidden
+    # because it is plumbing, not something to type.
+    parser.add_argument("--results", type=Path, help=argparse.SUPPRESS)
 
 
 def _add_capture_arguments(parser: argparse.ArgumentParser) -> None:
@@ -879,6 +883,55 @@ def _put_back_login_programs(directory: Path, console: Console) -> None:
         console.print(f"  {mark}  {result.name}{detail}")
 
 
+def _install_apps(import_file: Path, results_file: Path | None, console: Console) -> None:
+    """Install each package on its own, saying what happened to each."""
+    from . import reinstall as reinstall_mod
+
+    wanted = reinstall_mod.packages(import_file)
+    if not wanted:
+        console.print("[yellow]The winget file lists no packages.[/yellow]")
+        return
+    if results_file is not None:
+        # A fresh file per run: answers from an earlier attempt must not be
+        # read as this one's.
+        try:
+            results_file.unlink()
+        except OSError:
+            pass
+    console.print(
+        f"[cyan]Installing {len(wanted)} program(s), one at a time. "
+        "This takes a while.[/cyan]"
+    )
+    marks = {
+        "installed": "[green]installed[/green]",
+        "already": "[dim]already here[/dim]",
+        "not_found": "[yellow]not in winget[/yellow]",
+    }
+
+    def started(index: int, package) -> None:
+        console.print(f"  ({index + 1}/{len(wanted)}) {package.identifier}\u2026")
+
+    def finished(result) -> None:
+        if results_file is not None:
+            reinstall_mod.append_result(results_file, result)
+        mark = marks.get(result.outcome, f"[red]{result.outcome}[/red]")
+        detail = f" -- {result.detail}" if result.detail and result.outcome != "already" else ""
+        console.print(f"      {mark}{detail}")
+
+    results = reinstall_mod.install_packages(wanted, on_start=started, on_result=finished)
+    counts = reinstall_mod.tally(results)
+    console.print(
+        f"\n[bold]{counts.get('installed', 0)} installed, "
+        f"{counts.get('already', 0)} already here, "
+        f"{counts.get('failed', 0) + counts.get('not_found', 0)} not installed.[/bold]"
+    )
+    if counts.get("no_winget"):
+        console.print(
+            "[yellow]winget is not on this machine. Install 'App Installer' from the "
+            "Microsoft Store and run this again.[/yellow]"
+        )
+
+
 def cmd_reinstall(args: argparse.Namespace, console: Console) -> int:
     """Replay the reinstall files a restore wrote. Always asks before installing."""
     from . import reinstall as reinstall_mod
@@ -908,7 +961,7 @@ def cmd_reinstall(args: argparse.Namespace, console: Console) -> int:
 
     if not args.apps and args.office is None:
         console.print(
-            "\n[dim]Nothing was installed. Add --apps to run the winget import, or "
+            "\n[dim]Nothing was installed. Add --apps to install the applications, or "
             "--office <setup.exe> to run the Office configuration.[/dim]"
         )
         return 0
@@ -929,17 +982,12 @@ def cmd_reinstall(args: argparse.Namespace, console: Console) -> int:
             console.print("[yellow]No winget import file in this folder.[/yellow]")
             status = 1
         else:
-            console.print("[cyan]Running winget import — this takes a while…[/cyan]")
-            result = reinstall_mod.run_winget_import(artifacts.winget_import)
-            console.print(result.stdout.strip() or "[dim](no output)[/dim]")
-            if not result.ok:
-                console.print(f"[yellow]winget finished with: {result.summary()}[/yellow]")
-                console.print(
-                    "[dim]winget reports a non-zero exit when any single package fails; "
-                    "the others still installed.[/dim]"
-                )
-                status = status or 0
-            _put_back_login_programs(directory, console)
+            _install_apps(artifacts.winget_import, args.results, console)
+            # Not for the window's helper: that runs as whoever typed the
+            # administrator password, and login programs belong to the person
+            # whose machine this is. The window puts them back itself.
+            if args.results is None:
+                _put_back_login_programs(directory, console)
 
     if args.office is not None:
         if artifacts.office_configuration is None:

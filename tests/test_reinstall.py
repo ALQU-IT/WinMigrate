@@ -568,8 +568,8 @@ def test_the_command_line_install_puts_the_login_programs_back_afterwards(
 
     order: list[str] = []
     monkeypatch.setattr(
-        reinstall, "run_winget_import",
-        lambda path, runner=None: order.append("install") or CommandResult([], 0, "done"),
+        reinstall, "install_packages",
+        lambda wanted, **k: order.append("install") or [],
     )
     monkeypatch.setattr(
         apply_mod, "apply_startup",
@@ -579,3 +579,251 @@ def test_the_command_line_install_puts_the_login_programs_back_afterwards(
     assert main(["reinstall", str(directory), "--apps", "--yes"]) == 0
     # After the install, not before: before it, there is nothing to start.
     assert order == ["install", ("startup", record)]
+
+
+# --- one package at a time ---------------------------------------------------
+LOCATION_REQUIRED = 0x8A15005F
+
+
+def _export(tmp_path: Path, sources: list[tuple[str | None, list[str]]]) -> Path:
+    path = tmp_path / reinstall.WINGET_IMPORT_FILE
+    path.write_text(
+        json.dumps({"Sources": [
+            ({"SourceDetails": {"Name": name}} if name else {})
+            | {"Packages": [{"PackageIdentifier": p} for p in packages]}
+            for name, packages in sources
+        ]}),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _runner(codes: dict[str, int], calls: list[list[str]]):
+    def run(command, timeout=0):
+        calls.append(list(command))
+        identifier = command[command.index("--id") + 1]
+        return CommandResult(command, codes.get(identifier, 0), "")
+    return run
+
+
+def test_one_package_that_cannot_install_does_not_cost_the_others():
+    """What happened on a real migration: one package out of ninety wanted an
+    install location, and winget import stopped fourteen seconds in with
+    nothing installed. Each package is its own install now."""
+    wanted = [reinstall.Package(p) for p in ("A.A", "B.B", "C.C")]
+    calls: list[list[str]] = []
+    results = reinstall.install_packages(
+        wanted, _runner({"A.A": 0x8A150104}, calls), flags=()
+    )
+
+    assert [r.outcome for r in results] == ["failed", "installed", "installed"]
+    assert "does not have" in results[0].detail
+    assert len(calls) == 3
+
+
+def test_a_package_that_wants_a_location_is_given_one():
+    wanted = [reinstall.Package("Some.Game")]
+    calls: list[list[str]] = []
+
+    def run(command, timeout=0):
+        calls.append(list(command))
+        code = 0 if "--location" in command else LOCATION_REQUIRED
+        return CommandResult(command, code, "")
+
+    results = reinstall.install_packages(
+        wanted, run, flags=(), environ={"ProgramFiles": r"C:\Program Files"}
+    )
+
+    assert len(calls) == 2
+    assert calls[1][calls[1].index("--location") + 1] == r"C:\Program Files\Game"
+    assert results[0].outcome == "installed"
+    # Said where it went, since nobody chose it.
+    assert r"C:\Program Files\Game" in results[0].detail
+
+
+def test_what_is_already_here_is_not_a_failure():
+    for code in (0x8A150061, 0x8A15002B, 0x8A15010D):
+        result = reinstall.classify(reinstall.Package("A.A"), CommandResult([], code, ""))
+        assert result.outcome == "already" and result.present
+
+
+def test_a_negative_exit_code_is_read_as_the_same_hresult():
+    """Depending on how it was reached, the same code can arrive signed."""
+    signed = LOCATION_REQUIRED - (1 << 32)
+    result = reinstall.classify(reinstall.Package("A.A"), CommandResult([], signed, ""))
+    assert result.code == LOCATION_REQUIRED
+
+
+def test_a_package_winget_no_longer_has_is_said_to_be_by_hand():
+    result = reinstall.classify(reinstall.Package("A.A"), CommandResult([], 0x8A150014, ""))
+    assert result.outcome == "not_found" and "by-hand" in result.detail
+
+
+def test_no_winget_is_asked_once_not_ninety_times():
+    calls: list[list[str]] = []
+
+    def run(command, timeout=0):
+        calls.append(command)
+        return CommandResult(command, None, error="winget not found on this machine")
+
+    results = reinstall.install_packages(
+        [reinstall.Package("A.A"), reinstall.Package("B.B")], run, flags=()
+    )
+    assert len(calls) == 1 and results[0].outcome == "no_winget"
+
+
+def test_stop_is_checked_between_packages():
+    calls: list[list[str]] = []
+    stop = {"now": False}
+
+    def run(command, timeout=0):
+        calls.append(command)
+        stop["now"] = True
+        return CommandResult(command, 0, "")
+
+    results = reinstall.install_packages(
+        [reinstall.Package("A.A"), reinstall.Package("B.B")], run, flags=(),
+        cancelled=lambda: stop["now"],
+    )
+    assert len(calls) == 1 and len(results) == 1
+
+
+def test_each_install_asks_for_todays_version_from_the_right_catalogue(tmp_path: Path):
+    path = _export(tmp_path, [("winget", ["Git.Git"]), ("msstore", ["9NBLGGH4NNS1"])])
+    wanted = reinstall.packages(path)
+    assert wanted == [reinstall.Package("Git.Git", "winget"),
+                      reinstall.Package("9NBLGGH4NNS1", "msstore")]
+
+    command = reinstall.install_command(wanted[1], ("--silent",))
+    assert command[:2] == ["winget", "install"]
+    assert command[command.index("--source") + 1] == "msstore"
+    assert "--exact" in command and "--silent" in command
+    assert "--disable-interactivity" in command
+    assert "--accept-package-agreements" in command
+    assert "--version" not in command
+
+
+def test_a_package_listed_twice_is_installed_once(tmp_path: Path):
+    path = _export(tmp_path, [(None, ["A.A", "A.A"])])
+    assert reinstall.package_identifiers(path) == ["A.A"]
+
+
+def test_results_survive_the_trip_through_the_file(tmp_path: Path):
+    """The window reads this while the helper is still writing it, so a line
+    caught half-written is skipped rather than fatal."""
+    path = tmp_path / reinstall.RESULTS_FILE
+    first = reinstall.PackageResult("A.A", "installed", "", 0)
+    second = reinstall.PackageResult("B.B", "failed", "the disk is full", 0x8A150105)
+    reinstall.append_result(path, first)
+    reinstall.append_result(path, second)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write('{"id": "C.C", "outc')
+
+    assert reinstall.read_results(path) == [first, second]
+    assert reinstall.read_results(tmp_path / "missing") == []
+
+
+def test_the_helper_is_this_program_from_a_checkout(tmp_path: Path, monkeypatch):
+    import sys
+
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    import_file = tmp_path / reinstall.WINGET_IMPORT_FILE
+    results = tmp_path / reinstall.RESULTS_FILE
+    executable, arguments = reinstall.helper_command(import_file, results)
+
+    assert executable == sys.executable
+    assert arguments[:3] == ["-m", "winmigrate", "reinstall"]
+    assert arguments[3] == str(tmp_path)
+    assert {"--apps", "--yes"} <= set(arguments)
+    assert arguments[arguments.index("--results") + 1] == str(results)
+
+
+def test_the_helper_is_the_console_build_when_frozen(tmp_path: Path, monkeypatch):
+    import sys
+
+    program = tmp_path / "program"
+    program.mkdir()
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(program / "WinMigrate.exe"))
+    folder = tmp_path / "reinstall"
+    folder.mkdir()
+    import_file = folder / reinstall.WINGET_IMPORT_FILE
+
+    assert reinstall.helper_command(import_file, folder / "r.jsonl") is None
+
+    (program / reinstall.CONSOLE_BUILD).write_bytes(b"MZ")
+    executable, arguments = reinstall.helper_command(import_file, folder / "r.jsonl")
+    assert Path(executable).name == reinstall.CONSOLE_BUILD
+    assert arguments[0] == "reinstall"
+
+
+def test_a_helper_on_a_network_share_is_copied_somewhere_local(tmp_path: Path, monkeypatch):
+    """The elevated session is another logon, often another account, and a
+    share this user opened with their own password is closed to it."""
+    import sys
+
+    program = tmp_path / "program"
+    program.mkdir()
+    (program / reinstall.CONSOLE_BUILD).write_bytes(b"MZ")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(program / "WinMigrate.exe"))
+    real_resolve = Path.resolve
+    monkeypatch.setattr(
+        Path, "resolve",
+        lambda self, strict=False: Path("\\\\nas\\share\\" + self.name)
+        if self.name == reinstall.CONSOLE_BUILD else real_resolve(self, strict),
+    )
+    folder = tmp_path / "reinstall"
+    folder.mkdir()
+
+    executable, _ = reinstall.helper_command(folder / "x.json", folder / "r.jsonl")
+
+    assert executable == str(folder / reinstall.CONSOLE_BUILD)
+    assert (folder / reinstall.CONSOLE_BUILD).read_bytes() == b"MZ"
+
+
+def test_the_window_helper_reports_each_package_and_leaves_login_programs_alone(
+    tmp_path: Path, monkeypatch
+):
+    """The helper runs as whoever typed the administrator password; login
+    programs written from it would land in that account, not this one."""
+    from winmigrate import apply as apply_mod
+    from winmigrate.cli import main
+
+    directory = tmp_path / reinstall.ARTIFACTS_DIRECTORY
+    directory.mkdir()
+    _export(directory, [(None, ["A.A", "B.B"])])
+    (directory / reinstall.STARTUP_FILE).write_text(
+        json.dumps({"entries": {"A": "a.exe"}}), encoding="utf-8"
+    )
+    results = directory / reinstall.RESULTS_FILE
+    results.write_text('{"id": "Old.Run", "outcome": "installed"}\n', encoding="utf-8")
+
+    monkeypatch.setattr(reinstall, "install_flags", lambda runner=None: ())
+    monkeypatch.setattr(
+        reinstall.process, "run",
+        lambda command, timeout=0: CommandResult(
+            command, 0x8A150105 if "B.B" in command else 0, ""
+        ),
+    )
+    started: list[str] = []
+    monkeypatch.setattr(
+        apply_mod, "apply_startup", lambda *a, **k: started.append("yes") or []
+    )
+
+    assert main(["reinstall", str(directory), "--apps", "--yes",
+                 "--results", str(results)]) == 0
+
+    written = reinstall.read_results(results)
+    assert [(r.identifier, r.outcome) for r in written] == [
+        ("A.A", "installed"), ("B.B", "failed")
+    ]
+    assert started == []
+
+
+def test_the_run_summary_knows_whether_anything_arrived():
+    already = reinstall.InstallRun(1, [reinstall.PackageResult("A.A", "already")])
+    assert not already.installed_any
+    fresh = reinstall.InstallRun(1, [reinstall.PackageResult("A.A", "installed")])
+    assert fresh.installed_any and fresh.counts == {"installed": 1}
+    assert reinstall.InstallRun(1, [reinstall.PackageResult("A.A", "no_winget")]).unavailable

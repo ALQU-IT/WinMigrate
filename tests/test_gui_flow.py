@@ -9,6 +9,7 @@ emptied while the button that needed it stayed live.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -1446,7 +1447,8 @@ def test_the_install_streams_what_winget_says_and_reports_how_it_went(
     _with_software(wizard, tmp_path, ["Mozilla.Firefox"])
 
     def fake_stream(command, on_line, timeout=0, cancelled=None):
-        assert command[:2] == ["winget", "import"]
+        assert command[:2] == ["winget", "install"]
+        assert command[command.index("--id") + 1] == "Mozilla.Firefox"
         on_line("Found Mozilla Firefox [Mozilla.Firefox]")
         on_line("Successfully installed")
         return process.CommandResult(command, 0, "ok")
@@ -1458,7 +1460,8 @@ def test_the_install_streams_what_winget_says_and_reports_how_it_went(
 
     assert wizard.step is Step.RESTORE_DONE
     assert "Found Mozilla Firefox" in written(wizard.install_output)
-    assert "winget installed everything" in wizard.restore_done_text.cget("text")
+    assert "Mozilla.Firefox: installed" in written(wizard.install_output)
+    assert "1 of 1 program(s) installed" in wizard.restore_done_text.cget("text")
 
 
 def test_stopping_an_install_says_what_is_already_installed_stays(
@@ -1478,7 +1481,7 @@ def test_stopping_an_install_says_what_is_already_installed_stays(
     wizard._show(Step.INSTALLING)
     assert pump(wizard, until=("installed", "install-failed")) == "installed"
 
-    assert "you stopped the install" in wizard.restore_done_text.cget("text")
+    assert "you stopped the install" in wizard.restore_done_text.cget("text").lower()
     assert "had finished is installed" in wizard.restore_done_text.cget("text").lower()
 
 
@@ -1501,22 +1504,33 @@ def test_the_install_asks_windows_for_the_rights_it_has_not_got(
 
     started: list[tuple[str, list[str]]] = []
     monkeypatch.setattr(process, "stream", refuse_stream)
-    monkeypatch.setattr(
-        elevate, "start_elevated",
-        lambda executable, arguments: started.append((executable, arguments)) or 4242,
-    )
+
+    def helper(executable, arguments):
+        # What the elevated helper does: install, and write down each answer.
+        started.append((executable, arguments))
+        results = Path(arguments[arguments.index("--results") + 1])
+        results.write_text(
+            json.dumps({"id": "Mozilla.Firefox", "outcome": "installed"}) + "\n",
+            encoding="utf-8",
+        )
+        return 4242
+
+    monkeypatch.setattr(elevate, "start_elevated", helper)
     monkeypatch.setattr(elevate, "wait_for", lambda handle, waiting=None, **k: 0)
 
     wizard._show(Step.INSTALLING)
     assert pump(wizard, until=("installed", "install-failed")) == "installed"
 
+    # One prompt, for this tool's installer -- not one per package, and not a
+    # winget import that one awkward package stops dead.
     assert len(started) == 1
     executable, arguments = started[0]
-    assert executable == "winget"
-    # The same import, elevated. A different file here would install nothing
-    # the restore prepared.
-    assert str(import_file) in arguments
-    assert "winget installed everything" in wizard.restore_done_text.cget("text")
+    assert executable == sys.executable
+    assert arguments[:3] == ["-m", "winmigrate", "reinstall"]
+    # The same folder the restore prepared. A different one would install
+    # nothing it wrote.
+    assert str(import_file.parent) in arguments and "--apps" in arguments
+    assert "1 of 1 program(s) installed" in wizard.restore_done_text.cget("text")
     # And the window said what the dialog was for before it appeared.
     assert "permission" in written(wizard.install_output).lower()
 
@@ -2011,8 +2025,8 @@ def test_the_window_asks_the_installers_to_be_quiet_too(
     wizard = _finished_restore(monkeypatch, bundle, tmp_path)
     _with_software(wizard, tmp_path, ["Mozilla.Firefox"])
     monkeypatch.setattr(
-        reinstall_mod, "accepted_flags",
-        lambda runner=None: reinstall_mod.OPTIONAL_FLAGS,
+        reinstall_mod, "install_flags",
+        lambda runner=None: reinstall_mod.INSTALL_OPTIONAL_FLAGS,
     )
 
     seen: list[list[str]] = []
@@ -2026,7 +2040,8 @@ def test_the_window_asks_the_installers_to_be_quiet_too(
     assert pump(wizard, until=("installed", "install-failed")) == "installed"
 
     assert seen and "--silent" in seen[0]
-    assert "--ignore-versions" in seen[0]
+    # Today's version, not the one that was on the old machine.
+    assert "--version" not in seen[0]
 
 
 def test_the_login_programs_are_put_back_once_the_install_has_run(
@@ -2353,3 +2368,108 @@ def test_enter_in_the_destination_field_does_not_start_the_restore(
 
     assert wizard._destination_entered() == "break"
     assert refreshed == [True]
+
+
+# --- installing one package at a time ----------------------------------------
+def test_the_page_follows_the_elevated_helper_and_names_what_did_not_install(
+    monkeypatch, bundle: Path, tmp_path: Path
+):
+    """The helper runs in its own window with its own rights; this page reads
+    its answers as they are written, and the finished page names each program
+    that still needs a person."""
+    from winmigrate.gui import elevate
+
+    monkeypatch.setattr(elevate, "is_windows", lambda: True)
+    monkeypatch.setattr(elevate, "is_elevated", lambda: False)
+    wizard = _finished_restore(monkeypatch, bundle, tmp_path)
+    _with_software(wizard, tmp_path, ["A.A", "B.B", "C.C"])
+    results: dict[str, Path] = {}
+
+    def helper(executable, arguments):
+        results["path"] = Path(arguments[arguments.index("--results") + 1])
+        return 4242
+
+    def wait_for(handle, waiting=None, **k):
+        # Two answers arrive while it is being watched, the third before it ends.
+        with open(results["path"], "a", encoding="utf-8") as handle_:
+            handle_.write(json.dumps({"id": "A.A", "outcome": "installed"}) + "\n")
+            handle_.write(json.dumps({"id": "B.B", "outcome": "failed",
+                                      "detail": "the disk is full"}) + "\n")
+        assert waiting() is True
+        # Read while it runs, not only once it has finished.
+        live = [payload.identifier for kind, payload in list(wizard.events.queue)
+                if kind == "install-result"]
+        assert live == ["A.A", "B.B"]
+        with open(results["path"], "a", encoding="utf-8") as handle_:
+            handle_.write(json.dumps({"id": "C.C", "outcome": "already"}) + "\n")
+        return 0
+
+    monkeypatch.setattr(elevate, "start_elevated", helper)
+    monkeypatch.setattr(elevate, "wait_for", wait_for)
+
+    wizard._show(Step.INSTALLING)
+    assert pump(wizard, until=("installed", "install-failed")) == "installed"
+
+    followed = written(wizard.install_output)
+    assert "A.A: installed" in followed and "B.B: not installed" in followed
+    assert "C.C: already here" in followed
+    text = wizard.restore_done_text.cget("text")
+    assert "1 of 3 program(s) installed, 1 already here" in text
+    assert "B.B: the disk is full" in text
+    # Over-the-shoulder elevation installs per-user programs for the admin.
+    assert "administrator account" in text
+
+
+def test_nothing_is_restarted_when_everything_was_already_here(
+    monkeypatch, bundle: Path, tmp_path: Path
+):
+    """Restarting Explorer and re-asking about login programs is for programs
+    that have just arrived. When none did, both are a flicker for nothing."""
+    from winmigrate import apply as apply_mod
+    from winmigrate.apply import Outcome, Result
+    from winmigrate.util import process
+
+    wizard = _finished_restore(monkeypatch, bundle, tmp_path)
+    _with_software(wizard, tmp_path, ["Mozilla.Firefox"])
+    wizard.restore_report.applied = [Result("layout", "taskbar", Outcome.APPLIED)]
+    wizard.restore_report.manifest = {
+        "items": [{"id": "settings:startup_run", "record": {"entries": {"A": "a.exe"}}}]
+    }
+    refreshed: list[str] = []
+    asked: list[dict] = []
+    monkeypatch.setattr(apply_mod, "refresh_shell", lambda: refreshed.append("yes"))
+    monkeypatch.setattr(
+        apply_mod, "retry_startup", lambda rec, applied, env=None: asked.append(rec) or []
+    )
+    monkeypatch.setattr(
+        process, "stream",
+        lambda command, on_line, timeout=0, cancelled=None: process.CommandResult(
+            command, 0x8A150061, ""
+        ),
+    )
+
+    wizard._show(Step.INSTALLING)
+    assert pump(wizard, until=("installed", "install-failed")) == "installed"
+
+    assert refreshed == [] and asked == []
+    assert "0 of 1 program(s) installed, 1 already here" in (
+        wizard.restore_done_text.cget("text")
+    )
+
+
+def test_a_missing_console_build_is_said_rather_than_installing_nothing_quietly(
+    monkeypatch, bundle: Path, tmp_path: Path
+):
+    from winmigrate import reinstall as reinstall_mod
+    from winmigrate.gui import elevate
+
+    monkeypatch.setattr(elevate, "is_windows", lambda: True)
+    monkeypatch.setattr(elevate, "is_elevated", lambda: False)
+    monkeypatch.setattr(reinstall_mod, "helper_command", lambda *a, **k: None)
+    wizard = _finished_restore(monkeypatch, bundle, tmp_path)
+    _with_software(wizard, tmp_path, ["Mozilla.Firefox"])
+
+    wizard._show(Step.INSTALLING)
+    assert pump(wizard, until=("installed", "install-failed")) == "installed"
+
+    assert "winmigrate-cli.exe is missing" in wizard.restore_done_text.cget("text")

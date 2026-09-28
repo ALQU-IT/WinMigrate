@@ -243,7 +243,7 @@ def render_reinstall_plan(artifacts, console: Console) -> None:
     table.add_column("Detail", overflow="fold")
     if artifacts.winget_import:
         table.add_row(
-            f"winget import ({artifacts.reinstallable_count} apps)", str(artifacts.winget_import)
+            f"winget, one at a time ({artifacts.reinstallable_count} apps)", str(artifacts.winget_import)
         )
     if artifacts.office_configuration:
         office = artifacts.office
