@@ -20,6 +20,7 @@ later, in the elevated process, and never leaves the widget it was typed into.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -70,8 +71,66 @@ def relaunch_command() -> tuple[str, list[str]]:
     package has to be named with ``-m`` so the relaunched copy is the same code.
     """
     if getattr(sys, "frozen", False):
-        return sys.executable, []
-    return sys.executable, ["-m", "winmigrate"]
+        return launchable(sys.executable), []
+    return launchable(sys.executable), ["-m", "winmigrate"]
+
+
+def launchable(path: str) -> str:
+    """A path to a program that an elevated process will also be able to find.
+
+    Mapped drive letters belong to a logon session, and elevation starts a new
+    one. Run from Z:\\ -- a mapped share, a VirtualBox shared folder, a network
+    drive at work -- and "Z:\\WinMigrate.exe" does not exist on the far side of
+    the UAC prompt: Windows answers "path not found" and nothing starts. The
+    share's own name does exist there, and resolving the path turns the drive
+    letter into it: Z:\\WinMigrate.exe becomes \\\\VBoxSvr\\WinMigrate\\WinMigrate.exe.
+    A local path is left as it was.
+    """
+    try:
+        return str(Path(path).resolve())
+    except (OSError, RuntimeError):
+        return path
+
+
+def elevated_directory() -> str:
+    """Where an elevated process starts. Somewhere that exists in any session.
+
+    Not the current directory: it is usually wherever the program was started
+    from, which is the mapped drive the elevated session cannot see, and on a
+    standard user's machine the elevated process belongs to another account
+    altogether.
+    """
+    return os.environ.get("SystemRoot") or os.environ.get("windir") or "C:\\Windows"
+
+
+#: What ShellExecute's small numbers mean, for the log and for the window. A
+#: refused prompt comes back as 5; everything else is a failure to *ask*, and
+#: calling that "declined" sent the person reading the log looking at a UAC
+#: prompt that never appeared.
+SHELL_RESULTS = {
+    0: "Windows is out of memory or resources",
+    2: "Windows could not find the program to start",
+    3: "Windows could not find the program's folder -- usually because it is "
+       "on a network or mapped drive that administrator mode cannot see",
+    5: "the request for administrator rights was declined",
+    8: "Windows is out of memory",
+    11: "the program file is not valid",
+    26: "Windows could not share the file",
+    31: "there is no program set up to do this",
+    32: "a required file is missing",
+}
+
+#: Why the last attempt to elevate did not start anything, or "" if it did.
+last_problem = ""
+
+
+def explain(code: int) -> str:
+    """ShellExecute's return code, as a sentence."""
+    return SHELL_RESULTS.get(code, f"Windows refused ({code})")
+
+
+def was_declined(code: int) -> bool:
+    return code == 5
 
 
 def quote(argument: str) -> str:
@@ -96,6 +155,8 @@ def relaunch_as_admin(arguments: list[str]) -> bool:
     A False is not an error: the caller carries on without a shadow copy and
     says so, which is exactly what the command line does.
     """
+    global last_problem
+    last_problem = ""
     if not is_windows():
         return False
     executable, leading = relaunch_command()
@@ -104,14 +165,14 @@ def relaunch_as_admin(arguments: list[str]) -> bool:
         import ctypes  # noqa: PLC0415
 
         # SW_SHOWNORMAL = 1. A return value above 32 means it started.
-        result = ctypes.windll.shell32.ShellExecuteW(
-            None, "runas", executable, parameters, str(Path.cwd()), 1
-        )
-        started = int(result) > 32
+        result = int(ctypes.windll.shell32.ShellExecuteW(
+            None, "runas", executable, parameters, elevated_directory(), 1
+        ))
+        started = result > 32
         if not started:
-            # 5 is ERROR_ACCESS_DENIED, which is what a declined UAC prompt
-            # gives back. Nothing to report to the user beyond carrying on.
-            log.info("elevation declined or unavailable (ShellExecuteW returned %s)", result)
+            last_problem = explain(result)
+            log.info("administrator mode did not start %s: %s (ShellExecuteW returned %s)",
+                     executable, last_problem, result)
         return started
     except Exception as exc:  # noqa: BLE001 -- never let this stop the window opening
         log.warning("could not request elevation: %s", exc)
@@ -139,6 +200,8 @@ def start_elevated(executable: str, arguments: list[str]) -> int | None:
     there is no pipe to inherit, which is the mistake this codebase has already
     made once.
     """
+    global last_problem
+    last_problem = ""
     if not is_windows():
         return None
     try:
@@ -172,13 +235,20 @@ def start_elevated(executable: str, arguments: list[str]) -> int | None:
         information.cbSize = ctypes.sizeof(SHELLEXECUTEINFOW)
         information.fMask = _SEE_MASK_NOCLOSEPROCESS
         information.lpVerb = "runas"
-        information.lpFile = executable
+        # Resolved and started from a directory every session has, for the same
+        # reason as the relaunch: a program beside this one on a mapped drive
+        # is not there once the session is an elevated one.
+        information.lpFile = launchable(executable) if Path(executable).is_absolute() else executable
         information.lpParameters = " ".join(quote(part) for part in arguments)
-        information.lpDirectory = str(Path.cwd())
+        information.lpDirectory = elevated_directory()
         information.nShow = _SW_SHOWNORMAL
         if not shell32.ShellExecuteExW(ctypes.byref(information)):
-            # A declined prompt lands here, and is not an error to report as one.
-            log.info("elevation declined or unavailable (ShellExecuteExW failed)")
+            # hInstApp carries the same small codes ShellExecute returns.
+            code = int(information.hInstApp or 0)
+            last_problem = explain(code) if code else (
+                "the request for administrator rights was declined"
+            )
+            log.info("administrator mode did not start %s: %s", executable, last_problem)
             return None
         return int(information.hProcess or 0) or None
     except Exception as exc:  # noqa: BLE001 -- never let this stop the window

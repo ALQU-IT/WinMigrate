@@ -100,12 +100,13 @@ def test_the_relaunch_names_the_same_code(monkeypatch):
     whatever winmigrate happens to be on PATH."""
     monkeypatch.setattr(sys, "frozen", False, raising=False)
     executable, leading = elevate.relaunch_command()
-    assert executable == sys.executable and leading == ["-m", "winmigrate"]
+    assert executable == elevate.launchable(sys.executable)
+    assert leading == ["-m", "winmigrate"]
 
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "executable", r"E:\WinMigrate.exe")
     executable, leading = elevate.relaunch_command()
-    assert executable == r"E:\WinMigrate.exe" and leading == []
+    assert executable == elevate.launchable(r"E:\WinMigrate.exe") and leading == []
 
 
 def test_a_refused_prompt_is_not_an_error(monkeypatch):
@@ -242,3 +243,108 @@ def test_waiting_on_nothing_is_not_an_error(monkeypatch):
     than reach into ctypes with a zero."""
     monkeypatch.setattr(elevate, "is_windows", lambda: True)
     assert elevate.wait_for(0) is None
+
+
+# --- started from a network or mapped drive -----------------------------------
+def test_a_mapped_drive_is_turned_into_a_path_administrator_mode_can_see(tmp_path):
+    """Mapped drive letters belong to a logon session and elevation starts a
+    new one. Run from Z:\\ -- a VirtualBox shared folder, a mapped share -- and
+    "Z:\\WinMigrate.exe" does not exist on the far side of the UAC prompt.
+    Resolving follows the mapping to the share's own name, which does.
+
+    Here a symlink stands in for the mapping: resolve() follows both."""
+    share = tmp_path / "share"
+    share.mkdir()
+    (share / "WinMigrate.exe").write_bytes(b"MZ")
+    mapped = tmp_path / "Z"
+    mapped.symlink_to(share, target_is_directory=True)
+
+    assert elevate.launchable(str(mapped / "WinMigrate.exe")) == str(
+        (share / "WinMigrate.exe").resolve()
+    )
+
+
+def test_the_relaunch_names_the_resolved_program(monkeypatch, tmp_path):
+    share = tmp_path / "share"
+    share.mkdir()
+    (share / "WinMigrate.exe").write_bytes(b"MZ")
+    mapped = tmp_path / "Z"
+    mapped.symlink_to(share, target_is_directory=True)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(mapped / "WinMigrate.exe"))
+
+    executable, _ = elevate.relaunch_command()
+
+    assert executable == str((share / "WinMigrate.exe").resolve())
+
+
+def test_administrator_mode_starts_somewhere_every_session_has(monkeypatch):
+    """Not the current directory, which is usually the mapped drive the
+    elevated session cannot see."""
+    monkeypatch.setenv("SystemRoot", r"C:\Windows")
+    assert elevate.elevated_directory() == r"C:\Windows"
+
+
+def test_what_is_handed_to_windows_and_what_a_failure_is_called(monkeypatch, tmp_path):
+    """The run that found this: ShellExecuteW returned 3, "path not found",
+    and the log said the request had been declined. Nobody had declined
+    anything -- no prompt ever appeared."""
+    import ctypes
+
+    calls: list[tuple] = []
+
+    class Shell32:
+        def ShellExecuteW(self, *args):
+            calls.append(args)
+            return 3
+
+    monkeypatch.setattr(elevate, "is_windows", lambda: True)
+    monkeypatch.setattr(ctypes, "windll", type("W", (), {"shell32": Shell32()})(), raising=False)
+    monkeypatch.setenv("SystemRoot", r"C:\Windows")
+    monkeypatch.chdir(tmp_path)
+
+    assert elevate.relaunch_as_admin(["gui"]) is False
+
+    (_, verb, _executable, _parameters, directory, _show) = calls[0]
+    assert verb == "runas"
+    assert directory == r"C:\Windows", "started from the current, possibly mapped, directory"
+    assert "declined" not in elevate.last_problem
+    assert "network or mapped drive" in elevate.last_problem
+
+
+def test_a_refused_prompt_is_still_called_declined(monkeypatch):
+    import ctypes
+
+    class Shell32:
+        def ShellExecuteW(self, *args):
+            return 5
+
+    monkeypatch.setattr(elevate, "is_windows", lambda: True)
+    monkeypatch.setattr(ctypes, "windll", type("W", (), {"shell32": Shell32()})(), raising=False)
+
+    assert elevate.relaunch_as_admin(["gui"]) is False
+    assert "declined" in elevate.last_problem
+
+
+def test_a_success_leaves_no_reason_behind(monkeypatch):
+    """The reason is read after the call. One left over from an earlier failed
+    attempt would be reported against a later one that worked."""
+    import ctypes
+
+    results = iter([3, 42])
+
+    class Shell32:
+        def ShellExecuteW(self, *args):
+            return next(results)
+
+    monkeypatch.setattr(elevate, "is_windows", lambda: True)
+    monkeypatch.setattr(ctypes, "windll", type("W", (), {"shell32": Shell32()})(), raising=False)
+
+    elevate.relaunch_as_admin(["gui"])
+    assert elevate.last_problem
+    assert elevate.relaunch_as_admin(["gui"]) is True
+    assert elevate.last_problem == ""
+
+
+def test_an_unknown_code_is_reported_with_its_number():
+    assert "999" in elevate.explain(999)

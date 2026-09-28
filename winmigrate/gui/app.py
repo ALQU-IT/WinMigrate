@@ -1954,7 +1954,8 @@ class WinMigrateWizard:
         # Declined, or no UAC to ask. Carrying on without a shadow copy is what
         # the command line does, so it is what this does -- with the note on the
         # page updated to say so rather than a dialog nobody reads.
-        log.info("elevation declined or unavailable; continuing without a shadow copy")
+        log.info("continuing without a shadow copy: %s",
+                 elevate.last_problem or "administrator mode was not started")
         self.elevation_attempted = True
         self._update_elevation_note()
         return False
@@ -1986,7 +1987,10 @@ class WinMigrateWizard:
             log.info("elevated copy started; this one is closing")
             self.root.destroy()
             return True
-        log.info("elevation declined or unavailable; programs will not be installed")
+        # Not the end of installing: the Install button asks Windows again, for
+        # winget alone, once there is something to install.
+        log.info("not restarting in administrator mode (%s); the install step "
+                 "will ask again", elevate.last_problem or "no reason given")
         self.elevation_attempted = True
         return False
 
