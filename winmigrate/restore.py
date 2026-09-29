@@ -91,6 +91,10 @@ class RestoreReport:
     duration_seconds: float = 0.0
     manifest: dict | None = None
     verified: bool = False
+    #: The platform_win.Environment the settings were written through -- the
+    #: destination's owner's registry. Kept so that what runs after the
+    #: install writes to the same account. Not part of any file.
+    settings_env: object | None = None
 
     @property
     def ok(self) -> bool:
@@ -487,14 +491,35 @@ def _apply_settings(report: RestoreReport, destination: Path, wanted: tuple[str,
         and (not wanted or _record_wanted(str(item.get("id")), wanted))
     }
 
+    env = settings_environment(destination)
+    report.settings_env = env
+    other = bool(getattr(env, "other_account", False))
+    if other:
+        _note_other_account(report, env)
+
     try:
         report.applied.extend(apply_mod.apply_wifi(destination / WIFI_RESTORE_DIR))
-        if "settings:printers" in records:
+        # Printers and network drives are connected for whoever runs the
+        # command, and there is no way to connect them on someone else's
+        # behalf. Connecting them for the administrator would put them in the
+        # wrong account and report them as done.
+        for record_id, kind, what in (
+            ("settings:printers", "printer", "printers"),
+            ("settings:mapped_drives", "drive", "network drives"),
+        ):
+            if other and record_id in records:
+                report.applied.append(apply_mod.Result(
+                    kind, what, apply_mod.Outcome.SKIPPED,
+                    "these connect for the account running WinMigrate, which is not "
+                    "the one being restored; run the restore again from that account "
+                    "without administrator rights to connect them",
+                ))
+        if "settings:printers" in records and not other:
             report.applied.extend(apply_mod.apply_printers(records["settings:printers"]))
-        if "settings:mapped_drives" in records:
+        if "settings:mapped_drives" in records and not other:
             report.applied.extend(apply_mod.apply_mapped_drives(records["settings:mapped_drives"]))
         if "settings:env_vars" in records:
-            report.applied.extend(apply_mod.apply_environment(records["settings:env_vars"]))
+            report.applied.extend(apply_mod.apply_environment(records["settings:env_vars"], env=env))
         if any(key in records for key in ("shell:taskbar", "shell:desktop_layout",
                                           "shell:start_menu")):
             report.applied.extend(
@@ -502,6 +527,7 @@ def _apply_settings(report: RestoreReport, destination: Path, wanted: tuple[str,
                     records.get("shell:taskbar"),
                     records.get("shell:desktop_layout"),
                     _start_menu_record(records.get("shell:start_menu"), destination),
+                    env=env,
                     destination=destination,
                 )
             )
@@ -514,16 +540,17 @@ def _apply_settings(report: RestoreReport, destination: Path, wanted: tuple[str,
                     )
                 )
         if "settings:startup_run" in records:
-            report.applied.extend(apply_mod.apply_startup(records["settings:startup_run"]))
+            report.applied.extend(apply_mod.apply_startup(records["settings:startup_run"], env=env))
         if "settings:personalization" in records:
             report.applied.extend(
-                apply_mod.apply_personalization(records["settings:personalization"])
+                apply_mod.apply_personalization(records["settings:personalization"], env=env)
             )
         if "settings:wallpaper" in records:
             report.applied.extend(
                 apply_mod.apply_wallpaper(
                     records["settings:wallpaper"],
                     _restored_wallpaper(records["settings:wallpaper"], destination),
+                    env=env,
                 )
             )
     except Exception as exc:  # noqa: BLE001 -- the restore itself already succeeded
@@ -556,6 +583,44 @@ def _apply_settings(report: RestoreReport, destination: Path, wanted: tuple[str,
                 "They are listed in the report; each can be done by hand.",
             )
         )
+
+
+def settings_environment(destination: Path):
+    """Where a restore into ``destination`` writes its settings.
+
+    The registry of whoever owns that profile -- which is not the account this
+    runs as when somebody started WinMigrate "as administrator" with another
+    account's password. See :mod:`winmigrate.accounts`. Off Windows, and in the
+    test suite, this is whatever :meth:`Environment.live` is.
+    """
+    from . import accounts  # noqa: PLC0415
+    from .platform_win import Environment  # noqa: PLC0415
+
+    try:
+        return accounts.for_profile(destination)
+    except Exception:  # noqa: BLE001 -- never let this cost the settings
+        log.warning("could not tell whose profile %s is", destination, exc_info=True)
+        return Environment.live()
+
+
+def _note_other_account(report: RestoreReport, env) -> None:
+    """Say, in the report, that this ran as somebody other than the owner."""
+    if getattr(env, "personal_registry_unreachable", False):
+        report.notes.append(Note(
+            Severity.WARNING,
+            f"{report.destination} belongs to an account that is not signed in, so "
+            "its settings (background, taskbar, login programs and the rest) were "
+            "not put back. Sign in to that account and run the restore again; "
+            "files already restored are skipped.",
+        ))
+        return
+    report.notes.append(Note(
+        Severity.WARNING,
+        f"WinMigrate ran as a different account from the owner of "
+        f"{report.destination}. Their settings were written to their own account, "
+        "and some -- the background, the taskbar -- show only after they sign out "
+        "and back in. Printers and network drives were left for them.",
+    ))
 
 
 def _default_profile() -> Path:

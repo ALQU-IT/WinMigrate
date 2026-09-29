@@ -860,6 +860,7 @@ def _put_back_login_programs(directory: Path, console: Console) -> None:
     """
     from . import apply as apply_mod
     from . import reinstall as reinstall_mod
+    from . import restore as restore_mod
 
     path = directory / reinstall_mod.STARTUP_FILE
     if not path.is_file():
@@ -871,7 +872,12 @@ def _put_back_login_programs(directory: Path, console: Console) -> None:
         return
     if not isinstance(record, dict):
         return
-    results = apply_mod.apply_startup(record)
+    # The install folder sits in the profile it was restored into, so its
+    # parent names whose login programs these are -- which is not the account
+    # running this when it was started with an administrator's password.
+    results = apply_mod.apply_startup(
+        record, restore_mod.settings_environment(directory.parent)
+    )
     if not results:
         return
     console.print("\n[bold]Programs that start when you log in[/bold]")

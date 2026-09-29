@@ -42,6 +42,67 @@ def is_elevated() -> bool:
     return vss.is_elevated()
 
 
+#: TOKEN_ELEVATION_TYPE: an administrator's token with its rights held back.
+#: Elevating one of these raises the same account's rights; anything else that
+#: is not already elevated belongs to a standard user, for whom "Yes" on the
+#: UAC prompt means typing somebody else's password and running as them.
+_TOKEN_ELEVATION_TYPE_LIMITED = 3
+
+
+def elevation_switches_account(token_type=None) -> bool:
+    """Would asking for administrator rights run this as a different account?
+
+    For a standard user it would. UAC asks for an administrator's name and
+    password, and the program then runs as that administrator -- with their
+    registry, their home folder and their desktop settings. For a backup
+    that is survivable: the profile is named on the command line and its
+    owner's registry is reached directly. For a restore it buys nothing (the
+    install step asks for rights on its own) and costs the things that can
+    only be done as the person themselves, so it is not worth asking.
+    """
+    if not is_windows() or is_elevated():
+        return False
+    if token_type is None:
+        token_type = _elevation_type()
+    return token_type is not None and token_type != _TOKEN_ELEVATION_TYPE_LIMITED
+
+
+def _elevation_type() -> int | None:  # pragma: no cover -- Windows only
+    try:
+        import ctypes  # noqa: PLC0415
+        from ctypes import wintypes  # noqa: PLC0415
+
+        advapi32 = ctypes.windll.advapi32
+        kernel32 = ctypes.windll.kernel32
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        advapi32.OpenProcessToken.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)
+        ]
+        advapi32.GetTokenInformation.argtypes = [
+            wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        token = wintypes.HANDLE()
+        if not advapi32.OpenProcessToken(
+            kernel32.GetCurrentProcess(), 0x0008, ctypes.byref(token)
+        ):
+            return None
+        try:
+            value = wintypes.DWORD()
+            size = wintypes.DWORD()
+            if not advapi32.GetTokenInformation(
+                token, 18, ctypes.byref(value), ctypes.sizeof(value), ctypes.byref(size)
+            ):  # TokenElevationType
+                return None
+            return int(value.value)
+        finally:
+            kernel32.CloseHandle(token)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("could not read the token's elevation type: %s", exc)
+        return None
+
+
 def should_offer(wanted: bool, already_tried: bool) -> bool:
     """Is there any point showing a UAC prompt?
 

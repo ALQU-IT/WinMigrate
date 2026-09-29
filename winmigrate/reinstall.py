@@ -546,6 +546,21 @@ def run_winget_import(import_file: Path, runner=process.run) -> process.CommandR
     return runner(import_command(import_file, runner), timeout=WINGET_IMPORT_TIMEOUT)
 
 
+#: Packages the old machine had only because something else installed them,
+#: and which do harm installed on their own. Left out when the list is read,
+#: so an install folder written by an older version is covered too.
+BROUGHT_ALONG: dict[str, str] = {
+    # iTunes, iCloud and some printer and Adobe installers bring it. Alone it
+    # adds nothing anyone asked for, and current Windows 11 refuses to load
+    # its network add-on into the protected sign-in service -- a warning
+    # dialog ("Das Laden dieses Moduls in die lokale Sicherheitsautorität ist
+    # blockiert ... mdnsNSP.dll") at every start, on a machine that was
+    # supposed to come back the way it was.
+    "apple.bonjour": "it comes with the Apple software that needs it, and on its "
+    "own Windows blocks part of it and says so at every start",
+}
+
+
 @dataclass(slots=True, frozen=True)
 class Package:
     """One entry of a winget export: what it is, and which catalogue it is in."""
@@ -580,6 +595,10 @@ def packages(import_file: Path) -> list[Package]:
             identifier = package.get("PackageIdentifier") if isinstance(package, dict) else None
             if isinstance(identifier, str) and identifier and identifier not in seen:
                 seen.add(identifier)
+                reason = BROUGHT_ALONG.get(identifier.lower())
+                if reason:
+                    log.info("not installing %s on its own: %s", identifier, reason)
+                    continue
                 found.append(Package(identifier, name))
     return found
 

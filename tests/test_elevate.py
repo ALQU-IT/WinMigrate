@@ -348,3 +348,18 @@ def test_a_success_leaves_no_reason_behind(monkeypatch):
 
 def test_an_unknown_code_is_reported_with_its_number():
     assert "999" in elevate.explain(999)
+
+
+def test_only_a_standard_account_is_switched_by_elevating(monkeypatch):
+    """An administrator's limited token elevates to the same account; anything
+    else that is not already elevated is a standard user, and UAC runs the
+    program as whoever's password is typed."""
+    monkeypatch.setattr(elevate, "is_windows", lambda: True)
+    monkeypatch.setattr(elevate, "is_elevated", lambda: False)
+    assert elevate.elevation_switches_account(token_type=1) is True
+    assert elevate.elevation_switches_account(token_type=3) is False
+    # Not knowing leaves things as they were.
+    monkeypatch.setattr(elevate, "_elevation_type", lambda: None)
+    assert elevate.elevation_switches_account() is False
+    monkeypatch.setattr(elevate, "is_elevated", lambda: True)
+    assert elevate.elevation_switches_account(token_type=1) is False

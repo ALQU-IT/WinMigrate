@@ -557,6 +557,15 @@ def _restart_explorer(env, runner=process.run, pause=None, starter=process.spawn
     """
     if not touches_machine(env):
         return Result("layout", "Explorer", Outcome.SKIPPED, "not this machine")
+    if getattr(env, "other_account", False):
+        # Explorer would be stopped for the person at the screen and started
+        # again as the account this runs as -- a desktop and taskbar that are
+        # the administrator's, on somebody else's screen.
+        return Result(
+            "layout", "Explorer", Outcome.SKIPPED,
+            "WinMigrate is running as a different account, so it does not restart "
+            "the desktop; sign out and back in to see the taskbar",
+        )
     if pause is None:  # pragma: no cover -- the live path
         import time  # noqa: PLC0415
 
@@ -1090,6 +1099,26 @@ def _set_desktop_picture(env, image: Path) -> Result:
     if not touches_machine(env):
         env.write_registry_value("HKCU", DESKTOP_KEY, "Wallpaper", str(image))
         return Result("background", image.name, Outcome.APPLIED, "recorded")
+    if getattr(env, "other_account", False):
+        # SystemParametersInfoW saves into the registry of the account this
+        # runs as, which is not the one whose background this is. So the
+        # owner's registry is written directly, and the call only asks the
+        # screen to change now, saving nothing.
+        written = env.write_registry_value("HKCU", DESKTOP_KEY, "Wallpaper", str(image))
+        try:
+            import ctypes  # noqa: PLC0415
+
+            ctypes.windll.user32.SystemParametersInfoW(
+                _SPI_SETDESKWALLPAPER, 0, str(image), _SPIF_SENDCHANGE
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.debug("could not change the background now: %s", exc)
+        if not written:
+            return Result("background", image.name, Outcome.FAILED,
+                          "the profile's own settings could not be written")
+        return Result("background", image.name, Outcome.APPLIED,
+                      "set for the profile's owner; if it has not changed yet, it "
+                      "shows the next time they sign in")
     try:
         import ctypes  # noqa: PLC0415
 

@@ -1756,7 +1756,7 @@ def test_the_taskbar_is_refreshed_once_its_programs_exist(
     refreshed: list[str] = []
     monkeypatch.setattr(
         apply_mod, "refresh_shell",
-        lambda: refreshed.append("yes") or Result("layout", "Explorer", Outcome.APPLIED),
+        lambda env=None: refreshed.append("yes") or Result("layout", "Explorer", Outcome.APPLIED),
     )
     monkeypatch.setattr(
         process, "stream",
@@ -1783,7 +1783,7 @@ def test_nothing_is_refreshed_when_there_was_no_taskbar_to_put_back(
     wizard.restore_report.applied = []
 
     refreshed: list[str] = []
-    monkeypatch.setattr(apply_mod, "refresh_shell", lambda: refreshed.append("yes"))
+    monkeypatch.setattr(apply_mod, "refresh_shell", lambda env=None: refreshed.append("yes"))
     monkeypatch.setattr(
         process, "stream",
         lambda command, on_line, timeout=0, cancelled=None: process.CommandResult(
@@ -2437,7 +2437,7 @@ def test_nothing_is_restarted_when_everything_was_already_here(
     }
     refreshed: list[str] = []
     asked: list[dict] = []
-    monkeypatch.setattr(apply_mod, "refresh_shell", lambda: refreshed.append("yes"))
+    monkeypatch.setattr(apply_mod, "refresh_shell", lambda env=None: refreshed.append("yes"))
     monkeypatch.setattr(
         apply_mod, "retry_startup", lambda rec, applied, env=None: asked.append(rec) or []
     )
@@ -2473,3 +2473,37 @@ def test_a_missing_console_build_is_said_rather_than_installing_nothing_quietly(
     assert pump(wizard, until=("installed", "install-failed")) == "installed"
 
     assert "winmigrate-cli.exe is missing" in wizard.restore_done_text.cget("text")
+
+
+def test_a_standard_account_is_not_restarted_as_the_administrator(monkeypatch):
+    """For a standard user, "Yes" means typing an administrator's password and
+    running as that administrator -- whose registry the settings would then go
+    into. The install step asks for rights on its own, so the restore stays."""
+    from winmigrate.gui import elevate
+
+    asked = _relaunches(monkeypatch)
+    monkeypatch.setattr(elevate, "_elevation_type", lambda: 1)  # a standard user
+    wizard, _ = open_window(monkeypatch, {})
+    wizard.mode_var.set(Mode.RESTORE.value)
+    wizard.restore_as_admin.set(True)
+
+    wizard._go_next()
+
+    assert asked == []
+    assert wizard.step is Step.SOURCE
+
+
+def test_the_window_offers_the_profile_of_the_person_at_the_screen(monkeypatch, tmp_path):
+    """Started "as administrator" by a standard user, Path.home() is the
+    administrator's folder. Backing that up, or restoring into it, is working
+    on the wrong person while looking like the right one."""
+    from winmigrate import accounts
+    from winmigrate.gui import app as app_mod
+
+    second = tmp_path / "second"
+    second.mkdir()
+    monkeypatch.setattr(accounts, "desktop_profile", lambda env: second)
+    assert app_mod.home_profile() == second
+
+    monkeypatch.setattr(accounts, "desktop_profile", lambda env: None)
+    assert app_mod.home_profile() == Path.home()

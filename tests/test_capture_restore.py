@@ -1189,3 +1189,54 @@ def test_restoring_one_secret_item_still_reads_the_manifest_for_it(
 
     assert reads == ["pre-read"]
     assert (tmp_path / "just-one" / "WinMigrate-Credentials" / "sign-ins.crd").is_file()
+
+
+def test_a_restore_run_as_another_account_writes_the_owners_settings(
+    profile: Path, env: Environment, tmp_path: Path, monkeypatch
+):
+    """Somebody without administrator rights who starts WinMigrate "as
+    administrator" is running it as the administrator. The settings go to the
+    profile's owner all the same; the drives and printers, which can only be
+    connected by the person themselves, are left for them and said to be."""
+    from winmigrate import apply as apply_mod
+    from winmigrate.models import Category, Item, Kind
+
+    config = ScanConfig(profile_root=profile, include_software=False)
+    scan = run_scan(config, env)
+    scan.items.append(Item(
+        id="settings:mapped_drives", category=Category.MAPPED_DRIVES, kind=Kind.RECORD,
+        title="Mapped drives", record={"drives": {"Y": "\\\\nas\\share"}},
+    ))
+    scan.items.append(Item(
+        id="settings:startup_run", category=Category.STARTUP, kind=Kind.RECORD,
+        title="Login programs", record={"entries": {"Tool": "C:\\\\tool.exe"}},
+    ))
+    bundle = tmp_path / "other-account.dat"
+    capture_mod.capture(
+        scan, CaptureOptions(output=bundle, passphrase=PASSPHRASE, use_vss=False), config, env
+    )
+
+    owner = Environment.fixture(tmp_path / "second", registry={})
+    owner.user_sid = "S-1-5-21-1-2-3-1001"
+    monkeypatch.setattr(restore_mod, "settings_environment", lambda destination: owner)
+
+    def no_drives(*a, **k):  # pragma: no cover -- the point is it is not called
+        raise AssertionError("drives were connected for the wrong account")
+
+    handed: list = []
+    monkeypatch.setattr(apply_mod, "apply_mapped_drives", no_drives)
+    monkeypatch.setattr(
+        apply_mod, "apply_startup",
+        lambda record, env=None, only=None: handed.append(env) or [],
+    )
+
+    report = restore_mod.restore(RestoreOptions(
+        bundle=bundle, passphrase=PASSPHRASE, destination=tmp_path / "second",
+    ))
+
+    assert handed == [owner], "the login programs went to some other registry"
+    assert report.settings_env is owner
+    drives = [r for r in report.applied if r.kind == "drive"]
+    assert drives and drives[0].outcome is apply_mod.Outcome.SKIPPED
+    assert "account" in drives[0].detail
+    assert any("different account" in note.message for note in report.notes)

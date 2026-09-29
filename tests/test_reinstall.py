@@ -827,3 +827,11 @@ def test_the_run_summary_knows_whether_anything_arrived():
     fresh = reinstall.InstallRun(1, [reinstall.PackageResult("A.A", "installed")])
     assert fresh.installed_any and fresh.counts == {"installed": 1}
     assert reinstall.InstallRun(1, [reinstall.PackageResult("A.A", "no_winget")]).unavailable
+
+
+def test_bonjour_is_not_installed_on_its_own(tmp_path: Path):
+    """The old machine had it because iTunes brought it. Installed alone, it
+    earned a "module blocked from the Local Security Authority" dialog at
+    every start of the new machine, and nothing in exchange."""
+    path = _export(tmp_path, [(None, ["Apple.Bonjour", "Apple.iTunes", "Git.Git"])])
+    assert reinstall.package_identifiers(path) == ["Apple.iTunes", "Git.Git"]

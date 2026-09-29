@@ -164,6 +164,31 @@ def run(options: dict | None = None) -> int:
     return 0
 
 
+def home_profile() -> Path:
+    """The profile of the person at the screen, which is the one to offer.
+
+    ``Path.home()`` is the home of the account this runs as. Those differ when
+    somebody without administrator rights starts WinMigrate "as
+    administrator": it then runs as the administrator whose password was
+    typed, and offering *their* folder -- to back up, or to restore into --
+    means working on the wrong person's profile while looking like the right
+    one.
+    """
+    from .. import accounts  # noqa: PLC0415
+    from ..platform_win import Environment  # noqa: PLC0415
+
+    try:
+        other = accounts.desktop_profile(Environment.live())
+    except Exception:  # noqa: BLE001 -- not knowing leaves it as it was
+        log.debug("could not tell who is signed in here", exc_info=True)
+        other = None
+    if other is not None and other.is_dir():
+        log.info("running as %s; offering the profile of the person signed in "
+                 "here instead: %s", Path.home(), other)
+        return other
+    return Path.home()
+
+
 def typeset(text: str) -> str:
     """Text written for a console, made fit for the window.
 
@@ -194,7 +219,7 @@ class WinMigrateWizard:
         self.root = root
         self.options = options
 
-        self.data = WizardData(profile_root=options.get("profile_root") or str(Path.home()))
+        self.data = WizardData(profile_root=options.get("profile_root") or str(home_profile()))
         self.step = Step.CHOOSE
         self.manifest: dict | None = None
         self.restore_report: Any = None
@@ -1717,7 +1742,7 @@ class WinMigrateWizard:
             self._render_restore_rows()
         elif step is Step.RESTORE_CONFIRM:
             if not self.destination_var.get():
-                self.destination_var.set(str(Path.home()))
+                self.destination_var.set(str(home_profile()))
             self._refresh_restore_summary()
         elif step is Step.RESTORING:
             self._start_restore()
@@ -1980,6 +2005,16 @@ class WinMigrateWizard:
             return False
         wanted = bool(getattr(self, "restore_as_admin", None) and self.restore_as_admin.get())
         if not elevate.should_offer(wanted, self.elevation_attempted):
+            return False
+        if elevate.elevation_switches_account():
+            # A standard user: "Yes" would restart this as the administrator
+            # whose password is typed, and the restore would then put the
+            # settings in that account. The install step asks for rights on
+            # its own, for the installer alone, so nothing is lost by staying.
+            log.info("not restarting in administrator mode: this is a standard "
+                     "account, and the restore has to run as its owner; the "
+                     "install step will ask for permission itself")
+            self.elevation_attempted = True
             return False
         log.info("asking Windows for administrator rights (to install programs)")
         if elevate.relaunch_as_admin(
@@ -2424,7 +2459,7 @@ class WinMigrateWizard:
         from tkinter import filedialog  # noqa: PLC0415
 
         chosen = filedialog.askdirectory(
-            title="Restore into", initialdir=self.destination_var.get() or str(Path.home())
+            title="Restore into", initialdir=self.destination_var.get() or str(home_profile())
         )
         if chosen:
             self.destination_var.set(chosen)
@@ -2951,7 +2986,7 @@ class WinMigrateWizard:
         if not record:
             return
         applied = getattr(report, "applied", []) or []
-        fresh = apply_mod.retry_startup(record, applied)
+        fresh = apply_mod.retry_startup(record, applied, env=getattr(report, "settings_env", None))
         if fresh:
             report.applied = apply_mod.supersede(applied, fresh)
 
@@ -2982,7 +3017,9 @@ class WinMigrateWizard:
         applied = getattr(self.restore_report, "applied", []) or []
         if not any(entry.kind == "layout" for entry in applied):
             return
-        self.restore_report.applied.append(apply_mod.refresh_shell())
+        self.restore_report.applied.append(
+            apply_mod.refresh_shell(getattr(self.restore_report, "settings_env", None))
+        )
         log.info("taskbar refreshed after the install")
 
     def _reinstall_lines(self, report: Any) -> list[str]:
@@ -3149,10 +3186,11 @@ class WinMigrateWizard:
         if not live.is_windows or os.environ.get("WINMIGRATE_ALLOW_NON_WINDOWS") == "1":
             # A development run against a fake profile tree.
             return Environment.fixture(root)
-        if pathutil.normalize_key(root) == pathutil.normalize_key(live.profile_root):
-            return live
-        # A real machine, a profile that is not the signed-in one.
-        return Environment.rooted(root)
+        # A real machine. The profile's own registry, not this process's: they
+        # differ when WinMigrate was started with somebody else's password.
+        from .. import accounts  # noqa: PLC0415
+
+        return accounts.for_profile(root)
 
     def _start_scan(self) -> None:
         config = self._config()

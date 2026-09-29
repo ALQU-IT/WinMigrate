@@ -36,6 +36,9 @@ log = logging.getLogger(__name__)
 
 HKCU = "HKCU"
 HKLM = "HKLM"
+#: Every signed-in account's registry, by SID. Read to find out who is signed
+#: in, and written through when the profile is not this process's own.
+HKU = "HKU"
 
 USER_SHELL_FOLDERS_KEY = r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders"
 SHELL_FOLDERS_KEY = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders"
@@ -70,6 +73,20 @@ class Environment:
     environ: dict[str, str] = field(default_factory=lambda: dict(os.environ))
     registry: dict[str, dict[str, Any]] | None = None
     is_windows: bool = field(default_factory=lambda: sys.platform == "win32")
+    #: The SID of the profile's owner, when that is not the account this
+    #: process runs as: "HKCU" then means their registry, under HKEY_USERS.
+    #: See :mod:`winmigrate.accounts`.
+    user_sid: str | None = None
+    #: The profile's owner is somebody else and is not signed in, so their
+    #: registry is not open. "HKCU" then reads as empty and refuses writes --
+    #: the alternative is the running account's registry, which is the wrong
+    #: person's.
+    personal_registry_unreachable: bool = False
+
+    @property
+    def other_account(self) -> bool:
+        """Is the profile somebody else's than the account running this?"""
+        return bool(self.user_sid) or self.personal_registry_unreachable
 
     # -- construction -------------------------------------------------------
     @classmethod
@@ -123,7 +140,7 @@ class Environment:
         """Read every value under a key, or ``None`` if the key is absent."""
         if self.registry is not None:
             return self.registry.get(f"{hive}\\{key}")
-        if not self.is_windows:
+        if not self.is_windows or self._unreachable(hive):
             return None
         return self._read_live_registry_key(hive, key)
 
@@ -137,13 +154,13 @@ class Environment:
         if self.registry is not None:
             self.registry.setdefault(f"{hive}\\{key}", {})[name] = value
             return True
-        if not self.is_windows:
+        if not self.is_windows or self._unreachable(hive):
             return False
         import winreg  # noqa: PLC0415 -- Windows-only import
 
         try:
             with winreg.CreateKeyEx(
-                self._hive(hive), key, 0, winreg.KEY_SET_VALUE
+                *self._where(hive, key), 0, winreg.KEY_SET_VALUE
             ) as handle:
                 # REG_EXPAND_SZ so a value containing %USERPROFILE% keeps
                 # meaning what it meant, rather than being frozen to the path it
@@ -167,13 +184,13 @@ class Environment:
         if self.registry is not None:
             self.registry.setdefault(f"{hive}\\{key}", {})[name] = int(value)
             return True
-        if not self.is_windows:
+        if not self.is_windows or self._unreachable(hive):
             return False
         import winreg  # noqa: PLC0415 -- Windows-only import
 
         try:
             with winreg.CreateKeyEx(
-                self._hive(hive), key, 0, winreg.KEY_SET_VALUE
+                *self._where(hive, key), 0, winreg.KEY_SET_VALUE
             ) as handle:
                 winreg.SetValueEx(handle, name, 0, winreg.REG_DWORD, int(value))
             return True
@@ -192,13 +209,13 @@ class Environment:
         if self.registry is not None:
             self.registry.setdefault(f"{hive}\\{key}", {})[name] = bytes(value)
             return True
-        if not self.is_windows:
+        if not self.is_windows or self._unreachable(hive):
             return False
         import winreg  # noqa: PLC0415 -- Windows-only import
 
         try:
             with winreg.CreateKeyEx(
-                self._hive(hive), key, 0, winreg.KEY_SET_VALUE
+                *self._where(hive, key), 0, winreg.KEY_SET_VALUE
             ) as handle:
                 winreg.SetValueEx(handle, name, 0, winreg.REG_BINARY, bytes(value))
             return True
@@ -209,21 +226,36 @@ class Environment:
     def registry_subkeys(self, hive: str, key: str) -> list[str]:
         """List subkey names, empty when the key does not exist."""
         if self.registry is not None:
-            prefix = f"{hive}\\{key}\\"
+            prefix = f"{hive}\\{key}\\" if key else f"{hive}\\"
             names = set()
             for full in self.registry:
                 if full.startswith(prefix):
                     names.add(full[len(prefix) :].split("\\", 1)[0])
             return sorted(names)
-        if not self.is_windows:
+        if not self.is_windows or self._unreachable(hive):
             return []
         return self._list_live_subkeys(hive, key)
+
+    def registry_key_exists(self, hive: str, key: str) -> bool:
+        """Is there a key here at all, values or not?"""
+        if self.registry is not None:
+            full = f"{hive}\\{key}"
+            return any(name == full or name.startswith(full + "\\") for name in self.registry)
+        if not self.is_windows or self._unreachable(hive):
+            return False
+        import winreg  # noqa: PLC0415 -- Windows-only import
+
+        try:
+            with winreg.OpenKey(*self._where(hive, key)):
+                return True
+        except OSError:
+            return False
 
     def _read_live_registry_key(self, hive: str, key: str) -> dict[str, Any] | None:
         import winreg  # noqa: PLC0415 -- Windows-only import
 
         try:
-            with winreg.OpenKey(self._hive(hive), key) as handle:
+            with winreg.OpenKey(*self._where(hive, key)) as handle:
                 _, value_count, _ = winreg.QueryInfoKey(handle)
                 values: dict[str, Any] = {}
                 for index in range(value_count):
@@ -237,11 +269,24 @@ class Environment:
         import winreg  # noqa: PLC0415 -- Windows-only import
 
         try:
-            with winreg.OpenKey(self._hive(hive), key) as handle:
+            with winreg.OpenKey(*self._where(hive, key)) as handle:
                 subkey_count, _, _ = winreg.QueryInfoKey(handle)
                 return [winreg.EnumKey(handle, index) for index in range(subkey_count)]
         except OSError:
             return []
+
+    def _unreachable(self, hive: str) -> bool:
+        return hive == HKCU and self.personal_registry_unreachable
+
+    def _where(self, hive: str, key: str):
+        """The open hive and the path under it that ``hive\\key`` means here.
+
+        HKCU is the profile owner's registry, which is this process's own
+        unless :attr:`user_sid` says otherwise.
+        """
+        if hive == HKCU and self.user_sid:
+            return self._hive(HKU), f"{self.user_sid}\\{key}" if key else self.user_sid
+        return self._hive(hive), key
 
     @staticmethod
     def _hive(hive: str):
@@ -250,6 +295,7 @@ class Environment:
         return {
             HKCU: winreg.HKEY_CURRENT_USER,
             HKLM: winreg.HKEY_LOCAL_MACHINE,
+            HKU: winreg.HKEY_USERS,
         }[hive]
 
     # -- environment --------------------------------------------------------
