@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+import types
 from pathlib import Path
 
 from winmigrate import accounts
@@ -124,8 +126,19 @@ def test_the_background_goes_into_the_owners_settings_not_the_running_accounts(
         lambda self, hive, key, name, value: writes.append((self.user_sid, key, name, value))
         or True,
     )
+    # A stand-in for the Windows call, so that running this on a Windows
+    # machine does not change that machine's desktop.
+    calls: list[tuple] = []
+    user32 = types.SimpleNamespace(
+        SystemParametersInfoW=lambda *args: calls.append(args) or 1
+    )
+    monkeypatch.setitem(
+        sys.modules, "ctypes", types.SimpleNamespace(windll=types.SimpleNamespace(user32=user32))
+    )
 
     result = apply_mod._set_desktop_picture(env, image)
 
     assert writes == [(SECOND, apply_mod.DESKTOP_KEY, "Wallpaper", str(image))]
+    # Shown now, but not saved into the settings of the account running this.
+    assert calls and not calls[0][3] & apply_mod._SPIF_UPDATEINIFILE
     assert result.outcome is Outcome.APPLIED and "sign in" in result.detail

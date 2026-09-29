@@ -1920,6 +1920,10 @@ def _relaunches(monkeypatch) -> list:
     asked: list = []
     monkeypatch.setattr(elevate, "is_windows", lambda: True)
     monkeypatch.setattr(elevate, "is_elevated", lambda: False)
+    # An administrator whose rights are held back -- the ordinary case. Pinned,
+    # because on a Windows machine the real token would be read instead, and a
+    # build agent's account is not one.
+    monkeypatch.setattr(elevate, "_elevation_type", lambda: 3)
     monkeypatch.setattr(
         elevate, "relaunch_as_admin", lambda args: asked.append(args) or True
     )
@@ -1972,6 +1976,7 @@ def test_declining_the_prompt_carries_on_rather_than_stopping(monkeypatch):
 
     monkeypatch.setattr(elevate, "is_windows", lambda: True)
     monkeypatch.setattr(elevate, "is_elevated", lambda: False)
+    monkeypatch.setattr(elevate, "_elevation_type", lambda: 3)
     monkeypatch.setattr(elevate, "relaunch_as_admin", lambda args: False)
     wizard, _ = open_window(monkeypatch, {})
     wizard.mode_var.set(Mode.RESTORE.value)
