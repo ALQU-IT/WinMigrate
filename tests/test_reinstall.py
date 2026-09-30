@@ -829,9 +829,16 @@ def test_the_run_summary_knows_whether_anything_arrived():
     assert reinstall.InstallRun(1, [reinstall.PackageResult("A.A", "no_winget")]).unavailable
 
 
-def test_bonjour_is_not_installed_on_its_own(tmp_path: Path):
-    """The old machine had it because iTunes brought it. Installed alone, it
-    earned a "module blocked from the Local Security Authority" dialog at
-    every start of the new machine, and nothing in exchange."""
-    path = _export(tmp_path, [(None, ["Apple.Bonjour", "Apple.iTunes", "Git.Git"])])
-    assert reinstall.package_identifiers(path) == ["Apple.iTunes", "Git.Git"]
+def test_bonjour_is_installed_and_its_windows_warning_is_explained(tmp_path: Path):
+    """Bonjour is on the old machine for a reason -- printers, Apple devices,
+    anything found on the network by name -- so it comes back. Windows 11
+    then warns that part of it was blocked from the sign-in service, which
+    reads like a broken install and is not one; the report says so."""
+    path = _export(tmp_path, [(None, ["Apple.Bonjour", "Git.Git"])])
+    assert reinstall.package_identifiers(path) == ["Apple.Bonjour", "Git.Git"]
+
+    result = reinstall.classify(reinstall.Package("Apple.Bonjour"), CommandResult([], 0, ""))
+    assert result.outcome == "installed"
+    assert "mdnsNSP.dll" in result.detail and "still works" in result.detail
+    plain = reinstall.classify(reinstall.Package("Git.Git"), CommandResult([], 0, ""))
+    assert plain.detail == ""

@@ -546,18 +546,18 @@ def run_winget_import(import_file: Path, runner=process.run) -> process.CommandR
     return runner(import_command(import_file, runner), timeout=WINGET_IMPORT_TIMEOUT)
 
 
-#: Packages the old machine had only because something else installed them,
-#: and which do harm installed on their own. Left out when the list is read,
-#: so an install folder written by an older version is covered too.
-BROUGHT_ALONG: dict[str, str] = {
-    # iTunes, iCloud and some printer and Adobe installers bring it. Alone it
-    # adds nothing anyone asked for, and current Windows 11 refuses to load
-    # its network add-on into the protected sign-in service -- a warning
-    # dialog ("Das Laden dieses Moduls in die lokale Sicherheitsautorität ist
-    # blockiert ... mdnsNSP.dll") at every start, on a machine that was
-    # supposed to come back the way it was.
-    "apple.bonjour": "it comes with the Apple software that needs it, and on its "
-    "own Windows blocks part of it and says so at every start",
+#: What to say about a package once it is installed, when installing it has a
+#: side effect somebody would otherwise take for a fault.
+AFTER_INSTALL_NOTES: dict[str, str] = {
+    # Current Windows 11 protects its sign-in service (LSA protection) and will
+    # not load Bonjour's name-lookup add-on, mdnsNSP.dll, into it. It says so
+    # in a dialog -- "Das Laden dieses Moduls in die lokale
+    # Sicherheitsautoritaet ist blockiert" -- which reads like a broken install.
+    # It is not: the Bonjour service and everything using it carry on. What the
+    # dialog asks for is dismissing, not turning the protection off.
+    "apple.bonjour": "Windows may warn that mdnsNSP.dll was blocked from the "
+    "Local Security Authority. Bonjour still works; tick 'Don't show this "
+    "message again' and close it. Leave LSA protection on",
 }
 
 
@@ -595,10 +595,6 @@ def packages(import_file: Path) -> list[Package]:
             identifier = package.get("PackageIdentifier") if isinstance(package, dict) else None
             if isinstance(identifier, str) and identifier and identifier not in seen:
                 seen.add(identifier)
-                reason = BROUGHT_ALONG.get(identifier.lower())
-                if reason:
-                    log.info("not installing %s on its own: %s", identifier, reason)
-                    continue
                 found.append(Package(identifier, name))
     return found
 
@@ -765,11 +761,13 @@ def classify(package: Package, result: process.CommandResult) -> PackageResult:
     if result.error:
         return PackageResult(package.identifier, "failed", result.error)
     code = (result.returncode or 0) & 0xFFFFFFFF
+    note = AFTER_INSTALL_NOTES.get(package.identifier.lower(), "")
     if code == 0:
-        return PackageResult(package.identifier, "installed", code=0)
+        return PackageResult(package.identifier, "installed", note, 0)
     if code in RESTART_TO_FINISH:
+        detail = "restart the PC to finish installing it"
         return PackageResult(
-            package.identifier, "installed", "restart the PC to finish installing it", code
+            package.identifier, "installed", f"{detail}. {note}" if note else detail, code
         )
     if code in ALREADY_HERE:
         return PackageResult(package.identifier, "already", "already on this machine", code)
