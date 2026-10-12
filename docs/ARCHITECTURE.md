@@ -100,6 +100,7 @@ winmigrate/
     runner.py        orchestration: profile → ScanResult
     userfiles.py     the profile walk and its skip accounting
     syncroots.py     OneDrive and Nextcloud detection (config-read only)
+    unsynced.py      files in a sync folder its client has not uploaded yet
     software.py      installed-software inventory (registry + winget + Appx)
     office.py        Click-to-Run detection and licence status (no key extraction)
     devconfig.py     developer/credential config (encrypted-only, secret items)
@@ -319,6 +320,16 @@ Two rules keep the numbers honest:
   in the folder *and* on the sync root would inflate the total. `syncroots.measure()`
   measures each root once, and the profile walk records synced subtrees as
   explanatory entries carrying no bytes.
+* **"Synced" means the client has it, not that it is in the folder.** A file in
+  a OneDrive folder that OneDrive has not uploaded -- new, edited since, stuck
+  on an error, or behind a paused client -- exists only on this disk. Windows
+  records each file's Cloud Files state (placeholder, in sync), which
+  `scan/unsynced.py` reads from the directory listing without opening anything,
+  so those files are captured as `files:unsynced:<n>` under `data/unsynced/`.
+  Restore puts them back in the same folder for the client to upload, and keeps
+  a different file already there, writing the backup's copy beside it as
+  "name (from the old PC)". A client that does not report the state is left
+  alone, with a note, rather than guessed at.
 * **`--fast` reduces precision, not honesty.** It skips the extra walk into
   subtrees that will not be captured, so those report zero bytes rather than a
   guess.

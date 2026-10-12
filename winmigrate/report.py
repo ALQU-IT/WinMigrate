@@ -360,6 +360,11 @@ def render_restore_report(report, console: Console, *, dry_run: bool | None = No
         )
     if report.kept_existing:
         lines.append(f"[yellow]kept existing, differing files: {report.kept_existing:,}[/yellow]")
+    if getattr(report, "kept_both", 0):
+        lines.append(
+            f"[yellow]not yet uploaded, kept beside a different file of the same name "
+            f"as \"(from the old PC)\": {report.kept_both:,}[/yellow]"
+        )
     lines.append(
         "integrity: "
         + ("[green]verified against the sidecar manifest[/green]" if report.verified

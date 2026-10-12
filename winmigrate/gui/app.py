@@ -3096,6 +3096,13 @@ class WinMigrateWizard:
             lines.append(f"Already there and identical: {report.skipped_existing:,}")
         if report.kept_existing:
             lines.append(f"Your own version kept: {report.kept_existing:,}")
+        if getattr(report, "kept_both", 0):
+            # Files OneDrive had not uploaded, where the new machine already had
+            # a different file of that name: both are there, side by side.
+            lines.append(
+                f"Kept both versions, the old PC's beside yours as "
+                f"\u201c(from the old PC)\u201d: {report.kept_both:,}"
+            )
         if report.digest_mismatches:
             lines.append(
                 f"⚠ {len(report.digest_mismatches)} item(s) did not match the backup."

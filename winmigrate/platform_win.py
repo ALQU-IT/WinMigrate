@@ -32,6 +32,17 @@ CLOUD_PLACEHOLDER_MASK = (
     | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
 )
 
+#: What the Cloud Files API says about a file in a sync folder (OneDrive,
+#: and any other client built on it). See :meth:`Environment.sync_state`.
+CF_STATE_PLACEHOLDER = 0x01
+CF_STATE_SYNC_ROOT = 0x02
+CF_STATE_IN_SYNC = 0x08
+CF_STATE_INVALID = 0xFFFFFFFF
+
+#: A reparse tag with this bit is a name surrogate -- a junction or a
+#: symbolic link, which points somewhere else and is not walked into.
+REPARSE_TAG_NAME_SURROGATE = 0x20000000
+
 log = logging.getLogger(__name__)
 
 HKCU = "HKCU"
@@ -82,6 +93,9 @@ class Environment:
     #: the alternative is the running account's registry, which is the wrong
     #: person's.
     personal_registry_unreachable: bool = False
+    #: A fixture's answers to :meth:`sync_state`, by normalized path. Unused on
+    #: a live machine, which asks Windows.
+    cloud_states: dict[str, int] | None = None
 
     @property
     def other_account(self) -> bool:
@@ -362,12 +376,59 @@ class Environment:
         stat_result = entry.stat(follow_symlinks=False) if hasattr(entry, "stat") else entry
         return getattr(stat_result, "st_file_attributes", 0)
 
+    def sync_state(self, path: Path, stat_result: os.stat_result) -> int | None:
+        """The Cloud Files state of one file or folder, or None when unknown.
+
+        Windows keeps, for every file in a sync folder, whether the provider has
+        it: a *placeholder* is a file the client knows about, and one that is
+        also *in sync* matches what is in the cloud. A file that is neither has
+        not been uploaded -- new, or edited since, or one the client refused.
+
+        Worked out from the attributes and reparse tag a directory listing
+        already carries, by the documented CfGetPlaceholderStateFromAttributeTag.
+        No file is opened, so nothing is downloaded and nothing is locked.
+        """
+        if self.registry is not None:
+            if self.cloud_states is None:
+                return None
+            return self.cloud_states.get(pathutil.normalize_key(path))
+        if not self.is_windows:
+            return None
+        attributes = getattr(stat_result, "st_file_attributes", 0)
+        tag = getattr(stat_result, "st_reparse_tag", 0)
+        return _placeholder_state(attributes, tag)
+
     def is_cloud_placeholder(self, entry: os.DirEntry[str]) -> bool:
         """True when a file's bytes are not on this disk."""
         try:
             return bool(self.file_attributes(entry) & CLOUD_PLACEHOLDER_MASK)
         except OSError:
             return False
+
+
+_CLDAPI: Any = None
+
+
+def _placeholder_state(attributes: int, tag: int) -> int | None:  # pragma: no cover -- Windows
+    """CfGetPlaceholderStateFromAttributeTag, or None where Windows lacks it."""
+    global _CLDAPI
+    if _CLDAPI is False:
+        return None
+    try:
+        if _CLDAPI is None:
+            import ctypes  # noqa: PLC0415
+            from ctypes import wintypes  # noqa: PLC0415
+
+            function = ctypes.WinDLL("cldapi.dll").CfGetPlaceholderStateFromAttributeTag
+            function.argtypes = [wintypes.DWORD, wintypes.ULONG]
+            function.restype = ctypes.c_uint32
+            _CLDAPI = function
+        state = int(_CLDAPI(attributes & 0xFFFFFFFF, tag & 0xFFFFFFFF))
+    except Exception as exc:  # noqa: BLE001 -- Windows before 1709, or no cldapi
+        log.debug("cannot ask Windows for sync state: %s", exc)
+        _CLDAPI = False
+        return None
+    return None if state == CF_STATE_INVALID else state
 
 
 def require_windows(allow_override: bool = True) -> None:

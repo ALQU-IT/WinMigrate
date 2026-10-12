@@ -81,6 +81,9 @@ class RestoreReport:
     restored_bytes: int = 0
     skipped_existing: int = 0
     kept_existing: int = 0
+    #: Files that had not been uploaded to a sync folder, restored beside a
+    #: different file of the same name rather than instead of it.
+    kept_both: int = 0
     digest_mismatches: list[str] = field(default_factory=list)
     failures: list[tuple[str, str]] = field(default_factory=list)
     followups: list[Followup] = field(default_factory=list)
@@ -649,7 +652,17 @@ def _restore_member(info, stream, destination: Path, options: RestoreOptions,
         report.restored_bytes += info.size
         return
 
+    # Files a sync client had not uploaded are the newest copy there is. The
+    # new machine may already hold the cloud's older one under the same name;
+    # keeping that and dropping this would lose exactly the edit this exists to
+    # save, and replacing it would lose the other. Both stay.
+    keep_both = _is_unsynced(info.name) and not options.overwrite
     existing = _existing_state(target, info.size)
+    beside_of: str | None = None
+    if existing == "differs" and keep_both:
+        beside_of = target.name
+        target = _beside(target, info.size)
+        existing = _existing_state(target, info.size)
     if existing == "differs" and not options.overwrite:
         # The user's own version was kept, so it deliberately differs from the
         # bundle and cannot be verified against it.
@@ -692,6 +705,22 @@ def _restore_member(info, stream, destination: Path, options: RestoreOptions,
             report.skipped_existing += 1
             written[info.name] = digest.hexdigest()
             return
+        if compare is not None and keep_both:
+            beside = _beside(target, info.size, digest.hexdigest())
+            if _same_contents(beside, digest.hexdigest()):
+                # A previous run already put this copy beside it.
+                temporary.unlink(missing_ok=True)
+                report.skipped_existing += 1
+                written[info.name] = digest.hexdigest()
+                return
+            os.replace(pathutil.extended(temporary), pathutil.extended(beside))
+            _note_kept_both(report, target.name, beside)
+            written[info.name] = digest.hexdigest()
+            report.restored_files += 1
+            report.restored_bytes += info.size
+            if progress is not None:
+                progress(beside.name, info.size)
+            return
         if compare is not None and not options.overwrite:
             # Same size, different contents -- the case a size check calls
             # "already restored". It is the user's own file, so it is kept.
@@ -723,6 +752,8 @@ def _restore_member(info, stream, destination: Path, options: RestoreOptions,
     written[info.name] = digest.hexdigest()
     report.restored_files += 1
     report.restored_bytes += info.size
+    if beside_of is not None:
+        _note_kept_both(report, beside_of, target)
     if progress is not None:
         progress(target.name, info.size)
 
@@ -873,6 +904,57 @@ def read_manifest(bundle_path: Path, passphrase: str) -> dict[str, Any]:
 _read_manifest_only = read_manifest
 
 
+#: Where restore finds a sync folder's not-yet-uploaded files in the bundle.
+UNSYNCED_PREFIX = "data/unsynced/"
+#: What a kept-beside copy is called: "Report (from the old PC).docx".
+BESIDE_LABEL = "from the old PC"
+
+
+def _is_unsynced(archive_name: str) -> bool:
+    return archive_name.replace("\\", "/").lstrip("/").startswith(UNSYNCED_PREFIX)
+
+
+def _note_kept_both(report: RestoreReport, name: str, beside: Path) -> None:
+    report.kept_both += 1
+    report.notes.append(Note(
+        Severity.INFO,
+        f"kept both copies of {name}",
+        f"the one already here and, beside it, the old machine's newer copy: {beside}",
+    ))
+
+
+def _beside(target: Path, size: int, digest: str | None = None) -> Path:
+    """A name next to ``target`` for the backup's copy of it.
+
+    "Report (from the old PC).docx", then "... 2", and so on: the first that
+    is free, or one holding what may be a previous run's copy -- a file of the
+    same size, and, when ``digest`` is given, the same contents. Without a
+    digest the usual comparison on the way in settles it.
+    """
+    candidate = target
+    for number in range(1, 1000):
+        label = BESIDE_LABEL if number == 1 else f"{BESIDE_LABEL} {number}"
+        candidate = target.with_name(f"{target.stem} ({label}){target.suffix}")
+        state = _existing_state(candidate, size)
+        if state == "missing":
+            return candidate
+        if state == "same" and (digest is None or _same_contents(candidate, digest)):
+            return candidate
+    return candidate
+
+
+def _same_contents(path: Path, digest: str) -> bool:
+    """Does ``path`` hold exactly the bytes whose SHA-256 is ``digest``?"""
+    hasher = hashlib.sha256()
+    try:
+        with open(pathutil.extended(path), "rb") as handle:
+            for block in iter(lambda: handle.read(COPY_CHUNK), b""):
+                hasher.update(block)
+    except OSError:
+        return False
+    return hasher.hexdigest() == digest
+
+
 def _existing_state(target: Path, size: int) -> str:
     """``missing``, ``same`` (the size matches) or ``differs``.
 
@@ -950,6 +1032,9 @@ def _target_for(archive_name: str, destination: Path) -> Path | None:
         parts = parts[2:]
         if parts and parts[0] == "_other":
             parts = parts[1:]
+    elif len(parts) >= 2 and parts[0] == "data" and parts[1] == "unsynced":
+        # A sync folder's not-yet-uploaded files, back into that folder.
+        parts = parts[2:]
     elif parts and parts[0] == "data":
         parts = parts[1:]
     elif parts and parts[0] == "secrets":

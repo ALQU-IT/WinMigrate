@@ -410,7 +410,7 @@ def _capture_item(
             progress(item.title, size)
         return
 
-    for event in walk_tree(root, config, env, scan.sync_roots, relative_base=env.profile_root):
+    for event in _tree_files(item, root, config, env, scan):
         if not isinstance(event, CaptureFile):
             continue
         key = pathutil.normalize_key(event.path)
@@ -440,6 +440,22 @@ def _capture_item(
     # the profile changed between the scan and the capture.
     item.size_bytes = captured_bytes
     item.file_count = len(digests)
+
+
+def _tree_files(item: Item, root: Path, config: ScanConfig, env: Environment, scan: ScanResult):
+    """The files a tree item takes, by the same rule the preview counted with.
+
+    A sync folder's not-yet-uploaded files are the one tree that is not walked
+    whole: the folder is left to its client, and only what the client does not
+    have comes along. Checked again here, file by file, rather than trusted
+    from the preview -- something saved since then is exactly the kind of file
+    this exists for.
+    """
+    if isinstance(item.record, dict) and item.record.get("unsynced_from"):
+        from .scan import unsynced as unsynced_mod  # noqa: PLC0415
+
+        return unsynced_mod.walk_unsynced(root, env, config)
+    return walk_tree(root, config, env, scan.sync_roots, relative_base=env.profile_root)
 
 
 def _add_wifi_profiles(scan: ScanResult, env) -> None:  # pragma: no cover - Windows only

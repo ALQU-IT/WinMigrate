@@ -91,7 +91,7 @@ in by the package stage. This is the copy restore trusts.
 ## Items
 
 An item is one unit of migration. Its `id` is stable and unique within the
-manifest (`files:documents`, `sync:onedrive:0`, `dev:ssh`), so a restore report
+manifest (`files:documents`, `sync:onedrive:0`, `files:unsynced:0`, `dev:ssh`), so a restore report
 can refer back to a preview.
 
 | Field | Meaning |

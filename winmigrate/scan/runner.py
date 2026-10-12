@@ -36,6 +36,11 @@ from ..util import paths as pathutil
 from . import syncroots as syncroots_mod
 from .userfiles import TreeMeasurement, measure_tree
 
+#: Where a sync folder's not-yet-uploaded files ride in the bundle. Its own
+#: prefix, because restore treats them differently: a file already on the new
+#: machine under the same name is kept, and this copy goes beside it.
+UNSYNCED_ARCHIVE_PREFIX = "data/unsynced"
+
 log = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[str], None]
@@ -96,6 +101,7 @@ def run_scan(
     if config.include_other_profile_dirs:
         long_paths += _scan_other_profile_dirs(config, env, result, progress)
     _record_sync_roots(result)
+    _scan_unsynced(config, env, result, progress)
     _add_sync_followups(result)
     if config.include_software:
         # Office is detected first: its Click-to-Run build version decides which
@@ -451,6 +457,82 @@ def _record_sync_roots(result: ScanResult) -> None:
                 ],
             )
         )
+
+
+def _scan_unsynced(
+    config: ScanConfig, env: Environment, result: ScanResult, progress: ProgressCallback | None
+) -> None:
+    """Back up what a sync folder holds that its client has not uploaded.
+
+    Leaving a OneDrive folder out of the backup is only safe for the files
+    OneDrive actually has. See :mod:`winmigrate.scan.unsynced`.
+    """
+    from . import unsynced as unsynced_mod  # noqa: PLC0415
+
+    for index, root in enumerate(result.sync_roots):
+        path = Path(root.root)
+        if not path.is_dir() or _is_dormant(root):
+            continue
+        label = root.label or root.provider
+        _emit(progress, f"Checking what {label} has not uploaded yet")
+        found = unsynced_mod.count(path, env, config)
+        report = next(
+            (item for item in result.items if item.id == f"sync:{root.provider}:{index}"), None
+        )
+        if not found.readable:
+            log.info("%s does not report which files it has uploaded", root.root)
+            if report is not None:
+                report.notes.append(Note(
+                    Severity.INFO,
+                    f"{root.provider} does not say which files it has uploaded, so "
+                    "none of this folder is in the backup. Make sure it has finished "
+                    "syncing before the old machine goes.",
+                ))
+            continue
+        log.info(
+            "%s: %s%d file(s), %d bytes not uploaded yet", root.root,
+            "" if found.complete else "at least ", found.files, found.bytes,
+        )
+        if found.complete and not found.files:
+            continue
+        floor = "" if found.complete else "at least "
+        item = Item(
+            id=f"files:unsynced:{index}",
+            category=Category.USER_FILES,
+            kind=Kind.TREE,
+            title=f"{label} \u2014 not uploaded yet",
+            source_path=str(path),
+            archive_path=f"{UNSYNCED_ARCHIVE_PREFIX}/{unsynced_mod.archive_folder(path, env)}",
+            size_bytes=found.bytes,
+            file_count=found.files,
+            compressible_bytes=found.compressible_bytes,
+            # Read by the capture, which takes this folder's unsynced files
+            # rather than walking it. Nothing here names a file.
+            record={"unsynced_from": root.provider},
+            restore=RestoreSpec(
+                target=root.root,
+                strategy=RestoreStrategy.MERGE,
+                notes=[
+                    f"Put back in the same folder, where {root.provider} uploads them "
+                    "once you sign in. Where the new machine already has a different "
+                    "file of the same name, this copy is kept beside it.",
+                ],
+            ),
+            notes=[Note(
+                Severity.WARNING,
+                f"{floor}{found.files:,} file(s) in {label} are not in "
+                f"{root.provider} yet, so they are in this backup instead.",
+                None if found.complete else
+                "Counting stopped early; the backup itself checks every file.",
+            )],
+        )
+        result.items.append(item)
+        if report is not None:
+            report.notes.append(Note(
+                Severity.INFO,
+                f"Except {floor}{found.files:,} file(s) {root.provider} has not uploaded "
+                "yet, which are backed up.",
+            ))
 
 
 def _add_sync_followups(result: ScanResult) -> None:
