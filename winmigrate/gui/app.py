@@ -227,6 +227,10 @@ class WinMigrateWizard:
         self.credential_entries: list | None = None
         self.credential_backup: Path | None = None
         self.install_lines: list[str] = []
+        #: (package id, name shown) for the software page, and the restore the
+        #: ticks on it belong to.
+        self._software_packages: list[tuple[str, str]] = []
+        self._software_chosen_for: Any = None
         self._install_counting = False
         self._install_stop = threading.Event()
         self.scan_result: ScanResult | None = None
@@ -723,6 +727,13 @@ class WinMigrateWizard:
         ("files", "Files", 52, "e", False),
         ("note", "", 150, "w", True),
     )
+    #: The programs a restore can install: a tick, the name the old machine
+    #: showed for it, and winget's own id for anyone who wants to look it up.
+    SOFTWARE_COLUMNS: tuple[tuple[str, str, int, str, bool], ...] = (
+        ("pick", "", 30, "center", False),
+        ("name", "Program", 300, "w", True),
+        ("package", "Package", 220, "w", True),
+    )
     #: Rows shown before the list scrolls. Enough for a typical profile's
     #: folders and browsers, and few enough that the buttons under the list stay
     #: on screen at the window's smallest size.
@@ -771,7 +782,7 @@ class WinMigrateWizard:
         text.pack(side="left", fill="both", expand=True)
         return text, holder
 
-    def _item_list(self, page: Any) -> Any:
+    def _item_list(self, page: Any, columns: Any = None, rows: int | None = None) -> Any:
         """A list of things to tick, with a scrollbar that stays visible.
 
         One builder for both lists, because there were two copies and both were
@@ -786,11 +797,12 @@ class WinMigrateWizard:
         ttk = self.ttk
         holder = ttk.Frame(page, style="Page.TFrame")
         holder.pack(fill="both", expand=True)
+        columns = columns or self.ITEM_COLUMNS
         tree = ttk.Treeview(
-            holder, columns=[c[0] for c in self.ITEM_COLUMNS], show="headings",
-            selectmode="none", style="Wizard.Treeview", height=self.ITEM_ROWS,
+            holder, columns=[c[0] for c in columns], show="headings",
+            selectmode="none", style="Wizard.Treeview", height=rows or self.ITEM_ROWS,
         )
-        for name, heading, width, anchor, stretch in self.ITEM_COLUMNS:
+        for name, heading, width, anchor, stretch in columns:
             tree.heading(name, text=heading)
             tree.column(name, width=width, minwidth=24, anchor=anchor, stretch=stretch)
         bar = ttk.Scrollbar(
@@ -981,7 +993,22 @@ class WinMigrateWizard:
             page, text="", style="Body.TLabel", justify="left", wraplength=640
         )
         self.software_text.pack(anchor="w", pady=(6, 8))
-        self.software_box, _holder = self._text_box(page, height=9, wrap="none")
+        # One box for the usual answer -- everything -- above a list for the
+        # other one. Somebody moving house wants all of it back; somebody
+        # taking the chance to leave half of it behind can untick what they
+        # no longer use, and until now could only take all or nothing.
+        row = ttk.Frame(page, style="Page.TFrame")
+        row.pack(fill="x", pady=(0, 4))
+        self.software_all = self.tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            row, text="All programs", variable=self.software_all,
+            style="Wizard.TCheckbutton",
+            command=lambda: self._set_all_software(bool(self.software_all.get())),
+        ).pack(side="left")
+        self.software_count = ttk.Label(row, text="", style="Body.TLabel")
+        self.software_count.pack(side="right")
+        self.software_tree = self._item_list(page, self.SOFTWARE_COLUMNS, rows=8)
+        self.software_tree.bind("<Button-1>", self._on_software_click)
         self.software_note = ttk.Label(
             page, text="", style="Hint.TLabel", justify="left", wraplength=640
         )
@@ -1026,7 +1053,7 @@ class WinMigrateWizard:
         # this, "press Install again" named a button nobody could reach, and a
         # mis-clicked No on the Windows prompt meant restoring all over again.
         self.install_again_button = ttk.Button(
-            page, text="", command=lambda: self._show(Step.INSTALLING)
+            page, text="", command=self._install_from_last_page
         )
         self.followup_box, self.followup_holder = self._text_box(page, height=10, wrap="word")
 
@@ -2687,18 +2714,35 @@ class WinMigrateWizard:
         from .. import reinstall as reinstall_mod  # noqa: PLC0415
 
         artifacts = self._software_to_install()
-        self.software_box.configure(state="normal")
-        self.software_box.delete("1.0", "end")
         if artifacts is None:
+            self._software_packages = []
+            self.data.software_total = 0
+            self.data.software_selected = set()
+            self._render_software_rows()
             self.software_text.configure(
                 text="There is nothing here to install: this backup carried no "
                 "software list, or nothing in it has a package."
             )
             self.software_note.configure(text="")
-            self.software_box.configure(state="disabled")
             return
 
         packages = reinstall_mod.package_identifiers(Path(str(artifacts.winget_import)))
+        names = reinstall_mod.display_names(getattr(self.restore_report, "manifest", None))
+        # By name, as the old machine listed them: that is how they are looked
+        # for. winget's ids sort by publisher, which nobody knows by heart.
+        self._software_packages = sorted(
+            ((identifier, names.get(identifier.lower(), identifier)) for identifier in packages),
+            key=lambda pair: pair[1].lower(),
+        )
+        self.data.software_total = len(packages)
+        if self._software_chosen_for is not self.restore_report:
+            # A new restore starts from "everything". Coming back to the page
+            # -- from the last one, to install after all -- keeps what was ticked.
+            self._software_chosen_for = self.restore_report
+            self.data.software_selected = set(packages)
+        else:
+            self.data.software_selected &= set(packages)
+        self._render_software_rows()
         manual = getattr(artifacts, "manual_count", 0)
         lines = [
             f"{len(packages)} application(s) can be installed for you, straight from "
@@ -2716,9 +2760,6 @@ class WinMigrateWizard:
                 "Portal; the last page has the list."
             )
         self.software_text.configure(text="\n".join(lines))
-        for identifier in packages:
-            self.software_box.insert("end", f"{identifier}\n")
-        self.software_box.configure(state="disabled")
 
         # Said here rather than discovered halfway through, and said as the
         # thing it actually is: without the rights most of these will not
@@ -2737,6 +2778,61 @@ class WinMigrateWizard:
                 text="Nothing is downloaded or installed until you press Install them."
             )
 
+    def _render_software_rows(self) -> None:
+        """Redraw the list of programs with its ticks, and the count beside it."""
+        chosen = self.data.software_selected
+        self.software_tree.delete(*self.software_tree.get_children())
+        for identifier, name in self._software_packages:
+            self.software_tree.insert(
+                "", "end", iid=identifier,
+                values=(
+                    TICKED if identifier in chosen else UNTICKED,
+                    name,
+                    # Not twice, when the name is all there is.
+                    identifier if name != identifier else "",
+                ),
+            )
+        total = len(self._software_packages)
+        self.software_all.set(bool(total) and len(chosen) == total)
+        self.software_count.configure(
+            text=f"{len(chosen)} of {total} selected" if total else ""
+        )
+        self._refresh_buttons()
+
+    def _on_software_click(self, event: Any) -> None:
+        if self.software_tree.identify_region(event.x, event.y) != "cell":
+            return
+        self._toggle_software(self.software_tree.identify_row(event.y))
+
+    def _toggle_software(self, identifier: str) -> None:
+        """Tick or untick one program."""
+        if not any(identifier == known for known, _name in self._software_packages):
+            return
+        if identifier in self.data.software_selected:
+            self.data.software_selected.discard(identifier)
+        else:
+            self.data.software_selected.add(identifier)
+        self._render_software_rows()
+
+    def _set_all_software(self, on: bool) -> None:
+        """The "All programs" box: everything, or -- unticked -- a clean slate."""
+        self.data.software_selected = (
+            {identifier for identifier, _name in self._software_packages} if on else set()
+        )
+        self._render_software_rows()
+
+    def _chosen_packages(self, import_file: Path) -> tuple[list, bool]:
+        """The packages to install, and whether that is all of them."""
+        from .. import reinstall as reinstall_mod  # noqa: PLC0415
+
+        everything = reinstall_mod.packages(import_file)
+        if self._software_chosen_for is not self.restore_report:
+            # The install was reached without the page being drawn for this
+            # restore, so nothing has been chosen: that means everything.
+            return everything, True
+        wanted = reinstall_mod.chosen(everything, self.data.software_selected)
+        return wanted, len(wanted) == len(everything)
+
     def _start_install(self) -> None:
         artifacts = self._software_to_install()
         if artifacts is None:
@@ -2751,24 +2847,26 @@ class WinMigrateWizard:
         self.install_bar.configure(mode="indeterminate", value=0)
         self.install_bar.start(14)
         self.install_status.configure(text="Asking winget for the first package\u2026")
-        log.info("installing software from %s", artifacts.winget_import)
+        import_file = Path(str(artifacts.winget_import))
+        wanted, everything = self._chosen_packages(import_file)
+        log.info(
+            "installing software from %s: %s", import_file,
+            "all of it" if everything else f"{len(wanted)} chosen program(s)",
+        )
         threading.Thread(
-            target=self._install_worker,
-            args=(Path(str(artifacts.winget_import)),),
-            daemon=True,
+            target=self._install_worker, args=(import_file, wanted, everything), daemon=True,
         ).start()
 
-    def _install_worker(self, import_file: Path) -> None:
+    def _install_worker(self, import_file: Path, wanted: list, everything: bool) -> None:
         from .. import reinstall as reinstall_mod  # noqa: PLC0415
 
         try:
-            wanted = reinstall_mod.packages(import_file)
             if not wanted:
                 run = reinstall_mod.InstallRun(0)
             elif self._can_install_programs():
                 run = self._install_here(wanted)
             else:
-                run = self._install_elevated(import_file, wanted)
+                run = self._install_elevated(import_file, wanted, everything)
             self.events.put(("installed", run))
         except Exception as exc:  # noqa: BLE001 -- surfaced in the window
             log.warning("the install could not be run", exc_info=True)
@@ -2800,7 +2898,7 @@ class WinMigrateWizard:
         stopped = self._install_stop.is_set() or any(r.outcome == "stopped" for r in results)
         return reinstall_mod.InstallRun(len(wanted), results, "stopped" if stopped else None)
 
-    def _install_elevated(self, import_file: Path, wanted: list) -> Any:
+    def _install_elevated(self, import_file: Path, wanted: list, everything: bool = True) -> Any:
         """Install with administrator rights, asked for here rather than earlier.
 
         The tick on the first page is the tidy way: agree before anything has
@@ -2823,8 +2921,14 @@ class WinMigrateWizard:
             results_file.unlink()
         except OSError:
             pass
+        # The helper reads the same list this did. When only some were ticked
+        # it is told which, in a file: ninety ids are too many for a command
+        # line to be a comfortable place for them.
+        only = None if everything else reinstall_mod.write_selection(
+            directory, [package.identifier for package in wanted]
+        )
         helper = reinstall_mod.helper_command(
-            import_file, results_file, directory / "install.log"
+            import_file, results_file, directory / "install.log", only=only
         )
         if helper is None:
             log.warning("no console build beside this program; cannot install elevated")
@@ -2994,6 +3098,15 @@ class WinMigrateWizard:
                 "again from your own account."
             )
         return lines
+
+    def _install_from_last_page(self) -> None:
+        """Install after all, or again.
+
+        Again means the same programs, straight away -- the usual reason is a
+        mis-clicked No. After skipping it means choosing first, so it goes to
+        the page with the list.
+        """
+        self._show(Step.SOFTWARE if self.install_result is None else Step.INSTALLING)
 
     def _install_again_label(self) -> str:
         """What the finished page's install button says, or "" for no button.

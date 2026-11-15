@@ -192,6 +192,9 @@ def _add_reinstall_arguments(parser: argparse.ArgumentParser) -> None:
     # written as each finishes, which the window reads while it waits. Hidden
     # because it is plumbing, not something to type.
     parser.add_argument("--results", type=Path, help=argparse.SUPPRESS)
+    # And which programs: a JSON list of package ids the window wrote when
+    # somebody ticked only some of them.
+    parser.add_argument("--only", type=Path, help=argparse.SUPPRESS)
 
 
 def _add_capture_arguments(parser: argparse.ArgumentParser) -> None:
@@ -889,14 +892,20 @@ def _put_back_login_programs(directory: Path, console: Console) -> None:
         console.print(f"  {mark}  {result.name}{detail}")
 
 
-def _install_apps(import_file: Path, results_file: Path | None, console: Console) -> None:
+def _install_apps(
+    import_file: Path, results_file: Path | None, console: Console,
+    only: "set[str] | None" = None,
+) -> None:
     """Install each package on its own, saying what happened to each."""
     from . import reinstall as reinstall_mod
     from .util import process as process_mod
 
-    wanted = reinstall_mod.packages(import_file)
+    wanted = reinstall_mod.chosen(reinstall_mod.packages(import_file), only)
     if not wanted:
-        console.print("[yellow]The winget file lists no packages.[/yellow]")
+        console.print(
+            "[yellow]None of the chosen programs are in the winget file.[/yellow]"
+            if only is not None else "[yellow]The winget file lists no packages.[/yellow]"
+        )
         return
     if results_file is not None:
         # A fresh file per run: answers from an earlier attempt must not be
@@ -997,7 +1006,13 @@ def cmd_reinstall(args: argparse.Namespace, console: Console) -> int:
             console.print("[yellow]No winget import file in this folder.[/yellow]")
             status = 1
         else:
-            _install_apps(artifacts.winget_import, args.results, console)
+            only = None
+            if args.only is not None:
+                try:
+                    only = reinstall_mod.read_selection(args.only)
+                except ValueError as exc:
+                    raise ConfigError(str(exc)) from exc
+            _install_apps(artifacts.winget_import, args.results, console, only)
             # Not for the window's helper: that runs as whoever typed the
             # administrator password, and login programs belong to the person
             # whose machine this is. The window puts them back itself.

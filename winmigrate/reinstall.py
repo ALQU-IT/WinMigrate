@@ -236,7 +236,8 @@ def console_command() -> str:
 
 
 def helper_command(
-    import_file: Path, results_file: Path, log_file: Path | None = None
+    import_file: Path, results_file: Path, log_file: Path | None = None,
+    only: Path | None = None,
 ) -> tuple[str, list[str]] | None:
     """What the window elevates to install the programs: this tool, not winget.
 
@@ -268,6 +269,9 @@ def helper_command(
     ]
     if log_file is not None:
         arguments += ["--log-file", str(log_file)]
+    if only is not None:
+        # The programs that were ticked, when that is not all of them.
+        arguments += ["--only", str(only)]
     if not getattr(sys, "frozen", False):
         return sys.executable, ["-m", "winmigrate", *arguments]
     console_build = Path(sys.executable).with_name(CONSOLE_BUILD)
@@ -741,6 +745,63 @@ def packages(import_file: Path) -> list[Package]:
                 seen.add(identifier)
                 found.append(Package(identifier, name))
     return found
+
+
+#: The programs somebody ticked, for the window's elevated helper: a JSON list
+#: of package ids beside the install files. Only written when the choice is
+#: not "all of them".
+SELECTION_FILE = "install-selection.json"
+
+
+def display_names(manifest: dict[str, Any] | None) -> dict[str, str]:
+    """Package id (lower-cased) -> the name Windows showed for that program.
+
+    "Mozilla.Firefox" is winget's name for it. The person choosing what to
+    install knows it as "Mozilla Firefox", which is what the old machine's
+    list of installed programs called it and what the backup recorded.
+    """
+    software = _record_for(manifest or {}, "software") or {}
+    names: dict[str, str] = {}
+    for app in _as_list(software.get("applications")):
+        if not isinstance(app, dict):
+            continue
+        identifier, name = app.get("winget_id"), app.get("name")
+        if isinstance(identifier, str) and isinstance(name, str) and name.strip():
+            names.setdefault(identifier.lower(), " ".join(name.split()))
+    return names
+
+
+def chosen(wanted: list[Package], only: "set[str] | frozenset[str] | None") -> list[Package]:
+    """``wanted`` narrowed to the ticked ones, in the order they were listed.
+
+    ``only`` is None for "everything". Compared without regard to case, as
+    winget does.
+    """
+    if only is None:
+        return list(wanted)
+    keep = {identifier.lower() for identifier in only}
+    return [package for package in wanted if package.identifier.lower() in keep]
+
+
+def write_selection(directory: Path, identifiers: list[str]) -> Path:
+    path = directory / SELECTION_FILE
+    path.write_text(json.dumps(sorted(identifiers), indent=2), encoding="utf-8")
+    return path
+
+
+def read_selection(path: Path) -> set[str]:
+    """The ids in a selection file. Raises ValueError when it is not one.
+
+    Not "everything" on a file that cannot be read: somebody who ticked three
+    programs and got ninety-seven would have every reason to be angry.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ValueError(f"could not read {path.name}: {exc}") from exc
+    if not isinstance(data, list) or not all(isinstance(entry, str) for entry in data):
+        raise ValueError(f"{path.name} is not a list of programs")
+    return set(data)
 
 
 def package_identifiers(import_file: Path) -> list[str]:

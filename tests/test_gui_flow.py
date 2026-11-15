@@ -1417,9 +1417,12 @@ def test_a_restore_with_software_stops_to_offer_it(monkeypatch, bundle: Path, tm
     wizard._show(Step.SOFTWARE)
 
     assert "2 application(s) can be installed for you" in wizard.software_text.cget("text")
-    listed = written(wizard.software_box)
-    assert "Mozilla.Firefox" in listed and "7zip.7zip" in listed
+    assert set(wizard.software_tree.rows) == {"Mozilla.Firefox", "7zip.7zip"}
     assert "3 more have no package" in wizard.software_text.cget("text")
+    # Everything is ticked to begin with: that is what moving house means.
+    assert all(row[0] == "☑" for row in wizard.software_tree.rows.values())
+    assert wizard.software_all.get() is True
+    assert wizard.software_count.cget("text") == "2 of 2 selected"
 
 
 def test_a_restore_with_no_software_does_not_show_an_empty_page(
@@ -2674,3 +2677,149 @@ def test_the_last_page_lists_the_organisations_programs_and_opens_the_list(
     artifacts.company_count = 0
     wizard._show(Step.RESTORE_DONE)
     assert not wizard.company_apps_button._packed
+
+
+# --- choosing which programs -------------------------------------------------
+def test_programs_are_listed_by_the_names_the_old_machine_showed(
+    monkeypatch, bundle: Path, tmp_path: Path
+):
+    """ "Mozilla.Firefox" is winget's name for it. The person choosing knows it
+    as "Mozilla Firefox", and looks for it under M, not under the publisher."""
+    wizard = _finished_restore(monkeypatch, bundle, tmp_path)
+    _with_software(wizard, tmp_path, ["Mozilla.Firefox", "7zip.7zip", "Odd.Package"])
+    wizard.restore_report.manifest = {"items": [{
+        "id": "software:inventory", "category": "software", "kind": "record",
+        "record": {"applications": [
+            {"name": "Mozilla Firefox (x64 de)", "winget_id": "Mozilla.Firefox"},
+            {"name": "Seven Zip 23.01", "winget_id": "7zip.7zip"},
+        ]},
+    }]}
+
+    wizard._show(Step.SOFTWARE)
+
+    rows = wizard.software_tree.rows
+    # In the order of the names, which is not the order of winget's ids.
+    assert list(rows) == ["Mozilla.Firefox", "Odd.Package", "7zip.7zip"]
+    assert rows["Mozilla.Firefox"][1:] == ("Mozilla Firefox (x64 de)", "Mozilla.Firefox")
+    # No name on record: the id stands in for it, once.
+    assert rows["Odd.Package"][1:] == ("Odd.Package", "")
+
+
+def test_only_the_ticked_programs_are_installed(monkeypatch, bundle: Path, tmp_path: Path):
+    from winmigrate.util import process
+
+    wizard = _finished_restore(monkeypatch, bundle, tmp_path)
+    _with_software(wizard, tmp_path, ["Mozilla.Firefox", "7zip.7zip", "Git.Git"])
+    wizard._show(Step.SOFTWARE)
+
+    wizard._toggle_software("7zip.7zip")
+
+    assert wizard.software_tree.rows["7zip.7zip"][0] == "☐"
+    assert wizard.software_all.get() is False
+    assert wizard.software_count.cget("text") == "2 of 3 selected"
+
+    installed: list[str] = []
+
+    def fake_stream(command, on_line, timeout=0, cancelled=None):
+        installed.append(command[command.index("--id") + 1])
+        return process.CommandResult(command, 0, "ok")
+
+    monkeypatch.setattr(process, "stream", fake_stream)
+    wizard._go_next()
+    assert pump(wizard, until=("installed", "install-failed")) == "installed"
+
+    assert sorted(installed) == ["Git.Git", "Mozilla.Firefox"]
+    # Counted against what was asked for, not against the whole list.
+    assert "2 of 2 program(s) installed" in wizard.restore_done_text.cget("text")
+    assert not wizard.install_again_button._packed
+
+
+def test_all_programs_ticks_everything_and_unticking_it_clears_the_list(
+    monkeypatch, bundle: Path, tmp_path: Path
+):
+    wizard = _finished_restore(monkeypatch, bundle, tmp_path)
+    _with_software(wizard, tmp_path, ["Mozilla.Firefox", "7zip.7zip"])
+    wizard._show(Step.SOFTWARE)
+
+    wizard._set_all_software(False)
+    assert wizard.data.software_selected == set()
+    assert all(row[0] == "☐" for row in wizard.software_tree.rows.values())
+    # "Install them" with nothing ticked is a button that would do nothing.
+    assert wizard.next_button.state == "disabled"
+    assert "skip" in wizard.hint.cget("text").lower()
+
+    wizard._toggle_software("Mozilla.Firefox")
+    assert wizard.next_button.state == "normal"
+    assert wizard.software_all.get() is False
+
+    wizard._set_all_software(True)
+    assert wizard.data.software_selected == {"Mozilla.Firefox", "7zip.7zip"}
+    assert wizard.software_all.get() is True
+
+    # Ticking the last one by hand is "all programs" too.
+    wizard._toggle_software("7zip.7zip")
+    wizard._toggle_software("7zip.7zip")
+    assert wizard.software_all.get() is True
+    # And a click on something that is not a row changes nothing.
+    wizard._toggle_software("")
+    assert wizard.data.software_selected == {"Mozilla.Firefox", "7zip.7zip"}
+
+
+def test_the_administrator_window_is_told_which_programs_were_ticked(
+    monkeypatch, bundle: Path, tmp_path: Path
+):
+    """The elevated installer reads the same list the page did. Ticking three
+    of ninety-seven and getting all of them would be the worst way to find out
+    the choice was only on the screen."""
+    from winmigrate import reinstall as reinstall_mod
+    from winmigrate.gui import elevate
+
+    monkeypatch.setattr(elevate, "is_windows", lambda: True)
+    monkeypatch.setattr(elevate, "is_elevated", lambda: False)
+    wizard = _finished_restore(monkeypatch, bundle, tmp_path)
+    _with_software(wizard, tmp_path, ["Mozilla.Firefox", "7zip.7zip", "Git.Git"])
+    wizard._show(Step.SOFTWARE)
+    wizard._toggle_software("Git.Git")
+
+    started: list[list[str]] = []
+
+    def helper(executable, arguments):
+        started.append(arguments)
+        results = Path(arguments[arguments.index("--results") + 1])
+        results.write_text("".join(
+            json.dumps({"id": name, "outcome": "installed"}) + "\n"
+            for name in ("7zip.7zip", "Mozilla.Firefox")
+        ), encoding="utf-8")
+        return 4242
+
+    monkeypatch.setattr(elevate, "start_elevated", helper)
+    monkeypatch.setattr(elevate, "wait_for", lambda handle, waiting=None, **k: 0)
+    wizard._go_next()
+    assert pump(wizard, until=("installed", "install-failed")) == "installed"
+
+    (arguments,) = started
+    only = Path(arguments[arguments.index("--only") + 1])
+    assert reinstall_mod.read_selection(only) == {"Mozilla.Firefox", "7zip.7zip"}
+    assert "2 of 2 program(s) installed" in wizard.restore_done_text.cget("text")
+
+    # Everything ticked needs no such file: the helper installs the whole list.
+    wizard._show(Step.SOFTWARE)
+    wizard._set_all_software(True)
+    wizard._go_next()
+    assert pump(wizard, until=("installed", "install-failed")) == "installed"
+    assert "--only" not in started[-1]
+
+
+def test_installing_after_skipping_goes_back_to_the_list_with_the_ticks_kept(
+    monkeypatch, bundle: Path, tmp_path: Path
+):
+    wizard = _finished_restore(monkeypatch, bundle, tmp_path)
+    _with_software(wizard, tmp_path, ["Mozilla.Firefox", "7zip.7zip"])
+    wizard._show(Step.SOFTWARE)
+    wizard._toggle_software("7zip.7zip")
+    wizard._show(Step.RESTORE_DONE)          # "Skip this"
+
+    wizard._install_from_last_page()
+
+    assert wizard.step is Step.SOFTWARE
+    assert wizard.data.software_selected == {"Mozilla.Firefox"}

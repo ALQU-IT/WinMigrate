@@ -270,6 +270,10 @@ class WizardData:
     dry_run: bool = False
     overwrite: bool = False
     restore_done: bool = False
+    #: The programs the restore can install, and the ones ticked on the
+    #: software page, by package id.
+    software_total: int = 0
+    software_selected: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True, slots=True)
@@ -379,8 +383,11 @@ def check(step: Step, data: WizardData) -> Check:
         return Check(True)
 
     if step is Step.SOFTWARE:
-        # Always passable. Installing is the offer, not the requirement: the
-        # page carries its own way past, and a restore is finished either way.
+        # Installing is the offer, not the requirement: the page carries its
+        # own way past, and a restore is finished either way. But "Install
+        # them" with nothing ticked is a button that would do nothing.
+        if data.software_total and not data.software_selected:
+            return Check(False, "Tick the programs to install, or skip this step.")
         return Check(True)
 
     if step is Step.RESTORE_DONE:

@@ -842,3 +842,61 @@ def test_bonjour_is_installed_and_its_windows_warning_is_explained(tmp_path: Pat
     assert "mdnsNSP.dll" in result.detail and "still works" in result.detail
     plain = reinstall.classify(reinstall.Package("Git.Git"), CommandResult([], 0, ""))
     assert plain.detail == ""
+
+
+# --- choosing which programs -------------------------------------------------
+def test_the_ticked_programs_are_kept_in_the_order_they_were_listed():
+    wanted = [reinstall.Package(p) for p in ("A.A", "B.B", "C.C")]
+    assert reinstall.chosen(wanted, None) == wanted
+    assert [p.identifier for p in reinstall.chosen(wanted, {"c.c", "A.A"})] == ["A.A", "C.C"]
+    assert reinstall.chosen(wanted, set()) == []
+
+
+def test_a_selection_that_cannot_be_read_is_not_everything(tmp_path: Path):
+    """Somebody who ticked three programs and got ninety-seven would have every
+    reason to be angry."""
+    path = reinstall.write_selection(tmp_path, ["B.B", "A.A"])
+    assert reinstall.read_selection(path) == {"A.A", "B.B"}
+
+    for bad in ('{"not": "a list"}', "[1, 2]", "not json"):
+        path.write_text(bad, encoding="utf-8")
+        with pytest.raises(ValueError):
+            reinstall.read_selection(path)
+    with pytest.raises(ValueError):
+        reinstall.read_selection(tmp_path / "missing.json")
+
+
+def test_the_command_line_installs_only_what_it_is_told_to(tmp_path: Path, monkeypatch):
+    from winmigrate.cli import main
+
+    directory = tmp_path / reinstall.ARTIFACTS_DIRECTORY
+    directory.mkdir()
+    _export(directory, [(None, ["A.A", "B.B", "C.C"])])
+    only = reinstall.write_selection(directory, ["B.B"])
+    monkeypatch.setattr(reinstall, "install_flags", lambda runner=None: ())
+    ran: list[str] = []
+    monkeypatch.setattr(
+        reinstall.process, "run_visible",
+        lambda command, timeout=0: ran.append(command[command.index("--id") + 1])
+        or CommandResult(command, 0, ""),
+    )
+
+    assert main(["reinstall", str(directory), "--apps", "--yes", "--only", str(only)]) == 0
+    assert ran == ["B.B"]
+
+    # A file that is not a selection stops the install rather than widening it.
+    only.write_text("garbage", encoding="utf-8")
+    ran.clear()
+    assert main(["reinstall", str(directory), "--apps", "--yes", "--only", str(only)]) == 2
+    assert ran == []
+
+
+def test_names_come_from_what_the_old_machine_called_each_program():
+    manifest = manifest_with(("software", {"applications": [
+        {"name": "Mozilla  Firefox\n(x64)", "winget_id": "Mozilla.Firefox"},
+        {"name": "No Package"},
+        {"name": "", "winget_id": "Blank.Name"},
+        "nonsense",
+    ]}))
+    assert reinstall.display_names(manifest) == {"mozilla.firefox": "Mozilla Firefox (x64)"}
+    assert reinstall.display_names(None) == {}
