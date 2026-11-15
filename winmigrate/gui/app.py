@@ -1018,6 +1018,9 @@ class WinMigrateWizard:
         self.reinstall_button = ttk.Button(
             page, text="Open the reinstall folder…", command=self._open_reinstall_folder
         )
+        self.company_apps_button = ttk.Button(
+            page, text="Show my organisation's programs…", command=self._open_company_apps
+        )
         # The way back to the install. This page is the end of the wizard and
         # Back is off -- a restore cannot be undone by a button -- so without
         # this, "press Install again" named a button nobody could reach, and a
@@ -2706,6 +2709,12 @@ class WinMigrateWizard:
                 f"{manual} more have no package and stay on the list at the end "
                 "for you to fetch by hand."
             )
+        company = getattr(artifacts, "company_count", 0)
+        if company and getattr(artifacts, "company_managed", False):
+            lines.append(
+                f"{company} came from your organisation and are left to Company "
+                "Portal; the last page has the list."
+            )
         self.software_text.configure(text="\n".join(lines))
         for identifier in packages:
             self.software_box.insert("end", f"{identifier}\n")
@@ -3109,6 +3118,7 @@ class WinMigrateWizard:
             )
         if getattr(artifacts, "office_configuration", None):
             lines.append("  an Office configuration matching the old install was written")
+        lines += self._company_lines(artifacts)
         lines.append(f"  Files: {directory}")
         # Both commands, because they are not the same one: the bare command
         # prints the plan and installs nothing, which is the whole point of it.
@@ -3116,6 +3126,30 @@ class WinMigrateWizard:
         lines.append(f'  To see the plan:  {program} reinstall "{directory}"')
         lines.append(f'  To install them:  {program} reinstall "{directory}" --apps')
         return lines
+
+    def _company_lines(self, artifacts: Any) -> list[str]:
+        """The programs the organisation installed, and who installs them now."""
+        count = getattr(artifacts, "company_count", 0)
+        if not count:
+            return []
+        if getattr(artifacts, "company_managed", False):
+            return [
+                f"  {count} came from your organisation (Company Portal) and are left "
+                "to it: the required ones install by themselves, and the button "
+                "below lists the rest, each with a link"
+            ]
+        return [
+            f"  {count} came from your organisation (Company Portal). This PC is not "
+            "managed by it, so the ones with a public version are reinstalled with "
+            "the rest; the button below lists them all"
+        ]
+
+    def _open_company_apps(self) -> None:
+        artifacts = getattr(self.restore_report, "artifacts", None)
+        path = getattr(artifacts, "company_apps", None)
+        if path:
+            # A web page: Explorer hands it to whichever browser is the default.
+            self._open_folder(Path(str(path)))
 
     def _program_name(self) -> str:
         """What to call this program in an instruction the user has to type.
@@ -3183,6 +3217,12 @@ class WinMigrateWizard:
             )
         else:
             self.reinstall_button.pack_forget()
+        if getattr(getattr(report, "artifacts", None), "company_apps", None):
+            self.company_apps_button.pack(
+                anchor="w", pady=(0, 10), before=self.followup_holder
+            )
+        else:
+            self.company_apps_button.pack_forget()
         again = self._install_again_label()
         if again:
             self.install_again_button.configure(text=again)

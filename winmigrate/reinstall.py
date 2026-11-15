@@ -29,6 +29,10 @@ ARTIFACTS_DIRECTORY = "WinMigrate-Reinstall"
 WINGET_IMPORT_FILE = "winget-import.json"
 OFFICE_CONFIG_FILE = "office-configuration.xml"
 MANUAL_LIST_FILE = "reinstall-by-hand.md"
+#: The programs the organisation installed, each with a link to its page in
+#: Company Portal. A web page rather than a text file because the links are
+#: the point of it: one click each, in whatever browser opens.
+COMPANY_APPS_FILE = "company-portal-apps.html"
 #: The login programs, kept beside the install files so the command-line
 #: install can put them back once there are programs for them to start. Not a
 #: secret: the same record is in the plaintext listing beside every bundle.
@@ -51,16 +55,33 @@ class Artifacts:
     launcher_count: int = 0
     office: OfficeInstallation | None = None
     notes: list[str] = field(default_factory=list)
+    #: The list of programs the organisation installed, and how many.
+    company_apps: Path | None = None
+    company_count: int = 0
+    #: Is the machine being restored onto managed by an organisation? When it
+    #: is, those programs are left to Company Portal; when it is not, they are
+    #: reinstalled like any other, because Company Portal will not have them.
+    company_managed: bool = False
 
     @property
     def anything_to_do(self) -> bool:
-        return bool(self.winget_import or self.office_configuration or self.manual_count)
+        return bool(
+            self.winget_import or self.office_configuration or self.manual_count
+            or self.company_count
+        )
 
 
-def write_artifacts(manifest: dict[str, Any], destination: Path) -> Artifacts:
-    """Write the reinstall inputs from a restored manifest. Installs nothing."""
+def write_artifacts(
+    manifest: dict[str, Any], destination: Path, company_managed: bool = False
+) -> Artifacts:
+    """Write the reinstall inputs from a restored manifest. Installs nothing.
+
+    ``company_managed`` says whether *this* machine is managed by an
+    organisation (see :func:`winmigrate.scan.intune.is_enrolled`). It decides
+    what happens to the programs the old machine got from Company Portal.
+    """
     directory = destination / ARTIFACTS_DIRECTORY
-    artifacts = Artifacts(directory=directory)
+    artifacts = Artifacts(directory=directory, company_managed=company_managed)
 
     software = _record_for(manifest, "software")
     office_record = _record_for(manifest, "office")
@@ -88,6 +109,31 @@ def write_artifacts(manifest: dict[str, Any], destination: Path) -> Artifacts:
             for app in _as_list(software.get("applications"))
             if isinstance(app, dict) and not app.get("shipped_with_windows")
         ]
+        company = company_apps(software)
+        artifacts.company_count = len(company)
+        left_to_portal: set[str] = set()
+        if company:
+            path = directory / COMPANY_APPS_FILE
+            path.write_text(company_apps_page(company, company_managed), encoding="utf-8")
+            artifacts.company_apps = path
+        if company and company_managed:
+            # Company Portal has them here, in the organisation's own build.
+            # Fetching the public one as well leaves Intune looking at a
+            # program it did not install. So they come off both other lists.
+            left_to_portal = {
+                str(app.get("winget_id")).lower()
+                for app in applications
+                if app.get("company_portal") and app.get("winget_id")
+            }
+            applications = [app for app in applications if not app.get("company_portal")]
+            export = _without_packages(export, left_to_portal)
+            if isinstance(export, dict) and not any(
+                _as_list(source.get("Packages"))
+                for source in _as_list(export.get("Sources")) if isinstance(source, dict)
+            ):
+                # Everything winget could have installed is the organisation's.
+                # A file listing nothing would still offer an Install button.
+                export = None
         # Dropped here, once, rather than filtered out of each list below:
         # what came with Windows is on the new machine already, so it is
         # neither something to reinstall nor a chore to write down. The scan
@@ -287,6 +333,104 @@ def without_versions(export: Any) -> Any:
                 else package
                 for package in packages
             ]
+        sources.append(entry)
+    copy["Sources"] = sources
+    return copy
+
+
+def company_apps(software: dict[str, Any]) -> list[dict[str, Any]]:
+    """The programs the organisation installed, as the backup recorded them.
+
+    Checked field by field: this comes out of a bundle, and ends up in a web
+    page. An id that is not an id is dropped, so nothing from a bundle can
+    become part of a link.
+    """
+    import re  # noqa: PLC0415
+
+    record = software.get("company_portal")
+    if not isinstance(record, dict):
+        return []
+    guid = re.compile(r"^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
+    found: list[dict[str, Any]] = []
+    for app in _as_list(record.get("apps")):
+        if not isinstance(app, dict):
+            continue
+        name = " ".join(str(app.get("name") or "").split())[:200]
+        identifier = str(app.get("id") or "").lower()
+        if not guid.match(identifier):
+            identifier = ""
+        if not name and not identifier:
+            continue
+        found.append({"name": name, "id": identifier})
+    return sorted(found, key=lambda app: (not app["name"], app["name"].lower(), app["id"]))
+
+
+#: The web Company Portal. Microsoft documents "/apps/[appID]" as opening the
+#: page of that app.
+PORTAL_URL = "https://portal.manage.microsoft.com/apps"
+
+
+def company_apps_page(apps: list[dict[str, Any]], company_managed: bool) -> str:
+    """The list of the organisation's programs, as a page of links."""
+    from html import escape  # noqa: PLC0415
+
+    if company_managed:
+        advice = (
+            "This PC is managed by your organisation, so these were <b>not</b> "
+            "reinstalled from anywhere else. Programs your organisation requires "
+            "install by themselves, usually within a few hours of signing in. "
+            "For the rest, click the name, sign in with your work account, and "
+            "press <b>Install</b>."
+        )
+    else:
+        advice = (
+            "This PC is <b>not</b> managed by your organisation, so Company Portal "
+            "cannot install these here. The ones with a public version were "
+            "reinstalled with your other programs; any that are still missing are "
+            "your organisation's own, and your IT department is the place to ask."
+        )
+    rows = []
+    for app in apps:
+        name = escape(app["name"] or "A program without a name in the old PC's records")
+        if app["id"]:
+            link = f"{PORTAL_URL}/{app['id']}"
+            rows.append(f'<li><a href="{escape(link, quote=True)}">{name}</a></li>')
+        else:
+            rows.append(f"<li>{name} <small>(find it in Company Portal by name)</small></li>")
+    return (
+        "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\n"
+        "<title>Programs from your organisation</title>\n"
+        "<style>body{font:16px/1.5 'Segoe UI',sans-serif;max-width:44em;margin:2em auto;"
+        "padding:0 1em}li{margin:.35em 0}small{color:#666}</style></head><body>\n"
+        "<h1>Programs from your organisation</h1>\n"
+        f"<p>Your old PC had {len(apps)} program(s) installed by your organisation "
+        "through Company Portal.</p>\n"
+        f"<p>{advice}</p>\n"
+        f"<ul>\n{chr(10).join(rows)}\n</ul>\n"
+        f'<p>You can also open <a href="{PORTAL_URL}">Company Portal</a> itself, or the '
+        "Company Portal app from the Start menu, and install from there.</p>\n"
+        "<p><small>Written by WinMigrate from the old PC's own records. If Company "
+        "Portal says a program is not available, it is no longer offered to you: ask "
+        "your IT department.</small></p>\n</body></html>\n"
+    )
+
+
+def _without_packages(export: Any, identifiers: set[str]) -> Any:
+    """A copy of a winget export without the named packages."""
+    if not identifiers or not isinstance(export, dict):
+        return export
+    copy = dict(export)
+    sources = []
+    for source in _as_list(copy.get("Sources")):
+        if not isinstance(source, dict):
+            sources.append(source)
+            continue
+        entry = dict(source)
+        entry["Packages"] = [
+            package for package in _as_list(entry.get("Packages"))
+            if not (isinstance(package, dict)
+                    and str(package.get("PackageIdentifier", "")).lower() in identifiers)
+        ]
         sources.append(entry)
     copy["Sources"] = sources
     return copy

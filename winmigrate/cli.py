@@ -964,6 +964,8 @@ def cmd_reinstall(args: argparse.Namespace, console: Console) -> int:
     artifacts.winget_import = import_file if import_file.is_file() else None
     artifacts.office_configuration = config_file if config_file.is_file() else None
     artifacts.manual_list = manual_file if manual_file.is_file() else None
+    company_file = directory / reinstall_mod.COMPANY_APPS_FILE
+    artifacts.company_apps = company_file if company_file.is_file() else None
     if artifacts.winget_import:
         export = json.loads(artifacts.winget_import.read_text(encoding="utf-8"))
         artifacts.reinstallable_count = sum(

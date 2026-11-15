@@ -102,6 +102,7 @@ winmigrate/
     syncroots.py     OneDrive and Nextcloud detection (config-read only)
     unsynced.py      files in a sync folder its client has not uploaded yet
     software.py      installed-software inventory (registry + winget + Appx)
+    intune.py        which programs the organisation installed (Company Portal)
     office.py        Click-to-Run detection and licence status (no key extraction)
     devconfig.py     developer/credential config (encrypted-only, secret items)
     browsers.py      browser profiles + sign-in/sync detection (config-read only)
@@ -330,6 +331,17 @@ Two rules keep the numbers honest:
   a different file already there, writing the backup's copy beside it as
   "name (from the old PC)". A client that does not report the state is left
   alone, with a note, rather than guessed at.
+* **Company apps go back to the company.** A program installed by Intune
+  (through Company Portal, or pushed) is found from Intune's own records:
+  `EnterpriseDesktopAppManagement` for MSI packages, matched exactly by product
+  code, and the Intune agent's `Win32Apps` key for packaged apps, named from
+  the agent's logs and matched to installed programs by name, strictly. Only
+  an app's id and name are taken from a log line; the rest of the policy,
+  install command included, is never kept. The scan only flags them. The
+  restore decides: on a machine Intune manages they come off the winget and
+  by-hand lists and are listed in `company-portal-apps.html`, each with its
+  documented web Company Portal link; on a private machine they are
+  reinstalled like anything else, because Company Portal will not have them.
 * **`--fast` reduces precision, not honesty.** It skips the extra walk into
   subtrees that will not be captured, so those report zero bytes rather than a
   guess.

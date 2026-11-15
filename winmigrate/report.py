@@ -245,6 +245,12 @@ def render_reinstall_plan(artifacts, console: Console) -> None:
         table.add_row(
             f"winget, one at a time ({artifacts.reinstallable_count} apps)", str(artifacts.winget_import)
         )
+    if getattr(artifacts, "company_apps", None):
+        table.add_row(
+            f"Company Portal ({artifacts.company_count} apps)"
+            if artifacts.company_count else "Company Portal",
+            f"{artifacts.company_apps} -- open it for a link to each program",
+        )
     if artifacts.office_configuration:
         office = artifacts.office
         detail = str(artifacts.office_configuration)

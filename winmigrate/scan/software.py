@@ -227,6 +227,12 @@ class SoftwareEntry:
     #: of Windows, "Store" for one the user installed. Empty for everything that
     #: is not an Appx package, and for a Windows too old to report it.
     signature_kind: str = ""
+    #: The MSI product code, when the uninstall key is named after one. It is
+    #: how an MSI the company pushed is matched to this entry, exactly.
+    product_code: str = ""
+    #: Set when Intune's records say the company installed this -- through
+    #: Company Portal, or pushed. See :mod:`winmigrate.scan.intune`.
+    company_app: dict[str, Any] | None = None
 
     @property
     def reinstallable(self) -> bool:
@@ -283,6 +289,8 @@ class SoftwareEntry:
             data["covered_by_office"] = True
         if self.managed_by:
             data["managed_by"] = self.managed_by
+        if self.company_app:
+            data["company_portal"] = dict(self.company_app)
         return data
 
 
@@ -294,6 +302,8 @@ class SoftwareInventory:
     winget_export: dict[str, Any] | None = None
     notes: list[str] = field(default_factory=list)
     join_stats: "JoinStats | None" = None
+    #: What Intune's records say: scan.intune.CompanyPortal, or None.
+    company_portal: Any = None
 
     @property
     def reinstallable(self) -> list[SoftwareEntry]:
@@ -368,12 +378,22 @@ class SoftwareInventory:
             },
             "applications": [entry.to_json() for entry in self.entries],
             "winget_export": self.winget_export,
+            **(
+                {"company_portal": self.company_portal.to_json()}
+                if self.company_portal is not None and self.company_portal.apps else {}
+            ),
             "diagnostics": self.join_stats.to_json() if self.join_stats else {},
             "notes": list(self.notes),
         }
 
 
 # --- registry --------------------------------------------------------------
+#: An uninstall key named after an MSI product code.
+PRODUCT_CODE_PATTERN = re.compile(
+    r"^\{[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\}$"
+)
+
+
 def read_registry_entries(env: Environment) -> list[SoftwareEntry]:
     """Enumerate the uninstall keys, skipping updates and system components."""
     entries: list[SoftwareEntry] = []
@@ -382,6 +402,8 @@ def read_registry_entries(env: Environment) -> list[SoftwareEntry]:
             values = env.read_registry_key(hive, f"{key}\\{subkey}") or {}
             entry = _entry_from_registry(values, hive, key)
             if entry is not None:
+                if PRODUCT_CODE_PATTERN.match(subkey):
+                    entry.product_code = subkey.upper()
                 entries.append(entry)
     return entries
 
@@ -1238,6 +1260,7 @@ def merge(
         # Only the Appx half of a merged pair carries this, and it is the half
         # that knows whether Windows brought the thing along.
         existing.signature_kind = existing.signature_kind or entry.signature_kind
+        existing.product_code = existing.product_code or entry.product_code
 
     entries = list(merged.values())
     stats = apply_winget_listings(entries, listings) if listings else None
@@ -1324,6 +1347,8 @@ def scan_software(env: Environment) -> SoftwareInventory:
                 + ")"
             )
 
+    _note_company_apps(env, inventory)
+
     stats = inventory.join_stats
     if stats and stats.unjoined_rows_with_package:
         # winget knows a package for these, but its display name did not join to
@@ -1335,6 +1360,34 @@ def scan_software(env: Environment) -> SoftwareInventory:
             f"(examples: {', '.join(stats.unjoined_identifiers[:5])})"
         )
     return inventory
+
+
+def _note_company_apps(env: Environment, inventory: SoftwareInventory) -> None:
+    """Mark what the company installed, so the restore can leave it to them.
+
+    Nothing is taken off any list here. Whether a company app should be left
+    to Company Portal depends on whether the *new* machine is managed by the
+    same company, and only the restore can know that.
+    """
+    from . import intune  # noqa: PLC0415
+
+    try:
+        portal = intune.scan(env)
+        if not portal.apps:
+            return
+        matched = intune.match(portal, inventory.entries)
+    except Exception:  # noqa: BLE001 -- the inventory is worth more than this
+        log.warning("could not read Intune's records", exc_info=True)
+        return
+    if not portal.apps:
+        return
+    inventory.company_portal = portal
+    inventory.notes.append(
+        f"{len(portal.apps)} program(s) were installed by your organisation "
+        f"(Company Portal); {matched} of them were matched to the list of "
+        "installed programs. On a new machine your organisation manages they are "
+        "left to Company Portal instead of being reinstalled from elsewhere"
+    )
 
 
 #: Click-to-Run products register one uninstall entry per product and language.

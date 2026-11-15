@@ -2636,3 +2636,41 @@ def test_winget_missing_for_the_administrator_is_not_called_missing_from_the_mac
     text = wizard.restore_done_text.cget("text")
     assert "not set up for the administrator account" in text
     assert "Microsoft Store" not in text
+
+
+# --- programs from the organisation ------------------------------------------
+def test_the_last_page_lists_the_organisations_programs_and_opens_the_list(
+    monkeypatch, bundle: Path, tmp_path: Path
+):
+    wizard = _finished_restore(monkeypatch, bundle, tmp_path)
+    _with_software(wizard, tmp_path, ["Mozilla.Firefox"])
+    artifacts = wizard.restore_report.artifacts
+    page = artifacts.directory / "company-portal-apps.html"
+    page.write_text("<html></html>", encoding="utf-8")
+    artifacts.company_apps = page
+    artifacts.company_count = 4
+    artifacts.company_managed = True
+
+    wizard._show(Step.SOFTWARE)
+    assert "4 came from your organisation" in wizard.software_text.cget("text")
+
+    wizard._show(Step.RESTORE_DONE)
+    text = wizard.restore_done_text.cget("text")
+    assert "4 came from your organisation" in text and "left" in text
+    assert wizard.company_apps_button._packed
+
+    opened: list[Path] = []
+    monkeypatch.setattr(wizard, "_open_folder", opened.append)
+    wizard._open_company_apps()
+    assert opened == [page]
+
+    # On a machine the organisation does not manage, the sentence is the other one.
+    artifacts.company_managed = False
+    wizard._show(Step.RESTORE_DONE)
+    assert "not managed" in wizard.restore_done_text.cget("text")
+
+    # And with no such programs there is no button to wonder about.
+    artifacts.company_apps = None
+    artifacts.company_count = 0
+    wizard._show(Step.RESTORE_DONE)
+    assert not wizard.company_apps_button._packed

@@ -1184,12 +1184,26 @@ def _note_partial(report: RestoreReport, item: dict[str, Any]) -> None:
     )
 
 
+def _company_managed() -> bool:
+    """Is the machine being restored onto managed by an organisation (Intune)?"""
+    try:
+        from .platform_win import Environment  # noqa: PLC0415
+        from .scan import intune  # noqa: PLC0415
+
+        return intune.is_enrolled(Environment.live())
+    except Exception:  # noqa: BLE001 -- not knowing means "treat it as a private PC"
+        log.debug("could not tell whether this machine is managed", exc_info=True)
+        return False
+
+
 def _write_reinstall_artifacts(report: RestoreReport, destination: Path) -> None:
     """Write the reinstall inputs. Installs nothing -- that is a separate step."""
     from . import reinstall as reinstall_mod  # noqa: PLC0415 -- avoid import cycle
 
     try:
-        artifacts = reinstall_mod.write_artifacts(report.manifest or {}, destination)
+        artifacts = reinstall_mod.write_artifacts(
+            report.manifest or {}, destination, company_managed=_company_managed()
+        )
     except Exception as exc:  # noqa: BLE001 -- see below
         # Deliberately broad. By this point every file has been written and
         # verified; the reinstall inputs are a convenience on top. Letting

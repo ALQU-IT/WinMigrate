@@ -625,6 +625,37 @@ def _scan_software(
     for note in inventory.notes:
         result.add_note(Severity.WARNING, f"software inventory: {note}")
 
+    portal = inventory.company_portal
+    if portal is not None and portal.apps:
+        named = sorted(app.name or app.matched for app in portal.apps if app.name or app.matched)
+        result.followups.append(
+            Followup(
+                id="software:company_portal",
+                title=f"Get your {len(portal.apps)} organisation program(s) from Company Portal",
+                why=(
+                    "These were installed by your organisation through Company Portal, "
+                    "so that is where they come from on the new machine too -- in your "
+                    "organisation's own version, with its settings and licence. If the "
+                    "new machine is managed by your organisation they are left out of "
+                    "the other install lists for that reason: "
+                    + ", ".join(named[:12])
+                    + (f" and {len(named) - 12} more" if len(named) > 12 else "")
+                    + "."
+                ),
+                steps=[
+                    "Sign in to the new machine with your work account, so it is "
+                    "managed by your organisation.",
+                    "Wait a while: programs your organisation requires install by "
+                    "themselves.",
+                    "For the rest, open WinMigrate-Reinstall\\company-portal-apps.html "
+                    "in the restore folder and click each program you still want.",
+                    "If Company Portal does not offer a program any more, ask your "
+                    "IT department.",
+                ],
+                category=Category.SOFTWARE,
+            )
+        )
+
     launchers = inventory.launchers()
     if inventory.manual:
         components = len(inventory.components)
