@@ -30,7 +30,7 @@ from ..models import (
     SyncRoot,
     utcnow,
 )
-from ..platform_win import KNOWN_FOLDERS, Environment
+from ..platform_win import KNOWN_FOLDERS, Environment, expose_cloud_placeholders
 from .. import compression
 from ..util import paths as pathutil
 from . import syncroots as syncroots_mod
@@ -56,6 +56,8 @@ def run_scan(
     env = env or _environment_for(config)
     started = time.monotonic()
 
+    # Before the first directory is listed, so every walk sees the same thing.
+    expose_cloud_placeholders(env)
     source = detect_source_machine(profile_path=str(env.profile_root))
     result = ScanResult(source=source, started_utc=utcnow(), files_only=config.files_only)
     _say_whose_profile(env, result)

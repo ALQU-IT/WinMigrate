@@ -892,6 +892,7 @@ def _put_back_login_programs(directory: Path, console: Console) -> None:
 def _install_apps(import_file: Path, results_file: Path | None, console: Console) -> None:
     """Install each package on its own, saying what happened to each."""
     from . import reinstall as reinstall_mod
+    from .util import process as process_mod
 
     wanted = reinstall_mod.packages(import_file)
     if not wanted:
@@ -924,7 +925,13 @@ def _install_apps(import_file: Path, results_file: Path | None, console: Console
         detail = f" -- {result.detail}" if result.detail and result.outcome != "already" else ""
         console.print(f"      {mark}{detail}")
 
-    results = reinstall_mod.install_packages(wanted, on_start=started, on_result=finished)
+    # In the console rather than captured: winget's own progress is what
+    # somebody watching this window wants to see, and an installer that leaves
+    # a program running cannot then hold a pipe open and stall the rest.
+    results = reinstall_mod.install_packages(
+        wanted, runner=process_mod.run_visible, flags=reinstall_mod.install_flags(),
+        on_start=started, on_result=finished,
+    )
     counts = reinstall_mod.tally(results)
     console.print(
         f"\n[bold]{counts.get('installed', 0)} installed, "

@@ -1240,3 +1240,57 @@ def test_a_restore_run_as_another_account_writes_the_owners_settings(
     assert drives and drives[0].outcome is apply_mod.Outcome.SKIPPED
     assert "account" in drives[0].detail
     assert any("different account" in note.message for note in report.notes)
+
+
+def test_a_restore_into_a_plain_folder_is_judged_against_this_accounts_real_folders(
+    tmp_path: Path, monkeypatch
+):
+    """Restoring into D:\\Restored still writes settings to this account. An
+    environment rooted at that folder would report the taskbar's shortcuts as
+    being exactly where Explorer looks -- wherever the folder is -- and the
+    pins would be written pointing at nothing."""
+    from winmigrate import accounts
+
+    live = Environment.fixture(tmp_path / "me")
+    rooted = Environment.fixture(tmp_path / "Restored")
+    monkeypatch.setattr(Environment, "live", classmethod(lambda cls: live))
+    monkeypatch.setattr(accounts, "for_profile", lambda destination: rooted)
+
+    assert restore_mod.settings_environment(tmp_path / "Restored") is live
+
+    # Somebody else's profile is the one case that does move.
+    rooted.user_sid = "S-1-5-21-1-2-3-1001"
+    assert restore_mod.settings_environment(tmp_path / "Restored") is rooted
+
+
+def test_wifi_is_not_added_to_the_wrong_account(
+    profile: Path, env: Environment, tmp_path: Path, monkeypatch
+):
+    """netsh adds a network for whoever runs it. Run as the administrator, that
+    is the administrator -- and the report would say the network was added."""
+    from winmigrate import apply as apply_mod
+
+    config = ScanConfig(profile_root=profile, include_software=False)
+    bundle = tmp_path / "wifi.dat"
+    capture_mod.capture(
+        run_scan(config, env),
+        CaptureOptions(output=bundle, passphrase=PASSPHRASE, use_vss=False), config, env,
+    )
+    destination = tmp_path / "second"
+    wifi = destination / restore_mod.WIFI_RESTORE_DIR
+    wifi.mkdir(parents=True)
+    (wifi / "Home.xml").write_text("<WLANProfile/>", encoding="utf-8")
+    owner = Environment.fixture(destination, registry={})
+    owner.user_sid = "S-1-5-21-1-2-3-1001"
+    monkeypatch.setattr(restore_mod, "settings_environment", lambda destination: owner)
+
+    added: list = []
+    monkeypatch.setattr(apply_mod, "apply_wifi", lambda *a, **k: added.append(a) or [])
+
+    report = restore_mod.restore(RestoreOptions(
+        bundle=bundle, passphrase=PASSPHRASE, destination=destination,
+    ))
+
+    assert added == [], "Wi-Fi was added for the wrong account"
+    (skipped,) = [r for r in report.applied if r.kind == "wifi"]
+    assert skipped.outcome is apply_mod.Outcome.SKIPPED and "account" in skipped.detail

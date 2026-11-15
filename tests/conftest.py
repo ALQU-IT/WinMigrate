@@ -68,3 +68,16 @@ def snapshot(root: Path) -> dict[str, int]:
         for path in sorted(root.rglob("*"))
         if path.is_file()
     }
+
+
+@pytest.fixture(autouse=True)
+def _no_real_token(monkeypatch):
+    """Keep the account running the tests out of the answers.
+
+    On a Windows build agent the real process token would be read, and what
+    kind of account the agent runs as would decide what a test sees. A test
+    that cares sets its own.
+    """
+    from winmigrate.gui import elevate
+
+    monkeypatch.setattr(elevate, "_elevation_type", lambda: None)

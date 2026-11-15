@@ -39,9 +39,30 @@ CF_STATE_SYNC_ROOT = 0x02
 CF_STATE_IN_SYNC = 0x08
 CF_STATE_INVALID = 0xFFFFFFFF
 
-#: A reparse tag with this bit is a name surrogate -- a junction or a
-#: symbolic link, which points somewhere else and is not walked into.
-REPARSE_TAG_NAME_SURROGATE = 0x20000000
+#: The Cloud Files reparse tags, IO_REPARSE_TAG_CLOUD and _CLOUD_1 to _F: one
+#: tag with a nibble that varies. Every file and folder a Cloud Files client
+#: manages -- OneDrive, and iCloud, Dropbox and Google Drive too -- carries one
+#: for as long as the client knows about it, downloaded or not.
+REPARSE_TAG_CLOUD = 0x9000001A
+REPARSE_TAG_CLOUD_MASK = 0xFFFF0FFF
+
+
+def is_link(attributes: int, tag: int) -> bool:
+    """Is this entry a junction or symbolic link -- somewhere else, not here?
+
+    A reparse point is not automatically one. A file in a Dropbox or iCloud
+    folder is a reparse point too, with a Cloud Files tag, and it is an
+    ordinary file with its bytes on this disk. Treating every reparse point as
+    a link skipped those folders whole, reported as "a junction", on any
+    machine where Windows shows the tags to this program.
+
+    Only the cloud tags are let through. Anything else with the attribute is
+    still treated as a link, as it always was: a tag this does not know is
+    not one to walk into on a guess.
+    """
+    if not attributes & FILE_ATTRIBUTE_REPARSE_POINT:
+        return False
+    return (tag & REPARSE_TAG_CLOUD_MASK) != REPARSE_TAG_CLOUD
 
 log = logging.getLogger(__name__)
 
@@ -404,6 +425,39 @@ class Environment:
             return bool(self.file_attributes(entry) & CLOUD_PLACEHOLDER_MASK)
         except OSError:
             return False
+
+
+_EXPOSED = False
+
+
+def expose_cloud_placeholders(env: "Environment") -> None:
+    """Ask Windows to show this program which files a sync client manages.
+
+    Windows can *disguise* Cloud Files placeholders: strip the reparse tag and
+    the attributes from what a directory listing reports, so that an old
+    program sees ordinary files. Whether it does so for a given program is
+    Windows' call, and Microsoft's own pages disagree on the default. A
+    program shown disguised files cannot tell what OneDrive has uploaded from
+    what it has not -- every file looks never-uploaded, or every file looks
+    plain -- so the answer is asked for rather than hoped for.
+
+    Once per process, before the first directory is listed. Changes what this
+    program is told and nothing about the files.
+    """
+    global _EXPOSED
+    if _EXPOSED or env.registry is not None or not env.is_windows:
+        return
+    _EXPOSED = True
+    try:  # pragma: no cover -- Windows only
+        import ctypes  # noqa: PLC0415
+
+        function = ctypes.WinDLL("ntdll.dll").RtlSetProcessPlaceholderCompatibilityMode
+        function.argtypes = [ctypes.c_byte]
+        function.restype = ctypes.c_byte
+        previous = int(function(2))  # PHCM_EXPOSE_PLACEHOLDERS
+        log.info("cloud placeholders exposed to this process (mode was %d)", previous)
+    except Exception as exc:  # noqa: BLE001 -- Windows before 1803
+        log.info("could not ask Windows to expose cloud placeholders: %s", exc)
 
 
 _CLDAPI: Any = None

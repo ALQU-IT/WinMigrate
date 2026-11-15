@@ -20,7 +20,7 @@ from pathlib import Path
 
 from ..config import ScanConfig
 from ..models import Note, Severity, SkippedGroup, SkipReason, SyncRoot
-from ..platform_win import CLOUD_PLACEHOLDER_MASK, FILE_ATTRIBUTE_REPARSE_POINT, Environment
+from ..platform_win import CLOUD_PLACEHOLDER_MASK, Environment, is_link
 from ..util import paths as pathutil
 from .. import compression
 from . import syncroots as syncroots_mod
@@ -274,7 +274,8 @@ def walk_tree(
                 )
                 continue
 
-            if attributes & FILE_ATTRIBUTE_REPARSE_POINT and not config.follow_reparse_points:
+            tag = getattr(stat_result, "st_reparse_tag", 0)
+            if is_link(attributes, tag) and not config.follow_reparse_points:
                 yield SkipEvent(
                     reason=SkipReason.REPARSE_POINT,
                     path=path,

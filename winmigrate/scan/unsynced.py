@@ -35,9 +35,9 @@ from ..platform_win import (
     CF_STATE_PLACEHOLDER,
     CF_STATE_SYNC_ROOT,
     CLOUD_PLACEHOLDER_MASK,
-    FILE_ATTRIBUTE_REPARSE_POINT,
-    REPARSE_TAG_NAME_SURROGATE,
     Environment,
+    expose_cloud_placeholders,
+    is_link,
 )
 from ..util import paths as pathutil
 from .userfiles import CaptureFile
@@ -125,6 +125,7 @@ def walk_unsynced(
     ``deadline`` (a ``time.monotonic()`` value) is for the preview only; when
     it passes, ``stopped`` gets True appended and the walk ends.
     """
+    expose_cloud_placeholders(env)
     stack = [root]
     looked = 0
     while stack:
@@ -148,7 +149,7 @@ def walk_unsynced(
                 continue
             attributes = getattr(stat_result, "st_file_attributes", 0)
             tag = getattr(stat_result, "st_reparse_tag", 0)
-            if attributes & FILE_ATTRIBUTE_REPARSE_POINT and tag & REPARSE_TAG_NAME_SURROGATE:
+            if is_link(attributes, tag):
                 continue  # a junction or link: somewhere else, not this folder
             if config.is_excluded(pathutil.relative_posix(path, env.profile_root), entry.name):
                 continue
@@ -177,6 +178,7 @@ def count(
     """How much under ``root`` has not been uploaded, for the preview."""
     from .. import compression  # noqa: PLC0415
 
+    expose_cloud_placeholders(env)
     result = UnsyncedCount(root=str(root))
     if not root.is_dir() or not reports_sync_state(root, env):
         result.readable = False

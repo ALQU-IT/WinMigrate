@@ -2386,6 +2386,7 @@ def test_the_page_follows_the_elevated_helper_and_names_what_did_not_install(
 
     monkeypatch.setattr(elevate, "is_windows", lambda: True)
     monkeypatch.setattr(elevate, "is_elevated", lambda: False)
+    monkeypatch.setattr(elevate, "_elevation_type", lambda: 1)  # a standard account
     wizard = _finished_restore(monkeypatch, bundle, tmp_path)
     _with_software(wizard, tmp_path, ["A.A", "B.B", "C.C"])
     results: dict[str, Path] = {}
@@ -2423,6 +2424,8 @@ def test_the_page_follows_the_elevated_helper_and_names_what_did_not_install(
     assert "B.B: the disk is full" in text
     # Over-the-shoulder elevation installs per-user programs for the admin.
     assert "administrator account" in text
+    # One did not install, so the way to try again is on the page.
+    assert wizard.install_again_button._packed
 
 
 def test_nothing_is_restarted_when_everything_was_already_here(
@@ -2512,3 +2515,124 @@ def test_the_window_offers_the_profile_of_the_person_at_the_screen(monkeypatch, 
 
     monkeypatch.setattr(accounts, "desktop_profile", lambda env: None)
     assert app_mod.home_profile() == Path.home()
+
+
+def test_a_refused_prompt_can_be_tried_again_from_the_last_page(
+    monkeypatch, bundle: Path, tmp_path: Path
+):
+    """The last page said "press Install again" and had no Install button: it
+    is the end of the wizard, and Back is off. A mis-clicked No on the Windows
+    prompt meant running the whole restore again to get the programs."""
+    from winmigrate.gui import elevate
+
+    monkeypatch.setattr(elevate, "is_windows", lambda: True)
+    monkeypatch.setattr(elevate, "is_elevated", lambda: False)
+    monkeypatch.setattr(elevate, "_elevation_type", lambda: 3)
+    wizard = _finished_restore(monkeypatch, bundle, tmp_path)
+    _with_software(wizard, tmp_path, ["Mozilla.Firefox"])
+    monkeypatch.setattr(elevate, "start_elevated", lambda executable, arguments: None)
+
+    wizard._show(Step.INSTALLING)
+    assert pump(wizard, until=("installed", "install-failed")) == "installed"
+
+    assert wizard.install_again_button._packed
+    assert "Install again" in wizard.install_again_button.cget("text")
+
+    # Yes this time.
+    def helper(executable, arguments):
+        results = Path(arguments[arguments.index("--results") + 1])
+        results.write_text(
+            json.dumps({"id": "Mozilla.Firefox", "outcome": "installed"}) + "\n",
+            encoding="utf-8",
+        )
+        return 4242
+
+    monkeypatch.setattr(elevate, "start_elevated", helper)
+    monkeypatch.setattr(elevate, "wait_for", lambda handle, waiting=None, **k: 0)
+    wizard._show(Step.INSTALLING)
+    assert pump(wizard, until=("installed", "install-failed")) == "installed"
+
+    assert "1 of 1 program(s) installed" in wizard.restore_done_text.cget("text")
+    # Everything is here now, so there is nothing left to offer.
+    assert not wizard.install_again_button._packed
+    # An administrator's own rights were raised, not another account's.
+    assert "administrator account" not in wizard.restore_done_text.cget("text")
+
+
+def test_skipping_the_install_leaves_a_way_to_do_it_after_all(
+    monkeypatch, bundle: Path, tmp_path: Path
+):
+    wizard = _finished_restore(monkeypatch, bundle, tmp_path)
+    _with_software(wizard, tmp_path, ["Mozilla.Firefox"])
+
+    wizard._show(Step.RESTORE_DONE)
+
+    assert wizard.install_again_button._packed
+    assert wizard.install_again_button.cget("text") == "Install my programs now"
+
+    wizard.restore_report.artifacts = None
+    wizard._show(Step.RESTORE_DONE)
+    assert not wizard.install_again_button._packed
+
+
+def test_an_installer_that_stopped_early_is_not_read_as_ninety_failures(
+    monkeypatch, bundle: Path, tmp_path: Path
+):
+    """Its window was closed after one program. "1 of 3 installed" alone leaves
+    the other two looking broken, with no reason and nothing to do about it."""
+    from winmigrate.gui import elevate
+
+    monkeypatch.setattr(elevate, "is_windows", lambda: True)
+    monkeypatch.setattr(elevate, "is_elevated", lambda: False)
+    monkeypatch.setattr(elevate, "_elevation_type", lambda: 3)
+    wizard = _finished_restore(monkeypatch, bundle, tmp_path)
+    _with_software(wizard, tmp_path, ["A.A", "B.B", "C.C"])
+
+    def helper(executable, arguments):
+        results = Path(arguments[arguments.index("--results") + 1])
+        results.write_text(
+            json.dumps({"id": "A.A", "outcome": "installed"}) + "\n", encoding="utf-8"
+        )
+        return 4242
+
+    monkeypatch.setattr(elevate, "start_elevated", helper)
+    monkeypatch.setattr(elevate, "wait_for", lambda handle, waiting=None, **k: 0xC000013A)
+
+    wizard._show(Step.INSTALLING)
+    assert pump(wizard, until=("installed", "install-failed")) == "installed"
+
+    text = wizard.restore_done_text.cget("text")
+    assert "1 of 3 program(s) installed" in text
+    assert "2 were not tried" in text
+    assert wizard.install_again_button._packed
+
+
+def test_winget_missing_for_the_administrator_is_not_called_missing_from_the_machine(
+    monkeypatch, bundle: Path, tmp_path: Path
+):
+    """winget is registered per account. A standard user has it; the
+    administrator whose password they typed may never have signed in here."""
+    from winmigrate.gui import elevate
+
+    monkeypatch.setattr(elevate, "is_windows", lambda: True)
+    monkeypatch.setattr(elevate, "is_elevated", lambda: False)
+    monkeypatch.setattr(elevate, "_elevation_type", lambda: 1)
+    wizard = _finished_restore(monkeypatch, bundle, tmp_path)
+    _with_software(wizard, tmp_path, ["A.A"])
+
+    def helper(executable, arguments):
+        results = Path(arguments[arguments.index("--results") + 1])
+        results.write_text(
+            json.dumps({"id": "A.A", "outcome": "no_winget"}) + "\n", encoding="utf-8"
+        )
+        return 4242
+
+    monkeypatch.setattr(elevate, "start_elevated", helper)
+    monkeypatch.setattr(elevate, "wait_for", lambda handle, waiting=None, **k: 0)
+
+    wizard._show(Step.INSTALLING)
+    assert pump(wizard, until=("installed", "install-failed")) == "installed"
+
+    text = wizard.restore_done_text.cget("text")
+    assert "not set up for the administrator account" in text
+    assert "Microsoft Store" not in text

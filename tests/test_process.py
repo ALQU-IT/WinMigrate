@@ -199,3 +199,44 @@ def test_the_deadline_is_honoured_by_a_silent_program():
 
     assert result.error and "timed out" in result.error
     assert time.monotonic() - began < 15
+
+
+_LEAVES_A_CHILD = (
+    "import subprocess, sys; "
+    "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+    "print('installed', flush=True); sys.exit(7)"
+)
+
+
+def test_a_program_that_leaves_something_running_is_finished_when_it_exits():
+    """An installer that starts the program it just installed hands it the
+    output pipe, and the pipe then stays open for as long as that program
+    runs. The installer has finished; waiting on the pipe made one package
+    cost the whole timeout and then be reported as having timed out."""
+    import time
+
+    lines: list[str] = []
+    began = time.monotonic()
+    result = process.stream(_python(_LEAVES_A_CHILD), lines.append, timeout=25)
+
+    assert result.error is None and result.returncode == 7
+    assert lines == ["installed"]
+    assert time.monotonic() - began < 15
+
+
+def test_the_console_runner_has_no_pipe_for_anything_to_hold():
+    """The administrator window runs winget this way: output goes to the
+    console, and the exit code is the answer, the moment the program exits."""
+    import time
+
+    began = time.monotonic()
+    result = process.run_visible(_python(_LEAVES_A_CHILD), timeout=25)
+
+    assert result.error is None and result.returncode == 7
+    assert time.monotonic() - began < 15
+
+    missing = process.run_visible(["winmigrate-no-such-tool"])
+    assert missing.unavailable
+
+    slow = process.run_visible(_python("import time; time.sleep(60)"), timeout=1)
+    assert slow.error and "timed out" in slow.error

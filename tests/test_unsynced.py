@@ -214,3 +214,33 @@ def test_an_unfinished_count_still_puts_the_folder_in_the_backup(
     item = next(item for item in scan.items if item.id == "files:unsynced:0")
     assert item.action is Action.CAPTURE
     assert "at least" in item.notes[0].message
+
+
+def test_a_second_copy_is_named_after_the_file_not_after_the_first_copy(
+    profile: Path, env: Environment, tmp_path: Path
+):
+    """Something else is already called "budget (from the old PC).xlsx" and is
+    the same size. The backup's copy becomes number 2 -- not "(from the old
+    PC) (from the old PC)"."""
+    onedrive(profile, env)
+    config = ScanConfig(profile_root=profile, include_software=False)
+    bundle = tmp_path / "unsynced.dat"
+    capture_mod.capture(
+        run_scan(config, env),
+        CaptureOptions(output=bundle, passphrase=PASSPHRASE, use_vss=False), config, env,
+    )
+    destination = tmp_path / "new"
+    write(destination, "OneDrive/Documents/budget.xlsx", 400)
+    squatter = destination / "OneDrive" / "Documents" / "budget (from the old PC).xlsx"
+    squatter.write_bytes(b"z" * 900)
+
+    restore_mod.restore(
+        RestoreOptions(bundle=bundle, passphrase=PASSPHRASE, destination=destination)
+    )
+
+    names = sorted(p.name for p in squatter.parent.iterdir() if p.is_file())
+    assert names == [
+        "budget (from the old PC 2).xlsx", "budget (from the old PC).xlsx", "budget.xlsx",
+    ]
+    assert squatter.read_bytes() == b"z" * 900
+    assert squatter.with_name("budget (from the old PC 2).xlsx").read_bytes() == b"x" * 900

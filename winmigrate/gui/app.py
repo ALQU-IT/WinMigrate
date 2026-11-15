@@ -1018,6 +1018,13 @@ class WinMigrateWizard:
         self.reinstall_button = ttk.Button(
             page, text="Open the reinstall folder…", command=self._open_reinstall_folder
         )
+        # The way back to the install. This page is the end of the wizard and
+        # Back is off -- a restore cannot be undone by a button -- so without
+        # this, "press Install again" named a button nobody could reach, and a
+        # mis-clicked No on the Windows prompt meant restoring all over again.
+        self.install_again_button = ttk.Button(
+            page, text="", command=lambda: self._show(Step.INSTALLING)
+        )
         self.followup_box, self.followup_holder = self._text_box(page, height=10, wrap="word")
 
     def _page_welcome(self, page: Any) -> None:
@@ -2901,6 +2908,21 @@ class WinMigrateWizard:
         run = self.install_result
         if run is None:
             return []
+        # A standard account's "Yes" runs the installer as the administrator
+        # whose password was typed, which changes what two of these lines mean.
+        as_another = not self._can_install_programs() and elevate.elevation_switches_account()
+        if run.unavailable and as_another:
+            # winget is registered per account. It can be working for the
+            # person at the screen and missing for an administrator who has
+            # never signed in here -- "not on this machine" would send them to
+            # install something they already have.
+            return [
+                "",
+                "Software: nothing was installed \u2014 winget is not set up for the "
+                "administrator account whose password was typed. Sign in to that "
+                "account once so Windows sets it up, then press Install again; or "
+                "run the command below from that account.",
+            ]
         if run.unavailable:
             return [
                 "",
@@ -2939,6 +2961,14 @@ class WinMigrateWizard:
                     "  You stopped watching; the install carries on in its own "
                     "window \u2014 close that window to stop it."
                 )
+        elif untried:
+            # The installer ended before the end of its list -- its window was
+            # closed, or it failed. Saying only "12 of 97 installed" would
+            # leave the other 85 looking like failures with no reason.
+            lines.append(
+                f"  {untried} were not tried: the installer stopped early. "
+                "Press Install again \u2014 what is already here is skipped."
+            )
         for result in run.results:
             if result.outcome == "installed" and result.detail:
                 lines.append(f"  {result.identifier}: {result.detail}")
@@ -2946,7 +2976,7 @@ class WinMigrateWizard:
             lines.append(f"  Not installed ({len(missed)}) \u2014 these need doing by hand:")
             for result in missed:
                 lines.append(f"  \u26a0 {result.identifier}: {result.detail or 'failed'}")
-        if installed and not self._can_install_programs():
+        if installed and as_another:
             # Over-the-shoulder elevation runs as the administrator account, and
             # a program that installs per user lands in *that* profile.
             lines.append(
@@ -2955,6 +2985,29 @@ class WinMigrateWizard:
                 "again from your own account."
             )
         return lines
+
+    def _install_again_label(self) -> str:
+        """What the finished page's install button says, or "" for no button.
+
+        Offered whenever there are programs the restore prepared that are not
+        all here: the install was skipped, refused, stopped, could not start,
+        or left some out. Not after one that brought everything -- a button
+        that would do nothing is a question nobody needs asking.
+        """
+        report = self.restore_report
+        if report is None or getattr(report, "dry_run", False):
+            return ""
+        if self._software_to_install() is None:
+            return ""
+        run = self.install_result
+        if run is None:
+            return "Install my programs now"
+        unfinished = (
+            run.error
+            or run.total > len(run.results)
+            or any(not result.present for result in run.results)
+        )
+        return "Install again \u2014 what is already here is skipped" if unfinished else ""
 
     def _settle_after_install(self) -> None:
         """Finish the jobs that could not be done before the software existed.
@@ -3130,6 +3183,14 @@ class WinMigrateWizard:
             )
         else:
             self.reinstall_button.pack_forget()
+        again = self._install_again_label()
+        if again:
+            self.install_again_button.configure(text=again)
+            self.install_again_button.pack(
+                anchor="w", pady=(0, 10), before=self.followup_holder
+            )
+        else:
+            self.install_again_button.pack_forget()
 
         self.followup_box.configure(state="normal")
         self.followup_box.delete("1.0", "end")

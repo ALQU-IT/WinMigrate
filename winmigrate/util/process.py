@@ -162,6 +162,37 @@ def spawn(command: list[str]) -> str | None:
     return None
 
 
+#: How long after a program exits its output is still waited for. Long enough
+#: for the last lines to arrive, short enough not to be noticed.
+EXIT_GRACE_SECONDS = 1.0
+
+
+def run_visible(command: list[str], timeout: int = DEFAULT_TIMEOUT) -> CommandResult:
+    """Run a command in this console, showing its output rather than capturing it.
+
+    For a long job somebody is watching -- a ``winget install`` in the
+    administrator window. Its progress is the thing they are there to see, and
+    there are no pipes: nothing for an installer's children to inherit and
+    hold open, which is what makes :func:`run` unsafe for an installer (see
+    :func:`spawn`). The exit code is the whole answer.
+    """
+    log.debug("running in the console: %s", " ".join(command))
+    try:
+        process = subprocess.Popen(command, stdin=subprocess.DEVNULL)  # noqa: S603
+    except FileNotFoundError:
+        return CommandResult(command, None, error=f"{command[0]} not found on this machine")
+    except (PermissionError, OSError) as exc:
+        return CommandResult(command, None, error=f"{command[0]} could not be run: {exc}")
+    try:
+        return CommandResult(command, process.wait(timeout=timeout))
+    except subprocess.TimeoutExpired:
+        _end(process)
+        return CommandResult(command, None, error=f"{command[0]} timed out after {timeout}s")
+    except KeyboardInterrupt:
+        _end(process)
+        raise
+
+
 def stream(
     command: list[str],
     on_line,
@@ -248,12 +279,27 @@ def stream(
 
     timed_out = False
     ended = False
+    quiet_since_exit: float | None = None
     try:
         while not ended:
             try:
                 chunk = chunks.get(timeout=0.2)
             except queue.Empty:
                 chunk = b""
+            if chunk:
+                quiet_since_exit = None
+            elif chunk is not None and process.poll() is not None:
+                # It has exited and its pipe is still open: something it
+                # started -- an installer that launches the program it just
+                # installed -- inherited the pipe and is holding it. The
+                # program this was asked to run is finished, and waiting for a
+                # stranger to close a pipe is how one package cost the full
+                # timeout and was then reported as having timed out.
+                now = time.monotonic()
+                if quiet_since_exit is None:
+                    quiet_since_exit = now
+                elif now - quiet_since_exit >= EXIT_GRACE_SECONDS:
+                    ended = True
             if chunk is None:
                 ended = True
             elif chunk:

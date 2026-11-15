@@ -501,22 +501,27 @@ def _apply_settings(report: RestoreReport, destination: Path, wanted: tuple[str,
         _note_other_account(report, env)
 
     try:
-        report.applied.extend(apply_mod.apply_wifi(destination / WIFI_RESTORE_DIR))
-        # Printers and network drives are connected for whoever runs the
-        # command, and there is no way to connect them on someone else's
-        # behalf. Connecting them for the administrator would put them in the
+        # Wi-Fi networks, printers and network drives are added for whoever
+        # runs the command, and there is no way to add them on someone else's
+        # behalf. Adding them for the administrator would put them in the
         # wrong account and report them as done.
-        for record_id, kind, what in (
-            ("settings:printers", "printer", "printers"),
-            ("settings:mapped_drives", "drive", "network drives"),
-        ):
-            if other and record_id in records:
-                report.applied.append(apply_mod.Result(
-                    kind, what, apply_mod.Outcome.SKIPPED,
-                    "these connect for the account running WinMigrate, which is not "
-                    "the one being restored; run the restore again from that account "
-                    "without administrator rights to connect them",
-                ))
+        wifi_dir = destination / WIFI_RESTORE_DIR
+        left_for_owner = [
+            (kind, what) for present, kind, what in (
+                (wifi_dir.is_dir() and any(wifi_dir.glob("*.xml")), "wifi", "Wi-Fi networks"),
+                ("settings:printers" in records, "printer", "printers"),
+                ("settings:mapped_drives" in records, "drive", "network drives"),
+            ) if other and present
+        ]
+        for kind, what in left_for_owner:
+            report.applied.append(apply_mod.Result(
+                kind, what, apply_mod.Outcome.SKIPPED,
+                "these are added for the account running WinMigrate, which is not "
+                "the one being restored; run the restore again from that account "
+                "without administrator rights to add them",
+            ))
+        if not other:
+            report.applied.extend(apply_mod.apply_wifi(wifi_dir))
         if "settings:printers" in records and not other:
             report.applied.extend(apply_mod.apply_printers(records["settings:printers"]))
         if "settings:mapped_drives" in records and not other:
@@ -600,10 +605,16 @@ def settings_environment(destination: Path):
     from .platform_win import Environment  # noqa: PLC0415
 
     try:
-        return accounts.for_profile(destination)
+        env = accounts.for_profile(destination)
     except Exception:  # noqa: BLE001 -- never let this cost the settings
         log.warning("could not tell whose profile %s is", destination, exc_info=True)
         return Environment.live()
+    # Only somebody else's profile moves anything. A restore into a folder
+    # that is nobody's profile -- D:\Restored -- still writes its settings to
+    # this account, and has to be judged against this account's real folders:
+    # an environment rooted at the destination would say the taskbar's
+    # shortcuts are exactly where Explorer looks, whatever the destination.
+    return env if env.other_account else Environment.live()
 
 
 def _note_other_account(report: RestoreReport, env) -> None:
@@ -622,12 +633,26 @@ def _note_other_account(report: RestoreReport, env) -> None:
         f"WinMigrate ran as a different account from the owner of "
         f"{report.destination}. Their settings were written to their own account, "
         "and some -- the background, the taskbar -- show only after they sign out "
-        "and back in. Printers and network drives were left for them.",
+        "and back in. Wi-Fi networks, printers and network drives were left for them.",
     ))
 
 
 def _default_profile() -> Path:
-    return Path(os.environ.get("USERPROFILE") or os.path.expanduser("~"))
+    """Where a restore goes when it was not told: the profile of the person here.
+
+    Which is not this process's own when it was started "as administrator"
+    from a standard account -- see :mod:`winmigrate.accounts`. The window asks
+    the same question for the folder it offers.
+    """
+    own = Path(os.environ.get("USERPROFILE") or os.path.expanduser("~"))
+    try:
+        from . import accounts  # noqa: PLC0415
+        from .platform_win import Environment  # noqa: PLC0415
+
+        other = accounts.desktop_profile(Environment.live())
+    except Exception:  # noqa: BLE001 -- not knowing leaves it as it was
+        return own
+    return other if other is not None and other.is_dir() else own
 
 
 def _load_manifest(stream) -> dict:
@@ -659,6 +684,9 @@ def _restore_member(info, stream, destination: Path, options: RestoreOptions,
     keep_both = _is_unsynced(info.name) and not options.overwrite
     existing = _existing_state(target, info.size)
     beside_of: str | None = None
+    # The name the file has in the folder, whichever copy ``target`` becomes:
+    # a second copy is named after this, never after the first copy.
+    named = target
     if existing == "differs" and keep_both:
         beside_of = target.name
         target = _beside(target, info.size)
@@ -706,7 +734,7 @@ def _restore_member(info, stream, destination: Path, options: RestoreOptions,
             written[info.name] = digest.hexdigest()
             return
         if compare is not None and keep_both:
-            beside = _beside(target, info.size, digest.hexdigest())
+            beside = _beside(named, info.size, digest.hexdigest())
             if _same_contents(beside, digest.hexdigest()):
                 # A previous run already put this copy beside it.
                 temporary.unlink(missing_ok=True)
@@ -714,7 +742,7 @@ def _restore_member(info, stream, destination: Path, options: RestoreOptions,
                 written[info.name] = digest.hexdigest()
                 return
             os.replace(pathutil.extended(temporary), pathutil.extended(beside))
-            _note_kept_both(report, target.name, beside)
+            _note_kept_both(report, named.name, beside)
             written[info.name] = digest.hexdigest()
             report.restored_files += 1
             report.restored_bytes += info.size

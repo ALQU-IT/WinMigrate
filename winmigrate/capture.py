@@ -37,7 +37,7 @@ from . import crypto, keepawake, manifest as manifest_mod, vss
 from .config import ScanConfig
 from .errors import WinMigrateError
 from .models import Action, Item, Kind, Note, ScanResult, Severity, utcnow
-from .platform_win import Environment
+from .platform_win import Environment, expose_cloud_placeholders
 from .scan import CaptureFile, walk_tree
 from .util import hashing
 from .util import paths as pathutil
@@ -116,6 +116,9 @@ def capture(
 ) -> CaptureReport:
     """Write the planned items into an encrypted bundle."""
     started = time.monotonic()
+    # The capture may run in a different process from the scan it was planned
+    # by, and has to see sync folders the way the scan did.
+    expose_cloud_placeholders(env)
     output = Path(os.fspath(options.output))
     if output.suffix != ".dat":
         output = output.with_suffix(".dat")

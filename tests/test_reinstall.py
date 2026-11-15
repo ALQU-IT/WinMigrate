@@ -801,7 +801,7 @@ def test_the_window_helper_reports_each_package_and_leaves_login_programs_alone(
 
     monkeypatch.setattr(reinstall, "install_flags", lambda runner=None: ())
     monkeypatch.setattr(
-        reinstall.process, "run",
+        reinstall.process, "run_visible",
         lambda command, timeout=0: CommandResult(
             command, 0x8A150105 if "B.B" in command else 0, ""
         ),
